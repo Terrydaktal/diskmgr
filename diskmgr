@@ -563,31 +563,43 @@ class DiskMgrShell(cmd.Cmd):
         devnode = os.path.realpath(src)
         
         # Check LUKS
+        is_luks = False
         try:
             run_command(['sudo', 'cryptsetup', 'isLuks', devnode])
+            is_luks = True
         except subprocess.CalledProcessError:
-             log(f"Device {devnode} is not a valid LUKS device.", 'ERROR')
-             return
+             # Not LUKS, check if it has a filesystem
+             res = run_command(['lsblk', '-n', '-o', 'FSTYPE', devnode], check=False)
+             if not res.stdout.strip():
+                 log(f"Device {devnode} is not a valid LUKS device and has no recognizable filesystem.", 'ERROR')
+                 return
+             log(f"Device {devnode} is not LUKS, but has a filesystem. Proceeding with plain mount.")
 
         mapper_path = f"/dev/mapper/{name}"
-        if not os.path.exists(mapper_path):
-            log(f"Opening LUKS mapping {name}...")
-            # Use passgen
-            pg_cmd = subprocess.Popen([PASSGEN_BIN], stdout=subprocess.PIPE, text=True)
-            # Pipe to cryptsetup
-            try:
-                run_command(
-                    ['cryptsetup', 'open', '--key-file', '-', src, name],
-                    input_str=pg_cmd.communicate()[0],
-                    sudo=True,
-                    check=True
-                )
-                log("LUKS opened.")
-            except Exception as e:
-                log(f"Failed to open LUKS: {e}", 'ERROR')
-                return
+        target_to_mount = mapper_path
+
+        if is_luks:
+            if not os.path.exists(mapper_path):
+                log(f"Opening LUKS mapping {name}...")
+                # Use passgen
+                pg_cmd = subprocess.Popen([PASSGEN_BIN], stdout=subprocess.PIPE, text=True)
+                # Pipe to cryptsetup
+                try:
+                    run_command(
+                        ['cryptsetup', 'open', '--key-file', '-', src, name],
+                        input_str=pg_cmd.communicate()[0],
+                        sudo=True,
+                        check=True
+                    )
+                    log("LUKS opened.")
+                except Exception as e:
+                    log(f"Failed to open LUKS: {e}", 'ERROR')
+                    return
+            else:
+                log("Mapping already exists.")
         else:
-            log("Mapping already exists.")
+            # Plain disk
+            target_to_mount = devnode
 
         # Mount
         mountpoint = f"/media/{os.environ.get('USER', 'root')}/{name}"
@@ -595,10 +607,10 @@ class DiskMgrShell(cmd.Cmd):
             run_command(['mkdir', '-p', mountpoint], sudo=True)
             
         # Check if mounted
-        res = run_command(['findmnt', '-rn', '-S', mapper_path], check=False)
+        res = run_command(['findmnt', '-rn', '-S', target_to_mount], check=False)
         if res.returncode != 0:
-            log(f"Mounting to {mountpoint}...")
-            run_command(['mount', mapper_path, mountpoint], sudo=True)
+            log(f"Mounting {target_to_mount} to {mountpoint}...")
+            run_command(['mount', target_to_mount, mountpoint], sudo=True)
             log("Mounted.")
         else:
             log("Already mounted.")
@@ -616,15 +628,33 @@ class DiskMgrShell(cmd.Cmd):
         run_command(['sudo', '-v']) # Refresh sudo
 
         # Unmount
-        # Check by mapper
+        unmounted = False
+        # 1. Try by mapper
         res = run_command(['findmnt', '-rn', '-S', mapper_path, '-o', 'TARGET'], check=False)
         if res.returncode == 0 and res.stdout.strip():
             mp = res.stdout.strip()
             log(f"Unmounting {mp}...")
             run_command(['umount', mp], sudo=True)
-        elif run_command(['findmnt', '-rn', '-M', mount_guess], check=False).returncode == 0:
-             log(f"Unmounting {mount_guess}...")
-             run_command(['umount', mount_guess], sudo=True)
+            unmounted = True
+        
+        # 2. Try by source path (for non-LUKS)
+        if not unmounted:
+            self.mappings = read_luks_map()
+            if name in self.mappings:
+                src = self.mappings[name]
+                res = run_command(['findmnt', '-rn', '-S', src, '-o', 'TARGET'], check=False)
+                if res.returncode == 0 and res.stdout.strip():
+                    mp = res.stdout.strip()
+                    log(f"Unmounting {mp}...")
+                    run_command(['umount', mp], sudo=True)
+                    unmounted = True
+
+        # 3. Try by guess
+        if not unmounted:
+            if run_command(['findmnt', '-rn', '-M', mount_guess], check=False).returncode == 0:
+                 log(f"Unmounting {mount_guess}...")
+                 run_command(['umount', mount_guess], sudo=True)
+                 unmounted = True
         
         # Close
         if os.path.exists(mapper_path):

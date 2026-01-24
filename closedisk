@@ -1,0 +1,159 @@
+#!/usr/bin/env bash
+# closedisk <diskno>
+# Unmounts /dev/mapper/<diskno> if mounted, closes the mapping if present,
+# then prints what /dev/mapper mappings remain open (excluding control).
+
+set -euo pipefail
+
+show_help() {
+  cat << EOF
+closedisk - A utility script to safely unmount and close encrypted disk mappings.
+
+Description:
+  closedisk simplifies the process of closing an encrypted volume.
+  It performs the following steps:
+
+  1. Unmounts the volume
+     - Integrity: This is the most critical step for data health. It forces the
+       operating system to flush all pending writes (data in cache) to the disk
+       and closes open file handles. Skipping this could result in a corrupted
+       filesystem or "ghost" files that weren't fully saved.
+     - Security: It removes the entry point into your data. While the disk is
+       mounted, any process with appropriate permissions (or a compromised user
+       session) can read the decrypted files. Unmounting terminates this access.
+       It checks for mounts associated with the mapper device or a guessed
+       mount point at /media/\$USER/<diskname>.
+
+  2. Close the cryptsetup mapping
+     - Security: This is the "lock" command. It instructs the kernel to wipe
+       the encryption keys from RAM. As long as the mapping is open, the key
+       resides in system memory to perform real-time decryption. Closing the
+       mapping ensures that even if an attacker gains root access later, they
+       cannot read the data without the original passphrase.
+     - Integrity: It removes the virtual block device (/dev/mapper/name),
+       ensuring no further I/O operations can be attempted against the device,
+       preventing accidental writes to a disappearing target.
+
+  3. List remaining open mappings
+     - Security Audit: This provides situational awareness. It prevents
+       "security by assumption"—where a user assumes their system is clean but
+       has actually left other sensitive volumes mapped and vulnerable.
+     - Integrity: It allows the user to verify that the command actually
+       succeeded and that no "zombie" mappings (mappings that exist but aren't
+       functioning correctly) remain in the device-mapper table.
+
+Usage:
+  closedisk <diskname>
+  closedisk -h | --help
+
+Example:
+  closedisk 1a
+
+Requirements:
+  - bash
+  - sudo privileges
+  - cryptsetup
+  - util-linux (for findmnt and lsblk)
+
+Installation:
+  Ensure the script is executable: chmod +x closedisk
+  You may want to move it to a directory in your PATH, such as /usr/local/bin/.
+EOF
+}
+
+name="${1:-}"
+if [[ "$name" == "-h" || "$name" == "--help" ]]; then
+  show_help
+  exit 0
+fi
+
+if [[ -z "$name" ]]; then
+  echo "Usage: closedisk <diskname> (e.g., closedisk 1a)" >&2
+  echo "Run 'closedisk --help' for more information." >&2
+  exit 2
+fi
+
+mapper="/dev/mapper/$name"
+mnt_guess="/media/$USER/$name"
+
+sudo -v
+
+# --- Unmount (only if actually mounted) ---
+unmounted=0
+if findmnt -rn -S "$mapper" >/dev/null 2>&1; then
+  mp="$(findmnt -rn -S "$mapper" -o TARGET)"
+  sudo umount "$mp" || true
+  echo "Unmounted mapper."
+  unmounted=1
+fi
+
+if [[ "$unmounted" -eq 0 ]]; then
+  # Try by source path from mapfile (for non-LUKS)
+  # Resolve script dir for mapfile
+  resolve_self() {
+    local src="$1"
+    while [[ -L "$src" ]]; do
+      local dir
+      dir="$(cd -- "$(dirname -- "$src")" && pwd)"
+      src="$(readlink -- "$src")"
+      [[ "$src" != /* ]] && src="$dir/$src"
+    done
+    echo "$src"
+  }
+  self_real="$(resolve_self "${BASH_SOURCE[0]}")"
+  script_dir="$(cd -- "$(dirname -- "$self_real")" && pwd)"
+  mapfile="$script_dir/luksmap.tsv"
+
+  if [[ -f "$mapfile" ]]; then
+    src="$(awk -v n="$name" '$1==n {print $2; exit}' "$mapfile")"
+    if [[ -n "$src" ]] && findmnt -rn -S "$src" >/dev/null 2>&1; then
+      mp="$(findmnt -rn -S "$src" -o TARGET)"
+      sudo umount "$mp" || true
+      echo "Unmounted source device."
+      unmounted=1
+    fi
+  fi
+fi
+
+if [[ "$unmounted" -eq 0 ]] && findmnt -rn -M "$mnt_guess" >/dev/null 2>&1; then
+  sudo umount "$mnt_guess" || true
+  echo "Unmounted mountpoint guess."
+  unmounted=1
+fi
+
+if [[ "$unmounted" -eq 0 ]]; then
+  echo "Already unmounted."
+fi
+
+# --- Close mapping (only if present) ---
+if [[ -e "$mapper" ]]; then
+  sudo cryptsetup close "$name" || true
+  echo "Closed."
+else
+  echo "Already closed."
+fi
+
+# --- List remaining open mappings ---
+mapfile -t maps < <(ls -1 /dev/mapper 2>/dev/null | grep -v '^control$' || true)
+
+if [[ "${#maps[@]}" -eq 0 ]]; then
+  echo "No disks open."
+  exit 0
+fi
+
+echo "Disks still open:"
+for m in "${maps[@]}"; do
+  path="/dev/mapper/$m"
+
+  mp="$(findmnt -rn -S "$path" -o TARGET 2>/dev/null || true)"
+  if [[ -n "$mp" ]]; then
+    mp="mounted:$mp"
+  else
+    mp="not-mounted"
+  fi
+
+  size="$(lsblk -ndo SIZE "$path" 2>/dev/null || true)"
+  [[ -n "$size" ]] || size="?"
+
+  echo "$m  size:$size  $mp"
+done

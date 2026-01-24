@@ -1,0 +1,300 @@
+#!/usr/bin/env bash
+# opendisk <diskno>
+# Opens a LUKS device by friendly name (e.g. 1a) using luksmap.tsv stored next to the *real* script file
+# (works even when invoked via symlink), derives the key via passgen, opens the mapping, then mounts it.
+
+set -euo pipefail
+
+if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+  echo "opendisk: do not source this script; run it as a command: opendisk <diskno>" >&2
+  return 2 2>/dev/null || exit 2
+fi
+
+log() { echo "opendisk: $*" >&2; }
+die() { log "ERROR: $*"; exit 1; }
+
+usage() {
+  cat <<EOF
+NAME
+    opendisk - manage and open LUKS-encrypted disks using persistent identifiers
+
+SYNOPSIS
+    opendisk [options] <diskno>
+    opendisk --list
+    opendisk --map <pdp_or_index> <name>
+
+DESCRIPTION
+    opendisk is a utility designed to simplify the management of encrypted 
+    removable media. It maps friendly labels (e.g., '1a') to hardware-specific 
+    Persistent Device Paths (PDP), ensuring that disks can be opened and 
+    mounted reliably even if their device nodes (like /dev/sdb) change 
+    between reboots or ports.
+
+OPTIONS
+    -l, --list
+        List all configured mappings and their current status (MISSING, 
+        PRESENT, OPEN, MOUNTED). Also identifies unmapped system disks 
+        and assigns them discovery indices (e.g., [U1]).
+
+    -m, --map <pdp_or_index> <name>
+        Create a new persistent mapping or rename an existing one. 
+        You can provide a full path (/dev/disk/by-id/...), a discovery 
+        index for unmapped disks (e.g., U1), or an existing mapping 
+        index (e.g., 1) to RENAME it.
+
+    -h, --help
+        Display this help documentation.
+
+OPERATION
+    When opening a disk (<diskno>), the tool performs the following steps:
+    1.  Identity Resolution: Looks up the label in luksmap.tsv.
+    2.  Hardware Wait: Waits up to 10s for the persistent path to appear.
+    3.  LUKS Validation: Verifies the device via 'cryptsetup isLuks'.
+    4.  Decryption: Generates a key via 'passgen' and opens the device 
+        using 'cryptsetup open'. This creates /dev/mapper/<diskno>.
+    5.  Mounting: Creates /media/\$USER/<diskno> and mounts the cleartext 
+        device there.
+
+EXAMPLES
+    opendisk -l              # List all disks and their status
+    opendisk --map U1 1c     # Map the first unmapped disk to label '1c'
+    opendisk --map 1 1new    # Rename the first mapping to '1new'
+    opendisk 1c              # Decrypt and mount disk '1c'
+
+FILES
+    luksmap.tsv
+        Stored in the same directory as the script. Contains the 
+        tab-separated mappings of labels to persistent device paths.
+
+PATHS
+    /dev/mapper/<name>       # Virtual cleartext device
+    /media/\$USER/<name>      # Default mountpoint
+
+SECURITY NOTES
+    - This tool requires 'sudo' privileges for LUKS and mount operations.
+    - Decryption keys are generated on-the-fly by 'passgen'. Ensure 
+      'passgen' is secured and properly configured.
+    - The mapping file (luksmap.tsv) should be protected from 
+      unauthorized write access.
+
+EXIT STATUS
+    0   Success.
+    1   Operation error (e.g., hardware missing, LUKS validation failed).
+    2   Usage error (e.g., invalid arguments).
+
+AUTHORS
+    Terrydaktal <9lewis9@gmail.com>
+EOF
+}
+
+[[ "${1:-}" == "-h" || "${1:-}" == "--help" ]] && { usage; exit 0; }
+
+resolve_self() {
+  local src="$1"
+  while [[ -L "$src" ]]; do
+    local dir
+    dir="$(cd -- "$(dirname -- "$src")" && pwd)"
+    src="$(readlink -- "$src")"
+    [[ "$src" != /* ]] && src="$dir/$src"
+  done
+  echo "$src"
+}
+
+self_real="$(resolve_self "${BASH_SOURCE[0]}")"
+script_dir="$(cd -- "$(dirname -- "$self_real")" && pwd)"
+mapfile="$script_dir/luksmap.tsv"
+
+[[ -f "$mapfile" ]] || touch "$mapfile"
+
+get_unmapped_disks() {
+  # This function helps share logic between --list and --map index resolution
+  declare -A mapped_devs
+  while read -r m_name m_src || [[ -n "$m_name" ]]; do
+    [[ -n "$m_name" && "$m_name" != "#"* ]] || continue
+    if [[ -e "$m_src" ]]; then
+      mapped_devs["$(readlink -f "$m_src")"]="$m_name"
+    fi
+  done < "$mapfile"
+
+  lsblk -e 7 -Pn -o KNAME,FSTYPE,SIZE,LABEL,MOUNTPOINT,TYPE,WWN | while read -r line; do
+    [[ -z "$line" ]] && continue
+    KNAME=""; FSTYPE=""; SIZE=""; LABEL=""; MOUNTPOINT=""; TYPE=""; WWN=""
+    eval "$line"
+    real_path="/dev/$KNAME"
+    [[ -n "${mapped_devs["$real_path"]:-}" ]] && continue
+    [[ "$KNAME" == dm-* || "$KNAME" == loop* ]] && continue
+    
+    persistent_path="-"
+    if [[ -n "$WWN" ]]; then
+      if [[ "$WWN" == eui.* ]]; then
+          persistent_path="/dev/disk/by-id/nvme-$WWN"
+      else
+          persistent_path="/dev/disk/by-id/wwn-$WWN"
+      fi
+      if [[ "$TYPE" == "part" ]]; then
+        part_num=$(echo "$KNAME" | grep -oE '[0-9]+$')
+        persistent_path="${persistent_path}-part${part_num}"
+      fi
+    fi
+    
+    echo "$real_path|$FSTYPE|$persistent_path|$SIZE|$LABEL|$MOUNTPOINT"
+  done
+}
+
+if [[ "${1:-}" == "-l" || "${1:-}" == "--list" ]]; then
+  echo "--- Configured LUKS Mappings ($mapfile) ---"
+  printf "%-5s %-10s %-12s %-65s %s\n" "#" "NAME" "STATUS" "PERSISTENT DEVICE PATH" "MOUNTPOINT"
+  echo "------------------------------------------------------------------------------------------------------------------------------------------------"
+  i=1
+  declare -A mapped_devs
+  while read -r m_name m_src || [[ -n "$m_name" ]]; do
+    [[ -n "$m_name" && "$m_name" != "#"* ]] || continue
+    m_status="MISSING"
+    m_mnt=""
+    m_path="$m_src"
+    if [[ -e "$m_src" ]]; then
+      real_path=$(readlink -f "$m_src")
+      mapped_devs["$real_path"]="$m_name"
+      m_fstype=$(lsblk -no FSTYPE "$m_src" | head -n1)
+      if [[ "$m_fstype" == "crypto_LUKS" ]]; then
+        m_status="PRESENT"
+        if [[ -e "/dev/mapper/$m_name" ]]; then
+          m_status="OPEN"
+          m_mnt=$(findmnt -rn -S "/dev/mapper/$m_name" -o TARGET || true)
+          [[ -n "$m_mnt" ]] && m_status="MOUNTED"
+        fi
+      else
+        m_status="NOT_LUKS"
+      fi
+    fi
+    printf "%-5s %-10s %-12s %-65s %s\n" "[$i]" "$m_name" "$m_status" "$m_path" "$m_mnt"
+    ((i++))
+  done < "$mapfile"
+  
+  echo
+  echo "--- Other System Disks (Unmapped) ---"
+  printf "%-5s %-15s %-12s %-65s %-10s %-15s %s\n" "#" "DEVICE" "TYPE" "PERSISTENT DEVICE PATH" "SIZE" "LABEL" "MOUNTPOINT"
+  echo "------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------"
+  j=1
+  while IFS='|' read -r dev fstype pdp size label mnt; do
+    display_type="$fstype"
+    [[ "$fstype" == "crypto_LUKS" ]] && display_type="LUKS"
+    [[ -z "$display_type" ]] && display_type="-"
+    printf "%-5s %-15s %-12s %-65s %-10s %-15s %s\n" "[U$j]" "$dev" "$display_type" "$pdp" "$size" "$label" "$mnt"
+    ((j++))
+  done < <(get_unmapped_disks)
+  exit 0
+fi
+
+if [[ "${1:-}" == "-m" || "${1:-}" == "--map" ]]; then
+  target_pdp="${2:-}"
+  target_name="${3:-}"
+  [[ -n "$target_pdp" && -n "$target_name" ]] || { log "Usage: opendisk --map <pdp_or_index> <name>"; exit 2; }
+
+  # Resolve Uindex (Unmapped) if provided
+  if [[ "$target_pdp" =~ ^U([0-9]+)$ ]]; then
+    idx="${BASH_REMATCH[1]}"
+    log "Resolving unmapped disk index U$idx..."
+    resolved_pdp=$(get_unmapped_disks | sed -n "${idx}p" | cut -d'|' -f3)
+    if [[ -z "$resolved_pdp" || "$resolved_pdp" == "-" ]]; then
+        die "Could not resolve unmapped disk index U$idx to a persistent path."
+    fi
+    target_pdp="$resolved_pdp"
+  # Resolve numeric index (Already mapped) if provided - this triggers a RENAME
+  elif [[ "$target_pdp" =~ ^([0-9]+)$ ]]; then
+    idx="${BASH_REMATCH[1]}"
+    log "Resolving mapped disk index [$idx] for rename..."
+    # Get the line content
+    line_info=$(grep -vE '^\s*(#|$)' "$mapfile" | sed -n "${idx}p")
+    if [[ -z "$line_info" ]]; then
+        die "Could not resolve mapped disk index [$idx] in $mapfile."
+    fi
+    old_name=$(echo "$line_info" | awk '{print $1}')
+    target_pdp=$(echo "$line_info" | awk '{print $2}')
+    
+    # Remove the old mapping
+    sed -i "/^$old_name[[:space:]]/d" "$mapfile"
+    log "Removed old mapping: $old_name"
+  fi
+
+  [[ "$target_pdp" == /dev/disk/by-id/* ]] || log "WARNING: Path does not start with /dev/disk/by-id/. Mapping might not be persistent."
+
+  if grep -q "^$target_name[[:space:]]" "$mapfile"; then
+    die "Friendly name '$target_name' is already in use in $mapfile"
+  fi
+
+  echo -e "$target_name\t$target_pdp" >> "$mapfile"
+  log "Added mapping: $target_name -> $target_pdp"
+  exit 0
+fi
+
+name="${1:-}"
+[[ -n "$name" ]] || { usage; exit 2; }
+
+src="$(awk -v n="$name" '$1==n {print $2; exit}' "$mapfile")"
+if [[ -z "${src:-}" ]]; then
+  die "Disk '$name' is not in the mapping table ($mapfile). Add a line like:  $name<TAB>/dev/disk/by-id/... "
+fi
+
+# Wait for udev to create the by-id node after plug-in (up to 10s)
+for _ in {1..50}; do
+  [[ -e "$src" ]] && break
+  sleep 0.2
+done
+
+if [[ ! -e "$src" ]]; then
+  die "Disk '$name' is not detected (not plugged in, wrong port/enclosure, or udev not finished). Expected path: $src"
+fi
+
+devnode="$(readlink -f "$src" 2>/dev/null || true)"
+[[ -n "$devnode" && -b "$devnode" ]] || die "Disk '$name' resolved path is not a block device: $src -> ${devnode:-'(empty)'}"
+
+is_luks=1
+if ! sudo cryptsetup isLuks "$devnode" >/dev/null 2>&1; then
+  fstype=$(lsblk -no FSTYPE "$devnode" | head -n1)
+  if [[ -n "$fstype" ]]; then
+    log "Device $devnode is not LUKS, but has fstype=$fstype. Proceeding with plain mount."
+    is_luks=0
+  else
+    die "Disk '$name' is present but is not a LUKS device and has no recognizable filesystem: $devnode"
+  fi
+fi
+
+log "Using mapfile: $mapfile"
+log "Resolved: $name -> $src -> $devnode"
+
+log "Authenticating sudo..."
+sudo -v
+
+target_to_mount=""
+if [[ "$is_luks" -eq 1 ]]; then
+  PASSGEN_BIN="$(command -v passgen || true)"
+  [[ -n "$PASSGEN_BIN" ]] || die "passgen not found on PATH"
+  [[ -x "$PASSGEN_BIN" ]] || die "passgen exists but is not executable: $PASSGEN_BIN"
+
+  mapper="/dev/mapper/$name"
+  if [[ -e "$mapper" ]]; then
+    log "Already open: $mapper"
+  else
+    log "Opening mapping: $devnode as $name ..."
+    "$PASSGEN_BIN" | sudo cryptsetup open --key-file - "$src" "$name"
+    log "Opened: $mapper"
+  fi
+  target_to_mount="$mapper"
+else
+  target_to_mount="$devnode"
+fi
+
+mnt="/media/$USER/$name"
+sudo mkdir -p "$mnt"
+
+if findmnt -rn -S "$target_to_mount" >/dev/null 2>&1; then
+  log "Already mounted: $target_to_mount"
+else
+  log "Mounting: $target_to_mount -> $mnt ..."
+  sudo mount "$target_to_mount" "$mnt"
+  log "Mounted: $mnt"
+fi
+
+log "Done."
+exit 0
