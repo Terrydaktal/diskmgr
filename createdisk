@@ -1,20 +1,24 @@
 #!/usr/bin/env bash
-# createdisk <name>              # Uses luksmap.tsv mapping to resolve target device, then initializes it
-# createdisk <target> <name>     # Initialize explicit target (U1, /dev/disk/by-id/..., /dev/sdX, /dev/sdX1)
+# createdisk --list
+# createdisk --map <pdp_or_index> <name>
+# createdisk [options] <name>
+# createdisk [options] <target> <name>
 #
-# DEFAULT BEHAVIOUR:
-#   - Whole-drive LUKS (no partitions)
+# DEFAULT:
+#   - Whole-drive LUKS2 (no partition table)
 #
 # OPTIONAL PARTITION FLAGS:
 #   --gpt-partition  : Create GPT + 1 partition, LUKS on partition
 #   --mbr-partition  : Create MBR/DOS + 1 partition, LUKS on partition
 #
-# Mapping UX like opendisk:
-#   createdisk --list
-#   createdisk --map U1 1b
-#   createdisk --map 1 1new     # rename mapping index [1] -> 1new
+# OPTIONAL ERASE FLAG:
+#   --secure-erase   : NVMe secure erase / SSD blkdiscard / HDD full overwrite
+#                      Otherwise: wipe signatures only (wipefs -a)
 
 set -euo pipefail
+
+# Ensure admin binaries are on PATH (Mint/Ubuntu often omit /usr/sbin for users)
+export PATH="/usr/sbin:/sbin:$PATH"
 
 if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
   echo "createdisk: do not source this script; run it as a command." >&2
@@ -27,7 +31,7 @@ die() { log "ERROR: $*"; exit 1; }
 usage() {
   cat <<'EOF'
 NAME
-    createdisk - initialize a disk: LUKS-encrypt + filesystem + mount + persistent mapping
+    createdisk - initialize a disk: erase(optional) + LUKS-encrypt + filesystem + mount + persistent mapping
 
 SYNOPSIS
     createdisk --list
@@ -63,6 +67,13 @@ OPTIONS
 
     --mbr-partition
         Create an MBR/DOS partition table + 1 partition spanning the disk, then LUKS on the partition.
+
+    --secure-erase
+        Perform a device-type-specific secure erase BEFORE formatting:
+          - NVMe: nvme format --ses=1
+          - SSD/flash: blkdiscard -f
+          - HDD: full zero overwrite with dd + sync
+        If not passed, the script only removes signatures (wipefs -a).
 
     --fs <ext4|xfs>
         Filesystem type on /dev/mapper/<name>. Default: ext4
@@ -104,6 +115,7 @@ mapfile="$script_dir/luksmap.tsv"
 # Helpers
 # ---------------------------
 need_bin() { command -v "$1" >/dev/null 2>&1 || die "Required tool not found: $1"; }
+
 run() {
   if [[ "${DRYRUN:-0}" -eq 1 ]]; then
     log "[dry-run] $*"
@@ -175,6 +187,83 @@ resolve_target_from_mapfile() {
   src="$(awk -v n="$friendly" '$1==n {print $2; exit}' "$mapfile" || true)"
   [[ -n "${src:-}" ]] || return 1
   echo "$src"
+}
+
+# ---------------------------
+# Disk type detection + erase logic
+# ---------------------------
+disk_base_name() {
+  # Given /dev/sdb or /dev/sdb1 or /dev/nvme0n1p1 -> returns base block name for /sys/block
+  local dev="$1"
+  local base
+  base="$(lsblk -no PKNAME "$dev" 2>/dev/null | head -n1 || true)"
+  if [[ -n "$base" ]]; then
+    echo "$base"
+    return 0
+  fi
+  echo "${dev##*/}"
+}
+
+disk_is_nvme() {
+  local dev="$1"
+  local tran
+  tran="$(lsblk -dno TRAN "$dev" 2>/dev/null | head -n1 || true)"
+  [[ "$tran" == "nvme" ]] && return 0
+  [[ "${dev##*/}" == nvme*n* ]] && return 0
+  return 1
+}
+
+disk_is_rotational() {
+  local dev="$1"
+  local base rota
+  base="$(disk_base_name "$dev")"
+  rota="$(cat "/sys/block/$base/queue/rotational" 2>/dev/null || echo "")"
+  [[ "$rota" == "1" ]]
+}
+
+disk_discard_supported() {
+  local dev="$1"
+  local dmax
+  dmax="$(lsblk -dno DISC-MAX "$dev" 2>/dev/null | head -n1 || true)"
+  [[ -n "$dmax" && "$dmax" != "0B" && "$dmax" != "0" ]]
+}
+
+secure_erase_disk() {
+  local disk="$1"
+  [[ -b "$disk" ]] || die "secure_erase_disk: not a block device: $disk"
+
+  if disk_is_nvme "$disk"; then
+    need_bin nvme
+    log "Secure erase: NVMe detected ($disk) -> nvme format --ses=1"
+    run sudo nvme format "$disk" --ses=1
+    run sudo udevadm settle
+    return 0
+  fi
+
+  if disk_is_rotational "$disk"; then
+    need_bin dd
+    log "Secure erase: HDD detected (rotational) ($disk) -> full zero overwrite"
+    run sudo dd if=/dev/zero of="$disk" bs=16M status=progress oflag=direct
+    run sudo sync
+    return 0
+  fi
+
+  # Non-rotational and not NVMe => treat as SSD/flash
+  need_bin blkdiscard
+  log "Secure erase: SSD/flash detected (non-rotational) ($disk) -> blkdiscard"
+  if disk_discard_supported "$disk"; then
+    run sudo blkdiscard -f "$disk"
+    run sudo udevadm settle
+  else
+    die "Disk appears SSD/flash but DISCARD is not supported (DISC-MAX=0). Refusing secure erase."
+  fi
+}
+
+soft_wipe_disk() {
+  local disk="$1"
+  log "Soft wipe: removing signatures only (wipefs -a) on $disk"
+  run sudo wipefs -a "$disk"
+  run sudo udevadm settle
 }
 
 # ---------------------------
@@ -252,7 +341,6 @@ do_map() {
     old_name="$(echo "$line_info" | awk '{print $1}')"
     old_pdp="$(echo "$line_info" | awk '{print $2}')"
 
-    # Remove old mapping
     sed -i "/^$old_name[[:space:]]/d" "$mapfile"
     log "Removed old mapping: $old_name -> $old_pdp"
 
@@ -277,6 +365,7 @@ DRYRUN=0
 FS="ext4"
 FSLABEL=""
 ALLOW_NONREMOVABLE=0
+SECURE_ERASE=0
 
 # Partition mode: default = none (whole-drive LUKS)
 PARTMODE="none"   # none|gpt|mbr
@@ -295,6 +384,7 @@ while [[ $# -gt 0 ]]; do
     --fs) FS="${2:-}"; shift 2 ;;
     --label) FSLABEL="${2:-}"; shift 2 ;;
     --allow-nonremovable) ALLOW_NONREMOVABLE=1; shift ;;
+    --secure-erase) SECURE_ERASE=1; shift ;;
     --gpt-partition) PARTMODE="gpt"; shift ;;
     --mbr-partition) PARTMODE="mbr"; shift ;;
     --) shift; break ;;
@@ -327,7 +417,7 @@ target=""
 name=""
 
 if [[ "${#ARGS[@]}" -eq 1 ]]; then
-  # createdisk <name>  -> resolve via luksmap.tsv
+  # createdisk <name> -> resolve via luksmap.tsv
   name="${ARGS[0]}"
   src="$(resolve_target_from_mapfile "$name" || true)"
   [[ -n "${src:-}" ]] || die "Name '$name' not found in $mapfile. Use: createdisk --map U1 $name"
@@ -384,7 +474,7 @@ if [[ "$t_type" == "part" ]]; then
   [[ -n "$disk_pk" ]] || die "Could not determine parent disk for $target"
   disk="/dev/$disk_pk"
   part="$target"
-  # If you pass an explicit partition, we encrypt that partition (partition flags are ignored)
+  # If explicit partition passed, we encrypt that partition; partition flags are ignored
   PARTMODE="none"
   crypt_target="$part"
 elif [[ "$t_type" == "disk" ]]; then
@@ -425,6 +515,7 @@ log "  luks target: $crypt_target"
 log "  name:        $name"
 log "  fs:          $FS (label=$FSLABEL)"
 log "  mapfile:     $mapfile"
+log "  secure erase: $SECURE_ERASE"
 
 if [[ "$YES" -eq 0 ]]; then
   echo
@@ -446,11 +537,20 @@ while read -r dev mnt; do
   run sudo umount "$dev" || die "Failed to unmount $dev"
 done < <(lsblk -nrpo NAME,MOUNTPOINT "$disk" | awk '$2 != "" {print $1, $2}')
 
+# ------------------------------------------------------------
+# Erase step (secure vs soft)
+# Always operate on the whole DISK here.
+# ------------------------------------------------------------
+if [[ "$SECURE_ERASE" -eq 1 ]]; then
+  log "--secure-erase enabled: performing device-type-specific erase on $disk"
+  secure_erase_disk "$disk"
+else
+  # Fast "delete data": remove signatures only
+  soft_wipe_disk "$disk"
+fi
+
 # Partition if requested and target is a whole disk
 if [[ "$t_type" == "disk" && "$PARTMODE" != "none" ]]; then
-  log "Wiping signatures on disk: $disk"
-  run sudo wipefs -a "$disk"
-
   if [[ "$PARTMODE" == "gpt" ]]; then
     log "Creating GPT + single partition on $disk..."
     run sudo sgdisk --zap-all "$disk"
@@ -458,7 +558,7 @@ if [[ "$t_type" == "disk" && "$PARTMODE" != "none" ]]; then
 
   elif [[ "$PARTMODE" == "mbr" ]]; then
     log "Creating MBR/DOS + single partition on $disk..."
-    # Start at 1MiB (sector 2048), use type 83 (Linux)
+    # Start at 1MiB (sector 2048), fill remainder, type 83 (Linux)
     run sudo sfdisk --wipe always --wipe-partitions always "$disk" <<EOF
 label: dos
 unit: sectors
@@ -481,14 +581,15 @@ EOF
   crypt_target="$part"
 fi
 
-# Final unmount sanity
+# Sanity: target must not be mounted
 if findmnt -rn -S "$crypt_target" >/dev/null 2>&1; then
   die "Target is still mounted: $crypt_target (refusing)"
 fi
 
-# Wipe signatures on the LUKS target (disk or partition)
-log "Wiping signatures on LUKS target: $crypt_target"
+# Final signature wipe on the actual LUKS target (cheap + prevents warnings)
+log "Final signature wipe on LUKS target: $crypt_target"
 run sudo wipefs -a "$crypt_target"
+run sudo udevadm settle
 
 # LUKS format
 log "LUKS-formatting (LUKS2): $crypt_target"
@@ -543,7 +644,7 @@ if [[ "$pdp" == "-" ]]; then
   pdp="$crypt_target"
 fi
 
-# Ensure mapping exists (if user invoked createdisk <target> <name> without mapping first)
+# Ensure mapping exists if user invoked createdisk <target> <name> without mapping first
 if ! grep -q "^$name[[:space:]]" "$mapfile"; then
   log "Writing mapping: $name -> $pdp"
   if [[ "$DRYRUN" -eq 0 ]]; then
