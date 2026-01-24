@@ -1,0 +1,564 @@
+#!/usr/bin/env bash
+# createdisk <name>              # Uses luksmap.tsv mapping to resolve target device, then initializes it
+# createdisk <target> <name>     # Initialize explicit target (U1, /dev/disk/by-id/..., /dev/sdX, /dev/sdX1)
+#
+# DEFAULT BEHAVIOUR:
+#   - Whole-drive LUKS (no partitions)
+#
+# OPTIONAL PARTITION FLAGS:
+#   --gpt-partition  : Create GPT + 1 partition, LUKS on partition
+#   --mbr-partition  : Create MBR/DOS + 1 partition, LUKS on partition
+#
+# Mapping UX like opendisk:
+#   createdisk --list
+#   createdisk --map U1 1b
+#   createdisk --map 1 1new     # rename mapping index [1] -> 1new
+
+set -euo pipefail
+
+if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+  echo "createdisk: do not source this script; run it as a command." >&2
+  return 2 2>/dev/null || exit 2
+fi
+
+log() { echo "createdisk: $*" >&2; }
+die() { log "ERROR: $*"; exit 1; }
+
+usage() {
+  cat <<'EOF'
+NAME
+    createdisk - initialize a disk: LUKS-encrypt + filesystem + mount + persistent mapping
+
+SYNOPSIS
+    createdisk --list
+    createdisk --map <pdp_or_index> <name>
+    createdisk [options] <name>
+    createdisk [options] <target> <name>
+
+DEFAULT BEHAVIOUR
+    Formats the WHOLE DRIVE as LUKS2 (no partition table), creates a filesystem,
+    mounts it, and updates luksmap.tsv.
+
+TARGET FORMS
+    - Friendly mapping name, e.g. "1b" (must exist in luksmap.tsv)
+    - Unmapped discovery index: U1, U2, ...
+    - Persistent path: /dev/disk/by-id/...
+    - Raw path: /dev/sdX, /dev/nvme0n1, /dev/sdX1, ...
+
+OPTIONS
+    -l, --list
+        List configured mappings and statuses + unmapped disks with indices [U1], [U2], ...
+
+    -m, --map <pdp_or_index> <name>
+        Add mapping or rename an existing mapping by index (same semantics as opendisk).
+
+    -y, --yes
+        Non-interactive. Skips the "ERASE <name>" confirmation prompt.
+
+    -n, --dry-run
+        Print what would happen without making changes.
+
+    --gpt-partition
+        Create a GPT partition table + 1 partition spanning the disk, then LUKS on the partition.
+
+    --mbr-partition
+        Create an MBR/DOS partition table + 1 partition spanning the disk, then LUKS on the partition.
+
+    --fs <ext4|xfs>
+        Filesystem type on /dev/mapper/<name>. Default: ext4
+
+    --label <LABEL>
+        Filesystem label. Default: <name>
+
+    --allow-nonremovable
+        Permit targeting RM=0 disks. Still refuses the root disk.
+
+FILES
+    luksmap.tsv
+        Stored in the same directory as the *real* script file (symlink-safe).
+        Lines: <name><TAB>/dev/disk/by-id/....
+
+EOF
+}
+
+# ---------------------------
+# Resolve real script location
+# ---------------------------
+resolve_self() {
+  local src="$1"
+  while [[ -L "$src" ]]; do
+    local dir
+    dir="$(cd -- "$(dirname -- "$src")" && pwd)"
+    src="$(readlink -- "$src")"
+    [[ "$src" != /* ]] && src="$dir/$src"
+  done
+  echo "$src"
+}
+
+self_real="$(resolve_self "${BASH_SOURCE[0]}")"
+script_dir="$(cd -- "$(dirname -- "$self_real")" && pwd)"
+mapfile="$script_dir/luksmap.tsv"
+[[ -f "$mapfile" ]] || touch "$mapfile"
+
+# ---------------------------
+# Helpers
+# ---------------------------
+need_bin() { command -v "$1" >/dev/null 2>&1 || die "Required tool not found: $1"; }
+run() {
+  if [[ "${DRYRUN:-0}" -eq 1 ]]; then
+    log "[dry-run] $*"
+    return 0
+  fi
+  "$@"
+}
+
+# ---------------------------
+# Base dependencies
+# ---------------------------
+need_bin lsblk
+need_bin findmnt
+need_bin readlink
+need_bin awk
+need_bin sed
+need_bin grep
+need_bin wipefs
+need_bin cryptsetup
+need_bin udevadm
+
+PASSGEN_BIN="$(command -v passgen || true)"
+[[ -n "$PASSGEN_BIN" ]] || die "passgen not found on PATH"
+[[ -x "$PASSGEN_BIN" ]] || die "passgen exists but is not executable: $PASSGEN_BIN"
+
+# ---------------------------
+# Disk discovery helpers (U-index)
+# ---------------------------
+get_unmapped_disks() {
+  declare -A mapped_devs
+  while read -r m_name m_src || [[ -n "$m_name" ]]; do
+    [[ -n "$m_name" && "$m_name" != "#"* ]] || continue
+    if [[ -e "$m_src" ]]; then
+      mapped_devs["$(readlink -f "$m_src")"]="$m_name"
+    fi
+  done < "$mapfile"
+
+  # NAME includes full /dev/... due to -p; TYPE is disk/part
+  lsblk -e 7 -Ppn -o NAME,TYPE,RM,SIZE,FSTYPE,LABEL,MOUNTPOINT,MODEL | while read -r line; do
+    NAME=""; TYPE=""; RM=""; SIZE=""; FSTYPE=""; LABEL=""; MOUNTPOINT=""; MODEL=""
+    eval "$line"
+
+    [[ -z "$NAME" ]] && continue
+    [[ "$NAME" == /dev/loop* || "$NAME" == /dev/dm-* ]] && continue
+
+    # Skip already mapped exact devnodes
+    if [[ -n "${mapped_devs["$NAME"]:-}" ]]; then
+      continue
+    fi
+
+    # Try find stable by-id that resolves to NAME
+    pdp="-"
+    for c in /dev/disk/by-id/*; do
+      [[ -L "$c" ]] || continue
+      tgt="$(readlink -f "$c" 2>/dev/null || true)"
+      if [[ "$tgt" == "$NAME" ]]; then
+        pdp="$c"
+        break
+      fi
+    done
+
+    echo "$NAME|$TYPE|$RM|$FSTYPE|$pdp|$SIZE|$LABEL|$MOUNTPOINT|$MODEL"
+  done
+}
+
+resolve_target_from_mapfile() {
+  local friendly="$1"
+  local src
+  src="$(awk -v n="$friendly" '$1==n {print $2; exit}' "$mapfile" || true)"
+  [[ -n "${src:-}" ]] || return 1
+  echo "$src"
+}
+
+# ---------------------------
+# Mapping management (opendisk-style)
+# ---------------------------
+do_list() {
+  echo "--- Configured LUKS Mappings ($mapfile) ---"
+  printf "%-5s %-12s %-12s %-65s %s\n" "#" "NAME" "STATUS" "PERSISTENT DEVICE PATH" "MOUNTPOINT"
+  echo "------------------------------------------------------------------------------------------------------------------------------------------------"
+  i=1
+  while read -r m_name m_src || [[ -n "$m_name" ]]; do
+    [[ -n "$m_name" && "$m_name" != "#"* ]] || continue
+    m_status="MISSING"
+    m_mnt=""
+    m_path="$m_src"
+    if [[ -e "$m_src" ]]; then
+      m_fstype="$(lsblk -no FSTYPE "$m_src" 2>/dev/null | head -n1 || true)"
+      if [[ "$m_fstype" == "crypto_LUKS" ]]; then
+        m_status="PRESENT"
+        if [[ -e "/dev/mapper/$m_name" ]]; then
+          m_status="OPEN"
+          m_mnt="$(findmnt -rn -S "/dev/mapper/$m_name" -o TARGET 2>/dev/null || true)"
+          [[ -n "$m_mnt" ]] && m_status="MOUNTED"
+        fi
+      else
+        m_status="NOT_LUKS"
+      fi
+    fi
+    printf "%-5s %-12s %-12s %-65s %s\n" "[$i]" "$m_name" "$m_status" "$m_path" "$m_mnt"
+    ((i++))
+  done < "$mapfile"
+
+  echo
+  echo "--- Other System Disks (Unmapped) ---"
+  printf "%-6s %-18s %-6s %-4s %-10s %-60s %-10s %-14s %s\n" \
+    "#" "DEVICE" "TYPE" "RM" "FSTYPE" "PERSISTENT BY-ID" "SIZE" "LABEL" "MOUNTPOINT"
+  echo "----------------------------------------------------------------------------------------------------------------------------------------------------------------"
+  j=1
+  while IFS='|' read -r dev type rm fstype pdp size label mnt model; do
+    [[ -z "$dev" ]] && continue
+    [[ -z "$fstype" ]] && fstype="-"
+    [[ -z "$label" ]] && label="-"
+    [[ -z "$mnt" ]] && mnt="-"
+    printf "%-6s %-18s %-6s %-4s %-10s %-60s %-10s %-14s %s\n" \
+      "[U$j]" "$dev" "$type" "$rm" "$fstype" "$pdp" "$size" "$label" "$mnt"
+    ((j++))
+  done < <(get_unmapped_disks)
+}
+
+do_map() {
+  local target_pdp="${1:-}"
+  local target_name="${2:-}"
+  [[ -n "$target_pdp" && -n "$target_name" ]] || die "Usage: createdisk --map <pdp_or_index> <name>"
+
+  # Resolve U-index
+  if [[ "$target_pdp" =~ ^U([0-9]+)$ ]]; then
+    local idx="${BASH_REMATCH[1]}"
+    log "Resolving unmapped disk index U$idx..."
+    local resolved_pdp
+    resolved_pdp="$(get_unmapped_disks | sed -n "${idx}p" | cut -d'|' -f5)"
+    if [[ -z "$resolved_pdp" || "$resolved_pdp" == "-" ]]; then
+      die "Could not resolve unmapped disk index U$idx to a persistent /dev/disk/by-id path."
+    fi
+    target_pdp="$resolved_pdp"
+
+  # Resolve numeric mapping index (rename)
+  elif [[ "$target_pdp" =~ ^([0-9]+)$ ]]; then
+    local idx="${BASH_REMATCH[1]}"
+    log "Resolving mapped disk index [$idx] for rename..."
+    local line_info
+    line_info="$(grep -vE '^\s*(#|$)' "$mapfile" | sed -n "${idx}p" || true)"
+    [[ -n "$line_info" ]] || die "Could not resolve mapped disk index [$idx] in $mapfile."
+
+    local old_name old_pdp
+    old_name="$(echo "$line_info" | awk '{print $1}')"
+    old_pdp="$(echo "$line_info" | awk '{print $2}')"
+
+    # Remove old mapping
+    sed -i "/^$old_name[[:space:]]/d" "$mapfile"
+    log "Removed old mapping: $old_name -> $old_pdp"
+
+    target_pdp="$old_pdp"
+  fi
+
+  [[ "$target_pdp" == /dev/disk/by-id/* ]] || log "WARNING: Path does not start with /dev/disk/by-id/. Mapping might not be persistent."
+
+  if grep -q "^$target_name[[:space:]]" "$mapfile"; then
+    die "Friendly name '$target_name' is already in use in $mapfile"
+  fi
+
+  printf "%s\t%s\n" "$target_name" "$target_pdp" >> "$mapfile"
+  log "Added mapping: $target_name -> $target_pdp"
+}
+
+# ---------------------------
+# Parse options / args
+# ---------------------------
+YES=0
+DRYRUN=0
+FS="ext4"
+FSLABEL=""
+ALLOW_NONREMOVABLE=0
+
+# Partition mode: default = none (whole-drive LUKS)
+PARTMODE="none"   # none|gpt|mbr
+
+ARGS=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h|--help) usage; exit 0 ;;
+    -l|--list) do_list; exit 0 ;;
+    -m|--map)
+      do_map "${2:-}" "${3:-}"
+      exit 0
+      ;;
+    -y|--yes) YES=1; shift ;;
+    -n|--dry-run) DRYRUN=1; shift ;;
+    --fs) FS="${2:-}"; shift 2 ;;
+    --label) FSLABEL="${2:-}"; shift 2 ;;
+    --allow-nonremovable) ALLOW_NONREMOVABLE=1; shift ;;
+    --gpt-partition) PARTMODE="gpt"; shift ;;
+    --mbr-partition) PARTMODE="mbr"; shift ;;
+    --) shift; break ;;
+    -*) die "Unknown option: $1" ;;
+    *) ARGS+=("$1"); shift ;;
+  esac
+done
+
+[[ "$FS" == "ext4" || "$FS" == "xfs" ]] || die "Unsupported --fs '$FS' (supported: ext4, xfs)"
+[[ -n "$FSLABEL" ]] || true
+
+if [[ "$FS" == "ext4" ]]; then
+  need_bin mkfs.ext4
+  need_bin tune2fs
+elif [[ "$FS" == "xfs" ]]; then
+  need_bin mkfs.xfs
+fi
+
+# Partition tooling only if requested
+if [[ "$PARTMODE" == "gpt" ]]; then
+  need_bin sgdisk
+elif [[ "$PARTMODE" == "mbr" ]]; then
+  need_bin sfdisk
+fi
+
+# ---------------------------
+# Resolve invocation forms
+# ---------------------------
+target=""
+name=""
+
+if [[ "${#ARGS[@]}" -eq 1 ]]; then
+  # createdisk <name>  -> resolve via luksmap.tsv
+  name="${ARGS[0]}"
+  src="$(resolve_target_from_mapfile "$name" || true)"
+  [[ -n "${src:-}" ]] || die "Name '$name' not found in $mapfile. Use: createdisk --map U1 $name"
+  target="$src"
+
+elif [[ "${#ARGS[@]}" -eq 2 ]]; then
+  # createdisk <target> <name>
+  target="${ARGS[0]}"
+  name="${ARGS[1]}"
+
+else
+  usage
+  exit 2
+fi
+
+[[ -n "$FSLABEL" ]] || FSLABEL="$name"
+
+# If target is a friendly name, resolve it
+if [[ "$target" != /* && "$target" != U* ]]; then
+  src="$(resolve_target_from_mapfile "$target" || true)"
+  if [[ -n "${src:-}" ]]; then
+    target="$src"
+  fi
+fi
+
+# Resolve U-index if provided
+if [[ "$target" =~ ^U([0-9]+)$ ]]; then
+  idx="${BASH_REMATCH[1]}"
+  log "Resolving unmapped disk index U$idx..."
+  resolved_dev="$(get_unmapped_disks | sed -n "${idx}p" | cut -d'|' -f1)"
+  [[ -n "$resolved_dev" ]] || die "Could not resolve U$idx to a device."
+  target="$resolved_dev"
+fi
+
+# Resolve by-id symlink
+if [[ "$target" == /dev/disk/by-id/* ]]; then
+  [[ -e "$target" ]] || die "Target by-id path does not exist: $target"
+  target="$(readlink -f "$target")"
+fi
+
+[[ -e "$target" ]] || die "Target device not found: $target"
+[[ -b "$target" ]] || die "Target is not a block device: $target"
+
+# Determine disk/part
+t_type="$(lsblk -no TYPE "$target" | head -n1 || true)"
+[[ -n "$t_type" ]] || die "Could not determine TYPE for $target"
+
+disk="$target"
+crypt_target="$target"   # the block device that receives LUKS header
+part=""
+
+if [[ "$t_type" == "part" ]]; then
+  disk_pk="$(lsblk -no PKNAME "$target" | head -n1 || true)"
+  [[ -n "$disk_pk" ]] || die "Could not determine parent disk for $target"
+  disk="/dev/$disk_pk"
+  part="$target"
+  # If you pass an explicit partition, we encrypt that partition (partition flags are ignored)
+  PARTMODE="none"
+  crypt_target="$part"
+elif [[ "$t_type" == "disk" ]]; then
+  disk="$target"
+  crypt_target="$disk"
+else
+  die "Unsupported TYPE '$t_type' for $target"
+fi
+
+# Safety: refuse root disk
+root_src="$(findmnt -nro SOURCE / || true)"
+root_src_real="$(readlink -f "$root_src" 2>/dev/null || true)"
+disk_real="$(readlink -f "$disk" 2>/dev/null || true)"
+
+if [[ -n "$root_src_real" && -n "$disk_real" ]]; then
+  root_parent="$(lsblk -no PKNAME "$root_src_real" 2>/dev/null | head -n1 || true)"
+  if [[ -n "$root_parent" && "/dev/$root_parent" == "$disk_real" ]]; then
+    die "Refusing to operate on root filesystem disk: $disk_real"
+  fi
+fi
+
+# Safety: removable check
+rm_flag="$(lsblk -no RM "$disk" | head -n1 || true)"
+if [[ "$rm_flag" == "0" && "$ALLOW_NONREMOVABLE" -eq 0 ]]; then
+  die "Refusing RM=0 disk ($disk). Use --allow-nonremovable if you truly mean it."
+fi
+
+# Name must not already exist in /dev/mapper
+if [[ -e "/dev/mapper/$name" ]]; then
+  die "Mapping name already exists in /dev/mapper: $name (close it first)"
+fi
+
+log "Resolved:"
+log "  disk:        $disk"
+log "  target:      $target (type=$t_type)"
+log "  partmode:    $PARTMODE (default=whole-drive LUKS)"
+log "  luks target: $crypt_target"
+log "  name:        $name"
+log "  fs:          $FS (label=$FSLABEL)"
+log "  mapfile:     $mapfile"
+
+if [[ "$YES" -eq 0 ]]; then
+  echo
+  echo "DANGER: This will IRREVERSIBLY ERASE all data on: $disk"
+  echo "It will create an encrypted mapping as: /dev/mapper/$name"
+  echo
+  read -r -p "Type exactly: ERASE $name   > " confirm
+  [[ "$confirm" == "ERASE $name" ]] || die "Confirmation failed; aborting."
+fi
+
+log "Authenticating sudo..."
+run sudo -v
+
+# Unmount anything mounted from the disk
+log "Unmounting any mounted filesystems on $disk..."
+while read -r dev mnt; do
+  [[ -z "$mnt" ]] && continue
+  log "  umount $dev ($mnt)"
+  run sudo umount "$dev" || die "Failed to unmount $dev"
+done < <(lsblk -nrpo NAME,MOUNTPOINT "$disk" | awk '$2 != "" {print $1, $2}')
+
+# Partition if requested and target is a whole disk
+if [[ "$t_type" == "disk" && "$PARTMODE" != "none" ]]; then
+  log "Wiping signatures on disk: $disk"
+  run sudo wipefs -a "$disk"
+
+  if [[ "$PARTMODE" == "gpt" ]]; then
+    log "Creating GPT + single partition on $disk..."
+    run sudo sgdisk --zap-all "$disk"
+    run sudo sgdisk -n 1:0:0 -t 1:8300 -c 1:"$name" "$disk"
+
+  elif [[ "$PARTMODE" == "mbr" ]]; then
+    log "Creating MBR/DOS + single partition on $disk..."
+    # Start at 1MiB (sector 2048), use type 83 (Linux)
+    run sudo sfdisk --wipe always --wipe-partitions always "$disk" <<EOF
+label: dos
+unit: sectors
+
+${disk}1 : start=2048, type=83
+EOF
+  fi
+
+  log "Waiting for udev..."
+  run sudo udevadm settle
+
+  # Determine partition path (nvme uses p1)
+  if [[ "$disk" =~ nvme[0-9]+n[0-9]+$ ]]; then
+    part="${disk}p1"
+  else
+    part="${disk}1"
+  fi
+
+  [[ -b "$part" ]] || die "Partition device not found after partitioning: $part"
+  crypt_target="$part"
+fi
+
+# Final unmount sanity
+if findmnt -rn -S "$crypt_target" >/dev/null 2>&1; then
+  die "Target is still mounted: $crypt_target (refusing)"
+fi
+
+# Wipe signatures on the LUKS target (disk or partition)
+log "Wiping signatures on LUKS target: $crypt_target"
+run sudo wipefs -a "$crypt_target"
+
+# LUKS format
+log "LUKS-formatting (LUKS2): $crypt_target"
+if [[ "$DRYRUN" -eq 1 ]]; then
+  log "[dry-run] $PASSGEN_BIN | sudo cryptsetup luksFormat --type luks2 --batch-mode --key-file - '$crypt_target'"
+else
+  "$PASSGEN_BIN" | sudo cryptsetup luksFormat --type luks2 --batch-mode --key-file - "$crypt_target"
+fi
+
+# Open mapping
+log "Opening mapping: $crypt_target -> /dev/mapper/$name"
+if [[ "$DRYRUN" -eq 1 ]]; then
+  log "[dry-run] $PASSGEN_BIN | sudo cryptsetup open --key-file - '$crypt_target' '$name'"
+else
+  "$PASSGEN_BIN" | sudo cryptsetup open --key-file - "$crypt_target" "$name"
+fi
+
+mapper="/dev/mapper/$name"
+[[ "$DRYRUN" -eq 1 || -b "$mapper" ]] || die "Mapper device not created: $mapper"
+
+# Filesystem create
+log "Creating filesystem on $mapper: $FS (label=$FSLABEL)"
+case "$FS" in
+  ext4)
+    run sudo mkfs.ext4 -F -L "$FSLABEL" "$mapper"
+    run sudo tune2fs -m 0 "$mapper"
+    ;;
+  xfs)
+    run sudo mkfs.xfs -f -L "$FSLABEL" "$mapper"
+    ;;
+esac
+
+# Mount
+mnt="/media/$USER/$name"
+log "Mounting $mapper -> $mnt"
+run sudo mkdir -p "$mnt"
+run sudo mount "$mapper" "$mnt"
+
+# Determine stable by-id path for mapping (disk vs partition)
+pdp="-"
+for c in /dev/disk/by-id/*; do
+  [[ -L "$c" ]] || continue
+  tgt="$(readlink -f "$c" 2>/dev/null || true)"
+  if [[ "$tgt" == "$crypt_target" ]]; then
+    pdp="$c"
+    break
+  fi
+done
+if [[ "$pdp" == "-" ]]; then
+  log "WARNING: Could not find /dev/disk/by-id symlink for $crypt_target"
+  log "         Mapping will use the raw path (less persistent)."
+  pdp="$crypt_target"
+fi
+
+# Ensure mapping exists (if user invoked createdisk <target> <name> without mapping first)
+if ! grep -q "^$name[[:space:]]" "$mapfile"; then
+  log "Writing mapping: $name -> $pdp"
+  if [[ "$DRYRUN" -eq 0 ]]; then
+    printf "%s\t%s\n" "$name" "$pdp" >> "$mapfile"
+  fi
+else
+  log "Mapping already exists in $mapfile for '$name' (leaving as-is)."
+fi
+
+# Verify
+log "Verification:"
+run df -h "$mnt" || true
+if [[ "$FS" == "ext4" ]]; then
+  run sudo tune2fs -l "$mapper" | grep -E 'Filesystem volume name|Reserved block count' || true
+fi
+
+log "Done."
+exit 0
