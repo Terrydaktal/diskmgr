@@ -445,14 +445,30 @@ class DiskMgrShell(cmd.Cmd):
             except:
                 pass # run_command logs error
         elif fstype == 'xfs':
+            # XFS requires unmount
+            remount_needed = False
             if mountpoint:
-                log(f"Cannot label XFS while mounted at {mountpoint}. Run 'close {name}' first (or umount manually).", 'ERROR')
-                return
+                log(f"XFS requires unmounting to label. Unmounting {mountpoint}...")
+                try:
+                    run_command(['umount', mountpoint], sudo=True)
+                    remount_needed = True
+                except Exception as e:
+                    log(f"Failed to unmount: {e}", 'ERROR')
+                    return
+
             try:
                 run_command(['xfs_admin', '-L', new_label, mapper_path], sudo=True)
                 log("Label updated.")
             except:
                 pass
+            finally:
+                if remount_needed:
+                    log(f"Remounting {mountpoint}...")
+                    try:
+                         run_command(['mount', mapper_path, mountpoint], sudo=True)
+                    except Exception as e:
+                        log(f"Failed to remount: {e}. You may need to mount manually.", 'ERROR')
+
         else:
             log(f"Unsupported filesystem for labeling: {fstype}", 'ERROR')
 
