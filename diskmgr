@@ -310,6 +310,7 @@ class DiskMgrShell(cmd.Cmd):
                 real_path = os.path.realpath(path)
                 mapped_real_paths.add(real_path)
                 
+                # 1. Get Physical Device Properties
                 try:
                     cmd_p = ['lsblk', '-n', '-P', '-o', 'NAME,TYPE,RM,FSTYPE,SIZE,LABEL', path]
                     res_p = run_command(cmd_p, check=False)
@@ -325,18 +326,38 @@ class DiskMgrShell(cmd.Cmd):
                         rm = props.get('RM', '-')
                         fstype = props.get('FSTYPE', '-')
                         size = props.get('SIZE', '-')
-                        label = props.get('LABEL', '-')
+                        label = props.get('LABEL', '-') # Usually empty for LUKS
                 except:
                     pass
 
+            # 2. If Open, Get Inner Properties (Overlay)
             mapper_path = f"/dev/mapper/{name}"
             if os.path.exists(mapper_path):
+                # Check Mount
                 res = run_command(['findmnt', '-rn', '-S', mapper_path, '-o', 'TARGET'], check=False)
                 if res.returncode == 0 and res.stdout.strip():
                     mountpoint = res.stdout.strip()
                     mounted = "Y"
+                
+                # Get Inner Stats
+                try:
+                    cmd_m = ['lsblk', '-n', '-P', '-o', 'FSTYPE,LABEL,SIZE', mapper_path]
+                    res_m = run_command(cmd_m, check=False)
+                    if res_m.stdout.strip():
+                        props = {}
+                        for part in shlex.split(res_m.stdout.strip()):
+                            if '=' in part:
+                                k, v = part.split('=', 1)
+                                props[k] = v
+                        
+                        # Override with inner details
+                        if props.get('FSTYPE'): fstype = props.get('FSTYPE')
+                        if props.get('LABEL'): label = props.get('LABEL')
+                        if props.get('SIZE'): size = props.get('SIZE')
+                except:
+                    pass
             
-            print(header_fmt.format(f"[{i}]", name, path, device, mountpoint, label, mounted, size, rm, fstype, dtype))
+            print(header_fmt.format(f"[{i}]", name, path, device, mountpoint, label if label else "-", mounted, size, rm, fstype, dtype))
             i += 1
         
         print(f"\n{Colors.HEADER}--- Other System Disks (Unmapped) ---{Colors.ENDC}")
