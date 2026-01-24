@@ -284,13 +284,13 @@ class DiskMgrShell(cmd.Cmd):
         'List configured mappings and available disks'
         self.mappings = read_luks_map() # Refresh
         
-        # Header Format: Compact widths, strictly left-aligned
-        # #, NAME, PERSISTENT DEVICE PATH, DEVICE, MOUNTPOINT, LABEL, MOUNTED, SIZE, RM, FSTYPE, TYPE
-        header_fmt = "{:<5}{:<12}{:<70}{:<15}{:<25}{:<15}{:<9}{:<10}{:<4}{:<10}{:<10}"
+        # Header Format:
+        # #, NAME, LUKS, STATE, FSTYPE, LABEL, MOUNTPOINT, DEVICE, SIZE, PERSISTENT PATH
+        header_fmt = "{:<5}{:<12}{:<6}{:<10}{:<10}{:<15}{:<25}{:<12}{:<8}{:<50}"
         
-        print(f"\n{Colors.HEADER}--- Configured LUKS Mappings ({get_map_file_path()}) ---{Colors.ENDC}")
-        print(header_fmt.format("#", "NAME", "PERSISTENT DEVICE PATH", "DEVICE", "MOUNTPOINT", "LABEL", "MOUNTED", "SIZE", "RM", "FSTYPE", "TYPE"))
-        print("-" * 185)
+        print(f"\n{Colors.HEADER}--- Configured Mappings ({get_map_file_path()}) ---{Colors.ENDC}")
+        print(header_fmt.format("#", "NAME", "LUKS", "STATE", "FSTYPE", "LABEL", "MOUNTPOINT", "DEVICE", "SIZE", "PERSISTENT PATH"))
+        print("-" * 155)
         
         i = 1
         mapped_real_paths = set()
@@ -303,12 +303,15 @@ class DiskMgrShell(cmd.Cmd):
             size = "-"
             label = "-"
             mountpoint = "-"
-            mounted = "N"
+            
+            is_luks = "N"
+            state = "MISSING"
             
             real_path = None
             if os.path.exists(path):
                 real_path = os.path.realpath(path)
                 mapped_real_paths.add(real_path)
+                state = "CLOSED" # Default if present
                 
                 # 1. Get Physical Device Properties
                 try:
@@ -326,43 +329,62 @@ class DiskMgrShell(cmd.Cmd):
                         rm = props.get('RM', '-')
                         fstype = props.get('FSTYPE', '-')
                         size = props.get('SIZE', '-')
-                        label = props.get('LABEL', '-') # Usually empty for LUKS
+                        label = props.get('LABEL', '-') 
+                        
+                        if fstype == 'crypto_LUKS':
+                            is_luks = "Y"
+                        else:
+                            state = "UNMOUNTED"
                 except:
                     pass
 
-            # 2. If Open, Get Inner Properties (Overlay)
+            # 2. Check Mapper/Mount State
             mapper_path = f"/dev/mapper/{name}"
-            if os.path.exists(mapper_path):
-                # Check Mount
-                res = run_command(['findmnt', '-rn', '-S', mapper_path, '-o', 'TARGET'], check=False)
-                if res.returncode == 0 and res.stdout.strip():
-                    mountpoint = res.stdout.strip()
-                    mounted = "Y"
-                
-                # Get Inner Stats
-                try:
-                    cmd_m = ['lsblk', '-n', '-P', '-o', 'FSTYPE,LABEL,SIZE', mapper_path]
-                    res_m = run_command(cmd_m, check=False)
-                    if res_m.stdout.strip():
-                        props = {}
-                        for part in shlex.split(res_m.stdout.strip()):
-                            if '=' in part:
-                                k, v = part.split('=', 1)
-                                props[k] = v
-                        
-                        # Override with inner details
-                        if props.get('FSTYPE'): fstype = props.get('FSTYPE')
-                        if props.get('LABEL'): label = props.get('LABEL')
-                        if props.get('SIZE'): size = props.get('SIZE')
-                except:
-                    pass
             
-            print(header_fmt.format(f"[{i}]", name, path, device, mountpoint, label if label else "-", mounted, size, rm, fstype, dtype))
+            # For plain disks, we mount the device directly
+            # For LUKS, we mount the mapper
+            target_to_check = mapper_path if is_luks == "Y" else real_path
+
+            if is_luks == "Y":
+                if os.path.exists(mapper_path):
+                    state = "OPEN"
+                    # Get Inner Stats
+                    try:
+                        cmd_m = ['lsblk', '-n', '-P', '-o', 'FSTYPE,LABEL,SIZE', mapper_path]
+                        res_m = run_command(cmd_m, check=False)
+                        if res_m.stdout.strip():
+                            props = {}
+                            for part in shlex.split(res_m.stdout.strip()):
+                                if '=' in part:
+                                    k, v = part.split('=', 1)
+                                    props[k] = v
+                            
+                            # Override with inner details
+                            if props.get('FSTYPE'): fstype = props.get('FSTYPE')
+                            if props.get('LABEL'): label = props.get('LABEL')
+                            if props.get('SIZE'): size = props.get('SIZE')
+                    except:
+                        pass
+                    
+                    # Check Mount
+                    res = run_command(['findmnt', '-rn', '-S', mapper_path, '-o', 'TARGET'], check=False)
+                    if res.returncode == 0 and res.stdout.strip():
+                        mountpoint = res.stdout.strip()
+                        state = "MOUNTED"
+            elif real_path:
+                 # Plain disk check mount
+                 res = run_command(['findmnt', '-rn', '-S', real_path, '-o', 'TARGET'], check=False)
+                 if res.returncode == 0 and res.stdout.strip():
+                     mountpoint = res.stdout.strip()
+                     state = "MOUNTED"
+
+            
+            print(header_fmt.format(f"[{i}]", name, is_luks, state, fstype, label if label else "-", mountpoint, device, size, path))
             i += 1
         
         print(f"\n{Colors.HEADER}--- Other System Disks (Unmapped) ---{Colors.ENDC}")
-        print(header_fmt.format("#", "DEVICE", "PERSISTENT DEVICE PATH", "", "MOUNTPOINT", "LABEL", "", "SIZE", "RM", "FSTYPE", "TYPE"))
-        print("-" * 185)
+        print(header_fmt.format("#", "NAME", "LUKS", "STATE", "FSTYPE", "LABEL", "MOUNTPOINT", "DEVICE", "SIZE", "PERSISTENT PATH"))
+        print("-" * 155)
         
         all_disks = self.get_disk_info()
         flat_disks = self.flatten_disks(all_disks)
@@ -403,7 +425,12 @@ class DiskMgrShell(cmd.Cmd):
                 'type': dtype
             })
             
-            print(header_fmt.format(f"[U{u_idx}]", dev_path, pdp, "", mountpoint, label, "", size, rm, fstype, dtype))
+            is_luks = "Y" if fstype == 'crypto_LUKS' else "N"
+            state = "MOUNTED" if mountpoint != '-' else "UNMOUNTED"
+            if is_luks == "Y": state = "LOCKED" 
+            
+            # #, NAME, LUKS, STATE, FSTYPE, LABEL, MOUNTPOINT, DEVICE, SIZE, PERSISTENT PATH
+            print(header_fmt.format(f"[U{u_idx}]", dev_path, is_luks, state, fstype, label, mountpoint, "", size, pdp))
             u_idx += 1
         print("")
 
