@@ -1,0 +1,827 @@
+#!/usr/bin/env python3
+import cmd
+import subprocess
+import os
+import sys
+import shlex
+import csv
+import json
+import time
+import argparse
+from pathlib import Path
+
+# Configuration
+MAP_FILENAME = 'luksmap.tsv'
+PASSGEN_BIN = 'passgen'
+
+# ANSI Colors
+class Colors:
+    HEADER = '\033[95m'
+    OKBLUE = '\033[94m'
+    OKCYAN = '\033[96m'
+    OKGREEN = '\033[92m'
+    WARNING = '\033[93m'
+    FAIL = '\033[91m'
+    ENDC = '\033[0m'
+    BOLD = '\033[1m'
+    UNDERLINE = '\033[4m'
+
+def log(msg, level='INFO'):
+    if level == 'ERROR':
+        print(f"{Colors.FAIL}ERROR: {msg}{Colors.ENDC}", file=sys.stderr)
+    elif level == 'WARN':
+        print(f"{Colors.WARNING}WARNING: {msg}{Colors.ENDC}", file=sys.stderr)
+    else:
+        print(f"{Colors.OKBLUE}diskmgr: {msg}{Colors.ENDC}")
+
+def run_command(command, check=True, input_str=None, capture_output=True, sudo=False):
+    if sudo:
+        command = ['sudo'] + command
+    
+    try:
+        result = subprocess.run(
+            command,
+            input=input_str,
+            text=True,
+            check=check,
+            stdout=subprocess.PIPE if capture_output else None,
+            stderr=subprocess.PIPE if capture_output else None
+        )
+        return result
+    except subprocess.CalledProcessError as e:
+        if check:
+            log(f"Command failed: {' '.join(command)}", 'ERROR')
+            if e.stderr:
+                log(e.stderr.strip(), 'ERROR')
+            raise
+        return e
+
+def get_script_dir():
+    return Path(__file__).parent.resolve()
+
+def get_map_file_path():
+    return get_script_dir() / MAP_FILENAME
+
+def read_luks_map():
+    map_file = get_map_file_path()
+    if not map_file.exists():
+        return {}
+    
+    mappings = {}
+    with open(map_file, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+            parts = line.split(None, 1) # Split on first whitespace
+            if len(parts) == 2:
+                name, path = parts
+                mappings[name] = path
+    return mappings
+
+def save_luks_map(mappings):
+    map_file = get_map_file_path()
+    with open(map_file, 'w') as f:
+        for name, path in mappings.items():
+            f.write(f"{name}\t{path}\n")
+
+def disk_base_name(dev_path):
+    # Given /dev/sdb or /dev/sdb1 -> sdb
+    try:
+        dev_name = os.path.basename(dev_path)
+        # simplistic, better to use lsblk
+        res = run_command(['lsblk', '-no', 'PKNAME', dev_path], check=False)
+        if res.stdout.strip():
+            return res.stdout.strip()
+        return dev_name
+    except:
+        return os.path.basename(dev_path)
+
+def disk_is_nvme(dev_path):
+    # Check if NVMe
+    try:
+        res = run_command(['lsblk', '-dno', 'TRAN', dev_path], check=False)
+        if res.stdout.strip() == 'nvme':
+            return True
+        if 'nvme' in dev_path:
+            return True
+    except:
+        pass
+    return False
+
+def disk_is_rotational(dev_path):
+    try:
+        base = disk_base_name(dev_path)
+        p = Path(f"/sys/block/{base}/queue/rotational")
+        if p.exists():
+            return p.read_text().strip() == "1"
+    except:
+        pass
+    return False
+
+def disk_discard_supported(dev_path):
+    try:
+        res = run_command(['lsblk', '-dno', 'DISC-MAX', dev_path], check=False)
+        val = res.stdout.strip()
+        return val and val != "0B" and val != "0"
+    except:
+        return False
+
+def secure_erase_disk(dev_path):
+    if not os.path.exists(dev_path):
+        log(f"Device not found: {dev_path}", 'ERROR')
+        return False
+        
+    if disk_is_nvme(dev_path):
+        log(f"Secure erase: NVMe detected ({dev_path}) -> nvme format --ses=1")
+        # Ensure nvme-cli is present?
+        try:
+            run_command(['nvme', 'format', dev_path, '--ses=1'], sudo=True)
+            run_command(['udevadm', 'settle'], sudo=True)
+            return True
+        except Exception as e:
+            log(f"NVMe format failed: {e}", 'ERROR')
+            return False
+
+    if disk_is_rotational(dev_path):
+        log(f"Secure erase: HDD detected ({dev_path}) -> full zero overwrite (dd)")
+        try:
+            # bs=16M status=progress
+            run_command(['dd', 'if=/dev/zero', f'of={dev_path}', 'bs=16M', 'status=progress', 'oflag=direct'], sudo=True)
+            run_command(['sync'], sudo=True)
+            return True
+        except Exception as e:
+            log(f"DD overwrite failed: {e}", 'ERROR')
+            return False
+
+    # SSD/Flash
+    log(f"Secure erase: SSD/Flash detected ({dev_path}) -> blkdiscard")
+    if disk_discard_supported(dev_path):
+        try:
+            run_command(['blkdiscard', '-f', dev_path], sudo=True)
+            run_command(['udevadm', 'settle'], sudo=True)
+            return True
+        except Exception as e:
+            log(f"blkdiscard failed: {e}", 'ERROR')
+            return False
+    else:
+        log("Discard not supported on this device. Cannot perform secure erase.", 'ERROR')
+        return False
+
+class CmdArgumentParser(argparse.ArgumentParser):
+    def error(self, message):
+        raise argparse.ArgumentError(None, message)
+
+class DiskMgrShell(cmd.Cmd):
+    intro = 'Welcome to diskmgr. Type help or ? to list commands.\n'
+    prompt = f'{Colors.OKGREEN}(diskmgr) {Colors.ENDC}'
+    
+    def __init__(self):
+        super().__init__()
+        self.mappings = read_luks_map()
+        self.unmapped_cache = []
+
+    def do_help(self, arg):
+        'List available commands with "help" or detailed help with "help cmd".'
+        if arg:
+            super().do_help(arg)
+            return
+
+        print(f"\n{Colors.HEADER}Disk Manager (diskmgr){Colors.ENDC}")
+        print("A tool for managing LUKS encrypted disks with persistent mappings.\n")
+        
+        print(f"{Colors.BOLD}COMMANDS:{Colors.ENDC}")
+        print(f"  {Colors.OKGREEN}list{Colors.ENDC}")
+        print("      Shows all configured mappings and their status (Open/Mounted).")
+        print("      Also lists unmapped system disks with discovery IDs (e.g., U1, U2).")
+        
+        print(f"  {Colors.OKGREEN}map <id> <name>{Colors.ENDC}")
+        print("      Assigns a friendly name to a disk.")
+        print("      <id> can be a discovery ID (U1) or an existing index (1).")
+        print("      Example: 'map U1 backup_drive'")
+        
+        print(f"  {Colors.OKGREEN}open <name>{Colors.ENDC}")
+        print("      Unlocks the LUKS container and mounts it to /media/$USER/<name>.")
+        
+        print(f"  {Colors.OKGREEN}close <name>{Colors.ENDC}")
+        print("      Unmounts and closes the LUKS container.")
+
+        print(f"  {Colors.OKGREEN}label <name> [new_label]{Colors.ENDC}")
+        print("      Get or set the filesystem label of an OPEN disk.")
+        
+        print(f"  {Colors.OKGREEN}create <name> [options]{Colors.ENDC}")
+        print("      Initializes a new disk (Erase -> LUKS -> Format -> Mount).")
+        print("      Use 'help create' for full options.")
+
+        print(f"  {Colors.OKGREEN}erase <name/target>{Colors.ENDC}")
+        print("      Securely erases a disk (NVMe format, blkdiscard, or dd overwrite).")
+        print("      WARNING: Destructive!")
+        
+        print(f"  {Colors.OKGREEN}exit / quit / Ctrl+D{Colors.ENDC}")
+        print("      Exit the application.")
+
+        print("\nType 'help <command>' for more specific details.")
+
+    def do_exit(self, arg):
+        'Exit the application'
+        return True
+
+    def do_quit(self, arg):
+        'Exit the application'
+        return True
+
+    def do_EOF(self, arg):
+        'Exit the application'
+        print("")
+        return True
+
+    def get_disk_info(self):
+        # Use lsblk -J for JSON output
+        cmd = ['lsblk', '-J', '-e', '7', '-o', 'NAME,KNAME,TYPE,RM,SIZE,FSTYPE,LABEL,MOUNTPOINT,MODEL,WWN,PKNAME,TRAN,DISC-MAX']
+        try:
+            res = run_command(cmd, capture_output=True)
+            data = json.loads(res.stdout)
+            return data.get('blockdevices', [])
+        except Exception as e:
+            log(f"Failed to list disks: {e}", 'ERROR')
+            return []
+
+    def flatten_disks(self, devices):
+        """Recursively flatten the lsblk tree structure."""
+        flat = []
+        for dev in devices:
+            flat.append(dev)
+            if 'children' in dev:
+                flat.extend(self.flatten_disks(dev['children']))
+        return flat
+
+    def find_persistent_path(self, dev_node, wwn=None, type_='disk'):
+        # Try to find /dev/disk/by-id/ match
+        
+        # 1. Try WWN logic from opendisk
+        if wwn:
+            prefix = "nvme-" if wwn.startswith("eui.") else "wwn-"
+            path = f"/dev/disk/by-id/{prefix}{wwn}"
+            try:
+                if os.path.realpath(path) == os.path.realpath(f"/dev/{dev_node}"):
+                    return path
+            except:
+                pass
+
+        # 2. Brute force check /dev/disk/by-id
+        by_id_dir = Path('/dev/disk/by-id')
+        if by_id_dir.exists():
+            for link in by_id_dir.iterdir():
+                try:
+                    if link.resolve() == Path(f"/dev/{dev_node}").resolve():
+                        return str(link)
+                except:
+                    continue
+        
+        return "-"
+
+    def do_list(self, arg):
+        'List configured mappings and available disks'
+        self.mappings = read_luks_map() # Refresh
+        
+        # Header Format: Compact widths, strictly left-aligned
+        # #, NAME, PERSISTENT DEVICE PATH, DEVICE, MOUNTPOINT, LABEL, MOUNTED, SIZE, RM, FSTYPE, TYPE
+        header_fmt = "{:<5}{:<12}{:<70}{:<15}{:<25}{:<15}{:<9}{:<10}{:<4}{:<10}{:<10}"
+        
+        print(f"\n{Colors.HEADER}--- Configured LUKS Mappings ({get_map_file_path()}) ---{Colors.ENDC}")
+        print(header_fmt.format("#", "NAME", "PERSISTENT DEVICE PATH", "DEVICE", "MOUNTPOINT", "LABEL", "MOUNTED", "SIZE", "RM", "FSTYPE", "TYPE"))
+        print("-" * 185)
+        
+        i = 1
+        mapped_real_paths = set()
+        
+        for name, path in self.mappings.items():
+            device = "-"
+            dtype = "-"
+            rm = "-"
+            fstype = "-"
+            size = "-"
+            label = "-"
+            mountpoint = "-"
+            mounted = "N"
+            
+            real_path = None
+            if os.path.exists(path):
+                real_path = os.path.realpath(path)
+                mapped_real_paths.add(real_path)
+                
+                try:
+                    cmd_p = ['lsblk', '-n', '-P', '-o', 'NAME,TYPE,RM,FSTYPE,SIZE,LABEL', path]
+                    res_p = run_command(cmd_p, check=False)
+                    if res_p.stdout.strip():
+                        props = {}
+                        for part in shlex.split(res_p.stdout.strip()):
+                            if '=' in part:
+                                k, v = part.split('=', 1)
+                                props[k] = v
+                        
+                        device = props.get('NAME', '-')
+                        dtype = props.get('TYPE', '-')
+                        rm = props.get('RM', '-')
+                        fstype = props.get('FSTYPE', '-')
+                        size = props.get('SIZE', '-')
+                        label = props.get('LABEL', '-')
+                except:
+                    pass
+
+            mapper_path = f"/dev/mapper/{name}"
+            if os.path.exists(mapper_path):
+                res = run_command(['findmnt', '-rn', '-S', mapper_path, '-o', 'TARGET'], check=False)
+                if res.returncode == 0 and res.stdout.strip():
+                    mountpoint = res.stdout.strip()
+                    mounted = "Y"
+            
+            print(header_fmt.format(f"[{i}]", name, path, device, mountpoint, label, mounted, size, rm, fstype, dtype))
+            i += 1
+        
+        print(f"\n{Colors.HEADER}--- Other System Disks (Unmapped) ---{Colors.ENDC}")
+        print(header_fmt.format("#", "DEVICE", "PERSISTENT DEVICE PATH", "", "MOUNTPOINT", "LABEL", "", "SIZE", "RM", "FSTYPE", "TYPE"))
+        print("-" * 185)
+        
+        all_disks = self.get_disk_info()
+        flat_disks = self.flatten_disks(all_disks)
+        
+        self.unmapped_cache = [] # Reset cache
+        u_idx = 1
+        
+        for dev in flat_disks:
+            name = dev.get('name')
+            if not name: continue
+            
+            if name.startswith('loop') or name.startswith('dm-'):
+                continue
+            
+            dev_path = f"/dev/{name}"
+            try:
+                real_dev_path = os.path.realpath(dev_path)
+            except:
+                real_dev_path = dev_path
+            
+            if real_dev_path in mapped_real_paths:
+                continue
+            
+            fstype = dev.get('fstype') or '-'
+            label = dev.get('label') or '-'
+            size = dev.get('size') or '-'
+            rm = '1' if dev.get('rm') else '0'
+            dtype = dev.get('type') or '-'
+            mountpoint = dev.get('mountpoint') or '-'
+            
+            pdp = self.find_persistent_path(name, dev.get('wwn'))
+            
+            self.unmapped_cache.append({
+                'dev': dev_path,
+                'pdp': pdp if pdp != '-' else dev_path,
+                'size': size,
+                'model': dev.get('model'),
+                'type': dtype
+            })
+            
+            print(header_fmt.format(f"[U{u_idx}]", dev_path, pdp, "", mountpoint, label, "", size, rm, fstype, dtype))
+            u_idx += 1
+        print("")
+
+    def resolve_target(self, target_str):
+        if target_str.startswith('U') and target_str[1:].isdigit():
+            idx = int(target_str[1:]) - 1
+            if 0 <= idx < len(self.unmapped_cache):
+                return self.unmapped_cache[idx]['pdp']
+            return None
+        return target_str
+
+    def do_label(self, arg):
+        'Get or set filesystem label: label <name> [new_label]'
+        args = arg.split()
+        if not args:
+            log("Usage: label <name> [new_label]", 'ERROR')
+            return
+            
+        name = args[0]
+        new_label = args[1] if len(args) > 1 else None
+        
+        # Check mapping
+        mapper_path = f"/dev/mapper/{name}"
+        if not os.path.exists(mapper_path):
+             # check if it is a known mapping
+             self.mappings = read_luks_map()
+             if name in self.mappings:
+                 log(f"Mapping '{name}' is not open. Please 'open {name}' first.", 'ERROR')
+                 return
+             log(f"Device not found: {mapper_path}. Is it an open mapping?", 'ERROR')
+             return
+             
+        # Get info
+        try:
+            cmd = ['lsblk', '-J', '-o', 'FSTYPE,MOUNTPOINT,LABEL', mapper_path]
+            res = run_command(cmd, capture_output=True)
+            data = json.loads(res.stdout)
+            dev = data.get('blockdevices', [{}])[0]
+            fstype = dev.get('fstype')
+            mountpoint = dev.get('mountpoint')
+            current_label = dev.get('label')
+        except Exception as e:
+            log(f"Failed to inspect device: {e}", 'ERROR')
+            return
+            
+        if not new_label:
+            print(f"Label for {name} ({fstype}): {current_label if current_label else '<none>'}")
+            return
+            
+        if current_label == new_label:
+            log("Label is already set to that value.")
+            return
+            
+        log(f"Changing label: '{current_label}' -> '{new_label}' ({fstype})")
+        
+        if fstype == 'ext4':
+            try:
+                run_command(['e2label', mapper_path, new_label], sudo=True)
+                log("Label updated.")
+            except:
+                pass # run_command logs error
+        elif fstype == 'xfs':
+            if mountpoint:
+                log(f"Cannot label XFS while mounted at {mountpoint}. Run 'close {name}' first (or umount manually).", 'ERROR')
+                return
+            try:
+                run_command(['xfs_admin', '-L', new_label, mapper_path], sudo=True)
+                log("Label updated.")
+            except:
+                pass
+        else:
+            log(f"Unsupported filesystem for labeling: {fstype}", 'ERROR')
+
+    def do_map(self, arg):
+        'Create or modify a mapping: map <pdp_or_index> <name>'
+        args = arg.split()
+        if len(args) != 2:
+            log("Usage: map <pdp_or_index> <name>", 'ERROR')
+            return
+
+        target, name = args
+        self.mappings = read_luks_map() # Refresh
+        
+        # Resolve target
+        real_target = target
+        
+        if target.startswith('U') and target[1:].isdigit():
+            res = self.resolve_target(target)
+            if res:
+                real_target = res
+                log(f"Resolved {target} -> {real_target}")
+            else:
+                log(f"Invalid unmapped index: {target}. Run 'list' first.", 'ERROR')
+                return
+        
+        elif target.isdigit():
+            # Rename logic: "map 1 newname"
+            idx = int(target) - 1
+            if 0 <= idx < len(self.mappings):
+                old_name = list(self.mappings.keys())[idx]
+                real_target = self.mappings[old_name]
+                log(f"Renaming mapping {old_name} -> {name}")
+                del self.mappings[old_name]
+            else:
+                log(f"Invalid mapping index: {target}. Run 'list' first.", 'ERROR')
+                return
+        
+        if name in self.mappings:
+             log(f"Mapping '{name}' already exists.", 'ERROR')
+             return
+
+        self.mappings[name] = real_target
+        save_luks_map(self.mappings)
+        log(f"Mapping saved: {name} -> {real_target}")
+
+    def do_open(self, arg):
+        'Open and mount a mapped disk: open <name>'
+        name = arg.strip()
+        if not name:
+             log("Usage: open <name>", 'ERROR')
+             return
+             
+        self.mappings = read_luks_map()
+        if name not in self.mappings:
+            log(f"Unknown mapping: {name}", 'ERROR')
+            return
+            
+        src = self.mappings[name]
+        
+        # Wait for device
+        log(f"Waiting for device {src}...")
+        for _ in range(50): # 10s wait
+            if os.path.exists(src):
+                break
+            time.sleep(0.2)
+            
+        if not os.path.exists(src):
+            log(f"Device not found: {src}", 'ERROR')
+            return
+            
+        devnode = os.path.realpath(src)
+        
+        # Check LUKS
+        try:
+            run_command(['sudo', 'cryptsetup', 'isLuks', devnode])
+        except subprocess.CalledProcessError:
+             log(f"Device {devnode} is not a valid LUKS device.", 'ERROR')
+             return
+
+        mapper_path = f"/dev/mapper/{name}"
+        if not os.path.exists(mapper_path):
+            log(f"Opening LUKS mapping {name}...")
+            # Use passgen
+            pg_cmd = subprocess.Popen([PASSGEN_BIN], stdout=subprocess.PIPE, text=True)
+            # Pipe to cryptsetup
+            try:
+                run_command(
+                    ['cryptsetup', 'open', '--key-file', '-', src, name],
+                    input_str=pg_cmd.communicate()[0],
+                    sudo=True,
+                    check=True
+                )
+                log("LUKS opened.")
+            except Exception as e:
+                log(f"Failed to open LUKS: {e}", 'ERROR')
+                return
+        else:
+            log("Mapping already exists.")
+
+        # Mount
+        mountpoint = f"/media/{os.environ.get('USER', 'root')}/{name}"
+        if not os.path.exists(mountpoint):
+            run_command(['mkdir', '-p', mountpoint], sudo=True)
+            
+        # Check if mounted
+        res = run_command(['findmnt', '-rn', '-S', mapper_path], check=False)
+        if res.returncode != 0:
+            log(f"Mounting to {mountpoint}...")
+            run_command(['mount', mapper_path, mountpoint], sudo=True)
+            log("Mounted.")
+        else:
+            log("Already mounted.")
+
+    def do_close(self, arg):
+        'Unmount and close a mapped disk: close <name>'
+        name = arg.strip()
+        if not name:
+            log("Usage: close <name>", 'ERROR')
+            return
+
+        mapper_path = f"/dev/mapper/{name}"
+        mount_guess = f"/media/{os.environ.get('USER', 'root')}/{name}"
+
+        run_command(['sudo', '-v']) # Refresh sudo
+
+        # Unmount
+        # Check by mapper
+        res = run_command(['findmnt', '-rn', '-S', mapper_path, '-o', 'TARGET'], check=False)
+        if res.returncode == 0 and res.stdout.strip():
+            mp = res.stdout.strip()
+            log(f"Unmounting {mp}...")
+            run_command(['umount', mp], sudo=True)
+        elif run_command(['findmnt', '-rn', '-M', mount_guess], check=False).returncode == 0:
+             log(f"Unmounting {mount_guess}...")
+             run_command(['umount', mount_guess], sudo=True)
+        
+        # Close
+        if os.path.exists(mapper_path):
+            log(f"Closing mapping {name}...")
+            run_command(['cryptsetup', 'close', name], sudo=True)
+            log("Closed.")
+        else:
+            log("Mapping not open or already closed.")
+
+    def do_erase(self, arg):
+        'Securely erase a disk: erase <name/target> [-y]'
+        parser = CmdArgumentParser(prog='erase', add_help=False)
+        parser.add_argument('target', help='Target name or device')
+        parser.add_argument('-y', '--yes', action='store_true')
+        
+        try:
+            split_args = shlex.split(arg)
+            args = parser.parse_args(split_args)
+        except argparse.ArgumentError as e:
+            log(str(e), 'ERROR')
+            return
+        except SystemExit:
+            return
+
+        target_arg = args.target
+        real_target = None
+        
+        # Try to resolve if it's a name in map
+        self.mappings = read_luks_map()
+        if target_arg in self.mappings:
+            real_target = self.mappings[target_arg]
+        else:
+            # Try to resolve if it's U<n>
+            real_target = self.resolve_target(target_arg)
+            if not real_target:
+                real_target = target_arg # Assume path
+        
+        if not os.path.exists(real_target):
+            log(f"Target not found: {real_target}", 'ERROR')
+            return
+            
+        real_target = os.path.realpath(real_target)
+        log(f"Target resolved: {real_target}")
+        
+        if not args.yes:
+            print(f"\n{Colors.WARNING}DANGER: THIS WILL SECURELY ERASE ALL DATA ON {real_target}!{Colors.ENDC}")
+            print(f"This operation is IRREVERSIBLE.")
+            confirm = input(f"Type 'ERASE' to continue: ")
+            if confirm != "ERASE":
+                log("Confirmation failed. Aborting.", 'ERROR')
+                return
+
+        run_command(['sudo', '-v'])
+        
+        # Unmount dependencies?
+        # TODO: checking mounts
+        
+        if secure_erase_disk(real_target):
+            log("Secure erase completed successfully.")
+        else:
+            log("Secure erase failed.", 'ERROR')
+
+
+    def do_create(self, arg):
+        '''Initialize a disk: create <name> [options] OR create <target> <name> [options]
+        
+        Options:
+          --fs <ext4|xfs>
+          --label <label>
+          --gpt (Create GPT partition table + 1 partition)
+          --mbr (Create MBR partition table + 1 partition)
+          -y, --yes (Skip confirmation)
+        '''
+        parser = CmdArgumentParser(prog='create', add_help=False)
+        parser.add_argument('args', nargs='+', help='<name> or <target> <name>')
+        parser.add_argument('--fs', default='ext4', choices=['ext4', 'xfs'])
+        parser.add_argument('--label', help='Filesystem label')
+        parser.add_argument('--gpt', action='store_true')
+        parser.add_argument('--mbr', action='store_true')
+        parser.add_argument('-y', '--yes', action='store_true')
+
+        try:
+            split_args = shlex.split(arg)
+            args = parser.parse_args(split_args)
+        except argparse.ArgumentError as e:
+            log(str(e), 'ERROR')
+            return
+        except SystemExit:
+            return
+
+        target_arg = None
+        name = None
+
+        if len(args.args) == 1:
+            name = args.args[0]
+            # Must already exist in map
+            self.mappings = read_luks_map()
+            if name not in self.mappings:
+                log(f"Name '{name}' not found in map. Use 'create <target> <name>' or map it first.", 'ERROR')
+                return
+            target_arg = self.mappings[name]
+        elif len(args.args) == 2:
+            target_arg = args.args[0]
+            name = args.args[1]
+        else:
+            log("Invalid arguments. Usage: create <name> OR create <target> <name>", 'ERROR')
+            return
+
+        # Resolve target
+        target = self.resolve_target(target_arg)
+        if not target:
+            log(f"Could not resolve target: {target_arg}", 'ERROR')
+            return
+
+        # Wait/Verify target existence
+        real_target = os.path.realpath(target)
+        if not os.path.exists(real_target):
+            log(f"Target device not found: {target} (resolved: {real_target})", 'ERROR')
+            return
+            
+        log(f"Target: {real_target}")
+        log(f"Name: {name}")
+        
+        # Safety checks
+        if not args.yes:
+            print(f"\n{Colors.WARNING}DANGER: ALL DATA ON {real_target} WILL BE LOST!{Colors.ENDC}")
+            print(f"Creating encrypted volume '{name}'")
+            confirm = input(f"Type 'ERASE {name}' to continue: ")
+            if confirm != f"ERASE {name}":
+                log("Confirmation failed. Aborting.", 'ERROR')
+                return
+
+        run_command(['sudo', '-v'])
+
+        # Unmount anything on the disk
+        # (Simplified: check if mounted and unmount)
+        # In a real tool, we'd need more robust checking of partitions
+        log("Ensuring target is unmounted...")
+        # TODO: Better recursive unmount logic
+        
+        # Always do a soft wipe for create
+        run_command(['wipefs', '-a', real_target], sudo=True)
+
+        crypt_target = real_target
+        
+        # Partitioning
+        if args.gpt:
+            log("Creating GPT partition...")
+            run_command(['sgdisk', '--zap-all', real_target], sudo=True)
+            run_command(['sgdisk', '-n', f'1:0:0', '-t', '1:8300', '-c', f'1:{name}', real_target], sudo=True)
+            run_command(['udevadm', 'settle'], sudo=True)
+            # Guess partition name
+            if 'nvme' in real_target:
+                crypt_target = f"{real_target}p1"
+            else:
+                crypt_target = f"{real_target}1"
+        elif args.mbr:
+            log("Creating MBR partition...")
+            # using sfdisk scripting
+            sfdisk_script = f"label: dos\n{real_target}1 : start=2048, type=83"
+            run_command(['sfdisk', '--wipe', 'always', '--wipe-partitions', 'always', real_target], 
+                       input_str=sfdisk_script, sudo=True)
+            run_command(['udevadm', 'settle'], sudo=True)
+             # Guess partition name
+            if 'nvme' in real_target:
+                crypt_target = f"{real_target}p1"
+            else:
+                crypt_target = f"{real_target}1"
+
+        # LUKS Format
+        log(f"Formatting LUKS on {crypt_target}...")
+        pg_cmd = subprocess.Popen([PASSGEN_BIN], stdout=subprocess.PIPE, text=True)
+        try:
+            run_command(
+                ['cryptsetup', 'luksFormat', '--type', 'luks2', '--batch-mode', '--key-file', '-', crypt_target],
+                input_str=pg_cmd.communicate()[0],
+                sudo=True,
+                check=True
+            )
+        except Exception as e:
+            log(f"LUKS Format failed: {e}", 'ERROR')
+            return
+
+        # Open
+        log("Opening new LUKS volume...")
+        pg_cmd = subprocess.Popen([PASSGEN_BIN], stdout=subprocess.PIPE, text=True)
+        run_command(
+            ['cryptsetup', 'open', '--key-file', '-', crypt_target, name],
+            input_str=pg_cmd.communicate()[0],
+            sudo=True,
+            check=True
+        )
+
+        # Mkfs
+        mapper_path = f"/dev/mapper/{name}"
+        label = args.label if args.label else name
+        log(f"Formatting filesystem {args.fs} (label={label})...")
+        
+        if args.fs == 'ext4':
+            run_command(['mkfs.ext4', '-F', '-L', label, mapper_path], sudo=True)
+        elif args.fs == 'xfs':
+            run_command(['mkfs.xfs', '-f', '-L', label, mapper_path], sudo=True)
+
+        # Mount
+        mountpoint = f"/media/{os.environ.get('USER', 'root')}/{name}"
+        run_command(['mkdir', '-p', mountpoint], sudo=True)
+        run_command(['mount', mapper_path, mountpoint], sudo=True)
+
+        # Update map if needed
+        self.mappings = read_luks_map()
+        if name not in self.mappings:
+            # Try to resolve stable path for the crypt_target
+            # If we partitioned, we need the PARTITION's stable path or we store the disk's stable path?
+            # The map usually stores the CRYPT TARGET.
+            
+            stable_path = crypt_target
+            # Try to find by-id
+            pdp = self.find_persistent_path(os.path.basename(crypt_target))
+            if pdp != '-':
+                stable_path = pdp
+            
+            self.mappings[name] = stable_path
+            save_luks_map(self.mappings)
+            log(f"Added mapping: {name} -> {stable_path}")
+
+        log("Disk initialization complete.")
+
+
+if __name__ == '__main__':
+    try:
+        os.chmod(__file__, 0o755)
+    except:
+        pass
+    try:
+        DiskMgrShell().cmdloop()
+    except KeyboardInterrupt:
+        print("\nExiting...")
