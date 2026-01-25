@@ -837,7 +837,12 @@ class DiskMgrShell(cmd.Cmd):
             log(f"Unsupported filesystem for labeling: {fstype}", 'ERROR')
 
     def do_erase(self, arg):
-        '''Securely erase a disk: erase <name/target> [options]
+        '''Securely erase a disk: erase <target> [options]
+        
+        Target can be:
+          - A friendly name from your mappings (e.g., backup)
+          - A discovery ID from the list command (e.g., U1)
+          - A raw device path (e.g., /dev/sdb)
         
         Options:
           -y, --yes         Skip math confirmation questions
