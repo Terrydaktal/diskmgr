@@ -371,7 +371,7 @@ class DiskMgrShell(cmd.Cmd):
                      state = "MOUNTED"
 
             display_dev = phys_device
-            if dm_device:
+            if dm_device and dm_device != phys_device:
                 display_dev = f"{phys_device}({dm_device})"
 
             mapped_rows.append({
@@ -387,12 +387,12 @@ class DiskMgrShell(cmd.Cmd):
         self.unmapped_cache = []
         u_idx = 1
         for dev in flat_disks:
-            d_name = dev.get('name')
-            d_kname = dev.get('kname')
+            d_name = dev.get('name') # Usually mapper name or short kernel name
+            d_kname = dev.get('kname') # Kernel name (sda2, dm-0)
             if not d_name or d_name.startswith('loop'):
                 continue
             
-            # Hide if NAME or KNAME matches a known mapping
+            # Hide if NAME or KNAME matches a known mapping (1a, dm-0, etc.)
             if d_name in mapped_names or d_kname in mapped_names:
                 continue
 
@@ -403,14 +403,9 @@ class DiskMgrShell(cmd.Cmd):
             if real_dev_path in mapped_real_paths or dev_path in mapped_real_paths:
                 continue
             
-            # Additional check for DM devices: if they are children of our mappings
-            if d_name.startswith('dm-'):
-                try:
-                    slaves = list(Path(f"/sys/class/block/{d_name}/slaves").iterdir())
-                    if any(os.path.realpath(f"/dev/{s.name}") in mapped_real_paths for s in slaves):
-                        continue
-                except:
-                    pass
+            # Check for /dev/mapper/ links appearing in dev nodes
+            if os.path.exists(f"/dev/mapper/{d_name}"):
+                continue
 
             fstype = dev.get('fstype') or '-'
             label = dev.get('label') or '-'
