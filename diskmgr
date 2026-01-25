@@ -286,14 +286,14 @@ class DiskMgrShell(cmd.Cmd):
         
         UNDER THE HOOD:
         1.  Hardware Scan: Identifies all physical 'disk' devices (excluding partitions).
-        2.  Geometry Query: Runs 'sudo parted -m <dev> unit s print free'.
+        2.  Geometry Query: Runs 'sudo parted -m <dev> unit s print free' and 'blockdev --getsz'.
         3.  Parsing: 
             - Extracts Partition Table type (gpt/mbr) and sector sizes.
-            - Extracts partition numbers, names, and sector-based sizes.
+            - Calculates total logical sectors from blockdev output.
         4.  Formatting:
+            - Adds GPT metadata blocks (Primary/Backup) if applicable.
             - Identifies 'free' space segments.
-            - Calculates MiB and GiB values from sector counts (Size * Logical Sector / 1024^2).
-            - Adds GiB approximations for partitions larger than 1024MiB.
+            - Calculates MiB and GiB values from sector counts.
         '''
         all_devs = self.get_disk_info()
         disks = [d for d in all_devs if d.get('type') == 'disk']
@@ -308,33 +308,38 @@ class DiskMgrShell(cmd.Cmd):
             model = disk.get('model', 'Unknown')
             
             try:
-                # Use sector units for precise calculation
+                # 1. Get Geometry from parted
                 res = run_command(['parted', '-m', '-s', dev_path, 'unit', 's', 'print', 'free'], sudo=True)
                 lines = res.stdout.strip().splitlines()
                 
-                # Header Format: /path:size:transport:logical_sector:physical_sector:ptable:model:;
                 header_parts = lines[1].strip(';').split(':')
                 logical_sector = int(header_parts[3])
                 physical_sector = int(header_parts[4])
                 ptable = header_parts[5]
                 
-                print(f"\n{Colors.BOLD}Disk: {dev_path} ({model}) [{ptable}] [Sector: L{logical_sector}/P{physical_sector}]{Colors.ENDC}")
+                # 2. Get Total Size from blockdev (always in 512b units)
+                res_sz = run_command(['blockdev', '--getsz', dev_path], sudo=True)
+                total_512_sectors = int(res_sz.stdout.strip())
+                total_logical_sectors = (total_512_sectors * 512) // logical_sector
 
-                # Filter out the headers
+                print(f"\n{Colors.BOLD}Disk: {dev_path} ({model}) [{ptable}] [Sector: L{logical_sector}/P{physical_sector}] [Total Sectors: {total_logical_sectors}]{Colors.ENDC}")
+
+                # 3. Parse Data Lines
                 data_lines = [l for l in lines if l and not l.startswith('BYT') and not l.startswith('/')]
                 
                 segments = []
+                # GPT Primary Overhead
+                if ptable == 'gpt':
+                    segments.append(f"{Colors.FAIL}[ GPT Primary 0-33 ]{Colors.ENDC}")
+
                 for line in data_lines:
                     parts = line.strip(';').split(':')
-                    # Format: Number:Start:End:Size:FS:Name:Flags
                     if len(parts) < 4: continue
                     
                     num = parts[0]
-                    # Size is in sectors
                     size_sectors = int(parts[3].strip('s'))
                     fs_or_type = parts[4] if len(parts) > 4 else ""
                     
-                    # Convert sectors to human readable
                     size_bytes = size_sectors * logical_sector
                     size_mib = size_bytes / (1024 * 1024)
                     size_gib = size_bytes / (1024 * 1024 * 1024)
@@ -349,19 +354,18 @@ class DiskMgrShell(cmd.Cmd):
                     else:
                         name = parts[5] if len(parts) > 5 else ""
                         flags = parts[6] if len(parts) > 6 else ""
-                        
                         kname = f"{d_name}{num}"
                         if 'nvme' in d_name and not kname.startswith(f"{d_name}p"):
                             kname = f"{d_name}p{num}"
-                        
                         desc = f" {name}" if name else ""
-                        if not desc and fs_or_type:
-                            desc = f" {fs_or_type}"
-                            
+                        if not desc and fs_or_type: desc = f" {fs_or_type}"
                         flag_info = f" ({flags})" if flags else ""
-                        
                         segments.append(f"{Colors.OKGREEN}[ {kname}{desc} {size_info}{flag_info} ]{Colors.ENDC}")
                 
+                # GPT Backup Overhead
+                if ptable == 'gpt':
+                    segments.append(f"{Colors.FAIL}[ GPT Backup {total_logical_sectors-33}-{total_logical_sectors-1} ]{Colors.ENDC}")
+
                 print(" ".join(segments))
             except Exception as e:
                 print(f"\n{Colors.BOLD}Disk: {dev_path} ({model}){Colors.ENDC}")
