@@ -291,9 +291,11 @@ class DiskMgrShell(cmd.Cmd):
         
         # 1. Collect Mapped Disks
         mapped_real_paths = set()
+        mapped_names = set()
         i = 1
         for name, path in self.mappings.items():
-            device = "-"
+            phys_device = "-"
+            dm_device = ""
             fstype = "-"
             size = "-"
             label = "-"
@@ -301,6 +303,8 @@ class DiskMgrShell(cmd.Cmd):
             is_luks = "-"
             state = "MISSING"
             
+            mapped_names.add(name)
+
             if os.path.exists(path):
                 real_path = os.path.realpath(path)
                 mapped_real_paths.add(real_path)
@@ -325,7 +329,7 @@ class DiskMgrShell(cmd.Cmd):
                                 k, v = part.split('=', 1)
                                 props[k] = v
                         
-                        device = f"/dev/{props.get('KNAME', '-')}"
+                        phys_device = props.get('KNAME', '-')
                         fstype = props.get('FSTYPE', '-')
                         size = props.get('SIZE', '-')
                         label = props.get('LABEL', '-')
@@ -334,13 +338,11 @@ class DiskMgrShell(cmd.Cmd):
 
             mapper_path = f"/dev/mapper/{name}"
             if is_luks == "Y" and os.path.exists(mapper_path):
-                # Ensure all forms of the mapper path are added to hidden paths
                 mapped_real_paths.add(os.path.realpath(mapper_path))
                 mapped_real_paths.add(mapper_path)
-                
                 state = "OPEN"
                 try:
-                    cmd_m = ['lsblk', '-n', '-P', '-o', 'FSTYPE,LABEL,SIZE', mapper_path]
+                    cmd_m = ['lsblk', '-n', '-P', '-o', 'KNAME,FSTYPE,LABEL,SIZE', mapper_path]
                     res_m = run_command(cmd_m, check=False)
                     if res_m.stdout.strip():
                         props = {}
@@ -348,6 +350,8 @@ class DiskMgrShell(cmd.Cmd):
                             if '=' in part:
                                 k, v = part.split('=', 1)
                                 props[k] = v
+                        dm_device = props.get('KNAME', '')
+                        mapped_names.add(dm_device)
                         if props.get('FSTYPE'): fstype = props.get('FSTYPE')
                         if props.get('LABEL'): label = props.get('LABEL')
                         if props.get('SIZE'): size = props.get('SIZE')
@@ -364,10 +368,14 @@ class DiskMgrShell(cmd.Cmd):
                      mountpoint = res.stdout.strip()
                      state = "MOUNTED"
 
+            display_dev = phys_device
+            if dm_device:
+                display_dev = f"{phys_device}({dm_device})"
+
             mapped_rows.append({
                 'idx': f"[{i}]", 'name': name, 'luks': is_luks, 'state': state, 
                 'fstype': fstype, 'label': label if label else "-", 'mount': mountpoint, 
-                'dev': device.replace('/dev/', ''), 'size': size, 'path': path
+                'dev': display_dev, 'size': size, 'path': path
             })
             i += 1
 
@@ -378,19 +386,23 @@ class DiskMgrShell(cmd.Cmd):
         u_idx = 1
         for dev in flat_disks:
             d_name = dev.get('name')
+            d_kname = dev.get('kname')
             if not d_name or d_name.startswith('loop'):
                 continue
             
+            # Hide if NAME or KNAME matches a known mapping
+            if d_name in mapped_names or d_kname in mapped_names:
+                continue
+
             dev_path = f"/dev/{d_name}"
             real_dev_path = os.path.realpath(dev_path)
             
-            # Hide if this is a known mapped physical device or mapper device
+            # Hide if this is a known mapped physical device or mapper device path
             if real_dev_path in mapped_real_paths or dev_path in mapped_real_paths:
                 continue
             
             # Additional check for DM devices: if they are children of our mappings
             if d_name.startswith('dm-'):
-                # Check if it has a slave/parent we recognize
                 try:
                     slaves = list(Path(f"/sys/class/block/{d_name}/slaves").iterdir())
                     if any(os.path.realpath(f"/dev/{s.name}") in mapped_real_paths for s in slaves):
@@ -426,7 +438,7 @@ class DiskMgrShell(cmd.Cmd):
             unmapped_rows.append({
                 'idx': f"[U{u_idx}]", 'name': "-", 'luks': is_luks_u, 'state': state_u,
                 'fstype': fstype, 'label': label, 'mount': mountpoint,
-                'dev': d_name, 'size': size, 'path': pdp
+                'dev': d_kname if d_kname else d_name, 'size': size, 'path': pdp
             })
             u_idx += 1
 
