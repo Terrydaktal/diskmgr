@@ -284,19 +284,7 @@ class DiskMgrShell(cmd.Cmd):
         return "-"
 
     def do_list(self, arg):
-        '''List configured mappings and available system disks.
-        
-        UNDER THE HOOD:
-        1.  Resolution: Refreshes mappings from luksmap.tsv.
-        2.  Scanning: Executes 'lsblk' to gather hardware properties (FSTYPE, SIZE, etc.).
-        3.  Status Check:
-            - MISSING: Persistent path not found in /dev.
-            - CLOSED: Persistent path exists, but no active mapping in /dev/mapper.
-            - OPEN: Active mapping exists in /dev/mapper but is not mounted.
-            - MOUNTED: Filesystem is active and attached to the preferred mountpoint.
-        4.  Discovery: Identifies disks not in the mapping table and assigns discovery IDs (U1, U2...).
-        5.  Dynamic Layout: Calculates column widths based on current data for optimal alignment.
-        '''
+        'List configured mappings and available disks'
         self.mappings = read_luks_map()
         mapped_rows = []
         unmapped_rows = []
@@ -306,7 +294,6 @@ class DiskMgrShell(cmd.Cmd):
         i = 1
         for name, path in self.mappings.items():
             device = "-"
-            dtype = "-"
             fstype = "-"
             size = "-"
             label = "-"
@@ -318,10 +305,18 @@ class DiskMgrShell(cmd.Cmd):
                 real_path = os.path.realpath(path)
                 mapped_real_paths.add(real_path)
                 state = "CLOSED"
-                is_luks = "N"
                 
+                # Check LUKS status using cryptsetup
                 try:
-                    cmd_p = ['lsblk', '-n', '-P', '-o', 'NAME,TYPE,FSTYPE,SIZE,LABEL', path]
+                    run_command(['sudo', 'cryptsetup', 'isLuks', real_path])
+                    is_luks = "Y"
+                except:
+                    is_luks = "N"
+                    state = "UNMOUNTED"
+                
+                # Get Physical Device Properties
+                try:
+                    cmd_p = ['lsblk', '-n', '-P', '-o', 'KNAME,FSTYPE,SIZE,LABEL', real_path]
                     res_p = run_command(cmd_p, check=False)
                     if res_p.stdout.strip():
                         props = {}
@@ -330,21 +325,16 @@ class DiskMgrShell(cmd.Cmd):
                                 k, v = part.split('=', 1)
                                 props[k] = v
                         
-                        device = f"/dev/{props.get('NAME', '-')}"
-                        dtype = props.get('TYPE', '-')
+                        device = f"/dev/{props.get('KNAME', '-')}"
                         fstype = props.get('FSTYPE', '-')
                         size = props.get('SIZE', '-')
                         label = props.get('LABEL', '-')
-                        
-                        if fstype == 'crypto_LUKS':
-                            is_luks = "Y"
-                        else:
-                            state = "UNMOUNTED"
                 except:
                     pass
 
             mapper_path = f"/dev/mapper/{name}"
             if is_luks == "Y" and os.path.exists(mapper_path):
+                mapped_real_paths.add(os.path.realpath(mapper_path))
                 state = "OPEN"
                 try:
                     cmd_m = ['lsblk', '-n', '-P', '-o', 'FSTYPE,LABEL,SIZE', mapper_path]
@@ -365,7 +355,7 @@ class DiskMgrShell(cmd.Cmd):
                 if res.returncode == 0 and res.stdout.strip():
                     mountpoint = res.stdout.strip()
                     state = "MOUNTED"
-            elif state != "MISSING":
+            elif is_luks == "N" and state != "MISSING":
                  res = run_command(['findmnt', '-rn', '-S', os.path.realpath(path), '-o', 'TARGET'], check=False)
                  if res.returncode == 0 and res.stdout.strip():
                      mountpoint = res.stdout.strip()
@@ -385,9 +375,15 @@ class DiskMgrShell(cmd.Cmd):
         u_idx = 1
         for dev in flat_disks:
             d_name = dev.get('name')
-            if not d_name or d_name.startswith('loop') or d_name.startswith('dm-'):
+            if not d_name or d_name.startswith('loop'):
                 continue
             
+            # Hide DM devices unless they aren't part of our mappings
+            if d_name.startswith('dm-'):
+                real_dm_path = os.path.realpath(f"/dev/{d_name}")
+                if real_dm_path in mapped_real_paths:
+                    continue
+
             dev_path = f"/dev/{d_name}"
             real_dev_path = os.path.realpath(dev_path)
             if real_dev_path in mapped_real_paths:
@@ -404,12 +400,23 @@ class DiskMgrShell(cmd.Cmd):
                 'size': size, 'model': dev.get('model'), 'type': dev.get('type')
             })
             
-            is_luks = "Y" if fstype == 'crypto_LUKS' else "N"
-            state = "MOUNTED" if mountpoint != '-' else "UNMOUNTED"
-            if is_luks == "Y": state = "LOCKED"
+            is_luks_u = "N"
+            if fstype == 'crypto_LUKS':
+                is_luks_u = "Y"
+            else:
+                # Double check with cryptsetup for unmapped too
+                try:
+                    # Non-blocking check
+                    res_c = subprocess.run(['sudo', 'cryptsetup', 'isLuks', dev_path], capture_output=True)
+                    if res_c.returncode == 0: is_luks_u = "Y"
+                except:
+                    pass
+
+            state_u = "MOUNTED" if mountpoint != '-' else "UNMOUNTED"
+            if is_luks_u == "Y": state_u = "LOCKED"
 
             unmapped_rows.append({
-                'idx': f"[U{u_idx}]", 'name': "-", 'luks': is_luks, 'state': state,
+                'idx': f"[U{u_idx}]", 'name': "-", 'luks': is_luks_u, 'state': state_u,
                 'fstype': fstype, 'label': label, 'mount': mountpoint,
                 'dev': dev_path, 'size': size, 'path': pdp
             })
