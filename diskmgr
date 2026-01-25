@@ -997,8 +997,10 @@ class DiskMgrShell(cmd.Cmd):
         Note: You must 'map' a disk first to give it a name before erasing it.
         
         NUANCES & SAFETY:
-        - Scope: Wipes the physical hardware associated with the name. 
-        - Whole Disk vs Partition: Destruction is limited to the mapped boundary.
+        - Whole Disk (sda): Wipes the Partition Table (GPT/MBR) and ALL partitions.
+        - Partition (sda2): Wipes only that partition. Other partitions are safe.
+        - Mapped Name (1a): Resolves to the physical partition. Wiping it destroys 
+          the LUKS Header, making data recovery impossible even with the password.
         
         Options:
           -y, --yes         Skip math confirmation questions
@@ -1026,11 +1028,11 @@ class DiskMgrShell(cmd.Cmd):
         except SystemExit:
             return
 
-        target_arg = args.target
-        real_target = self.resolve_target(target_arg)
+        name = args.target
+        real_target = self.resolve_target(name, allow_id=False)
         
         if not real_target:
-            log(f"Invalid target: '{target_arg}'. Use a Discovery ID (e.g., [U1]) or an existing name.", 'ERROR')
+            log(f"Unknown mapping: '{name}'. You must 'map' a disk before you can erase it.", 'ERROR')
             return
         
         if not os.path.exists(real_target):
@@ -1064,6 +1066,29 @@ class DiskMgrShell(cmd.Cmd):
         
         Note: You must 'map' a disk first to give it a name before initializing it.
         
+        NUANCES & SCOPE:
+        1. Running create on a Partition (e.g., sda2)
+           The Result: Container-in-a-Box.
+           The script treats the existing partition as its "entire world."
+           - Partitioning: It skips the GPT/MBR step because you've already given it a partition.
+           - Encryption: It sets up LUKS directly inside the sda2 boundary.
+           - Filesystem: It formats the area inside sda2.
+           - The Big Picture: The rest of your disk (like sda1 or sda3) is untouched. 
+             You are simply replacing whatever was inside partition #2 with a new encrypted volume.
+
+        2. Running create on a Whole Disk (e.g., sda)
+           The Result: Total Takeover.
+           The script wipes the slate clean and rebuilds the drive from scratch.
+           - Wipe: It deletes the Partition Table (GPT/MBR) at the start of the disk. 
+             All existing partitions (sda1, sda2, etc.) are instantly lost.
+           - Rebuild:
+             * If you didn't use --gpt or --mbr: It formats the Entire Disk as one 
+               giant LUKS container (no partition table).
+             * If you used --gpt: It creates a fresh GPT table, creates a new 
+               partition #1 spanning the whole drive, and puts LUKS inside that.
+           - The Big Picture: You lose everything on the physical drive, and it 
+             becomes a single, clean encrypted volume.
+        
         Options:
           --fs <ext4|xfs>   Filesystem type (default: ext4)
           --label <label>   Set a different internal filesystem label (other than <name>)
@@ -1085,7 +1110,7 @@ class DiskMgrShell(cmd.Cmd):
         6.  Persistence: Adds the new disk's PDP to luksmap.tsv automatically.
         '''
         parser = CmdArgumentParser(prog='create', add_help=False)
-        parser.add_argument('args', nargs='+', help='<name> or <target> <name>')
+        parser.add_argument('args', nargs=1, help='<name>')
         parser.add_argument('--fs', default='ext4', choices=['ext4', 'xfs'])
         parser.add_argument('--label', help='Filesystem label')
         parser.add_argument('--plain', action='store_true', help='No LUKS encryption')
@@ -1102,28 +1127,10 @@ class DiskMgrShell(cmd.Cmd):
         except SystemExit:
             return
 
-        target_arg = None
-        name = None
-
-        if len(args.args) == 1:
-            name = args.args[0]
-            # Must already exist in map
-            self.mappings = read_luks_map()
-            if name not in self.mappings:
-                log(f"Name '{name}' not found in map. Use 'create <target> <name>' to initialize it.", 'ERROR')
-                return
-            target_arg = name # Will be resolved to path
-        elif len(args.args) == 2:
-            target_arg = args.args[0]
-            name = args.args[1]
-        else:
-            log("Invalid arguments. Usage: create <target> <name>", 'ERROR')
-            return
-
-        # Resolve target
-        target = self.resolve_target(target_arg)
+        name = args.args[0]
+        target = self.resolve_target(name, allow_id=False)
         if not target:
-            log(f"Invalid target: '{target_arg}'. Use a Discovery ID (e.g., [U1]) or an existing name.", 'ERROR')
+            log(f"Unknown mapping: '{name}'. You must 'map' a disk before you can initialize it.", 'ERROR')
             return
 
         # Wait/Verify target existence
