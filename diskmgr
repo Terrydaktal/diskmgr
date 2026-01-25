@@ -344,7 +344,11 @@ class DiskMgrShell(cmd.Cmd):
                         size = props.get('SIZE', '-')
                         label = props.get('LABEL', '-')
                         
-                        if fstype == 'crypto_LUKS':
+                        # Check LUKS status using udev (No sudo required)
+                        res_u = run_command(['udevadm', 'info', '--query=property', f'--name={real_path}'], check=False)
+                        if 'ID_FS_TYPE=crypto_LUKS' in res_u.stdout:
+                            is_luks = "Y"
+                        elif fstype == 'crypto_LUKS':
                             is_luks = "Y"
                 except:
                     pass
@@ -443,6 +447,11 @@ class DiskMgrShell(cmd.Cmd):
             is_luks_u = "N"
             if fstype == 'crypto_LUKS':
                 is_luks_u = "Y"
+            else:
+                # Check udev for unmapped too
+                res_uu = subprocess.run(['udevadm', 'info', '--query=property', f'--name={dev_path}'], capture_output=True, text=True)
+                if 'ID_FS_TYPE=crypto_LUKS' in res_uu.stdout:
+                    is_luks_u = "Y"
 
             state_u = "MOUNTED" if mountpoint != '-' else "UNMOUNTED"
             if is_luks_u == "Y": state_u = "LOCKED"
