@@ -533,6 +533,38 @@ class DiskMgrShell(cmd.Cmd):
         print(f"{Colors.OKGREEN}Verification successful. Proceeding...{Colors.ENDC}")
         return True
 
+    def is_root_disk(self, target_path):
+        """Checks if the target path is the root disk or partition."""
+        try:
+            # Get the root device
+            res = run_command(['findmnt', '-nro', 'SOURCE', '/'], capture_output=True)
+            root_dev = os.path.realpath(res.stdout.strip())
+            
+            target_real = os.path.realpath(target_path)
+            
+            # 1. Direct match
+            if target_real == root_dev:
+                return True
+                
+            # 2. Parent disk match (if target is /dev/sda and root is /dev/sda2)
+            res_p = run_command(['lsblk', '-no', 'PKNAME', root_dev], check=False)
+            parent = res_p.stdout.strip()
+            if parent and target_real == os.path.realpath(f"/dev/{parent}"):
+                return True
+                
+            # 3. Child partition match (if target is /dev/sda2 and root is /dev/sda)
+            res_c = run_command(['lsblk', '-no', 'PKNAME', target_real], check=False)
+            target_parent = res_c.stdout.strip()
+            if target_parent and root_dev == os.path.realpath(f"/dev/{target_parent}"):
+                # This is actually covered by case 1 if root is the disk, 
+                # but if root is a partition we don't want to wipe its siblings?
+                # Actually, the most dangerous case is wiping the disk containing root.
+                pass
+
+        except:
+            pass
+        return False
+
     def do_map(self, arg):
         '''Create or modify a persistent mapping: map <id/name> <new_name>
         
@@ -894,6 +926,10 @@ class DiskMgrShell(cmd.Cmd):
         real_target = os.path.realpath(real_target)
         log(f"Target resolved: {real_target}")
         
+        if self.is_root_disk(real_target):
+            log(f"OPERATION BLOCKED: {real_target} is part of the system root drive!", 'ERROR')
+            return
+
         if not args.yes:
             if not self.extensive_confirm(real_target):
                 return
@@ -994,6 +1030,10 @@ class DiskMgrShell(cmd.Cmd):
             log(f"Target device not found: {target} (resolved: {real_target})", 'ERROR')
             return
             
+        if self.is_root_disk(real_target):
+            log(f"OPERATION BLOCKED: {real_target} is part of the system root drive!", 'ERROR')
+            return
+
         log(f"Target: {real_target}")
         log(f"Name: {name}")
         
