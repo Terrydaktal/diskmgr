@@ -91,6 +91,36 @@ Display the physical partition layout and free space for all plugged-in disks.
             - Calculates MiB and GiB values from sector counts.
 ```
 
+### Example Output
+
+```text
+Disk: /dev/sda (ST1000LM035-1RK172) [gpt] [Sector: L512/P4096] [Total Sectors: 1953525168]
+[ GPT Primary 34s (17408.00B) ] [ free 2014s (1007.00KiB) ] [ sda1 - 262144s (128.00MiB) (msftres, no_automount) ] [ sda2 - 1953259520s (953740.00MiB ≈ 931.4GiB) (msftdata) ] [ free 1423s (711.50KiB) ] [ GPT Backup 33s (16896.00B) ]
+
+NAME   FSTYPE      FSVER LABEL UUID                                 FSAVAIL FSUSE% MOUNTPOINTS
+sda
+├─sda1
+└─sda2 crypto_LUKS 2           e038a8b5-d3a7-4bbb-bbea-5bed8cc07a04
+  └─1a ext4        1.0         5933d845-1098-4f16-ad7f-ff1f4a4a2105   18.3G    98% /media/lewis/1a
+-----------------------------------------------------------------------------------------------------------------------------------------------------------
+
+Disk: /dev/nvme0n1 (WD_BLACK SN8100 2000GB) [msdos] [Sector: L512/P512] [Total Sectors: 3907029168]
+[ MBR 2s (1024.00B) ] [ free 2046s (1023.00KiB) ] [ nvme0n1p1 ext4 3907026944s (1907728.00MiB ≈ 1863.0GiB) (boot) ] [ free 176s (88.00KiB) ]
+
+NAME        FSTYPE FSVER LABEL UUID                                 FSAVAIL FSUSE% MOUNTPOINTS
+nvme0n1
+└─nvme0n1p1 ext4   1.0         88f1dad3-95c6-418e-bea8-f5f3e072ea29  769.6G    53% /
+-----------------------------------------------------------------------------------------------------------------------------------------------------------
+
+Disk: /dev/nvme1n1 (WD Blue SN570 1TB) [msdos] [Sector: L512/P512] [Total Sectors: 1953525168]
+[ MBR 2s (1024.00B) ] [ free 2046s (1023.00KiB) ] [ nvme1n1p1 ext4 1953523120s (953868.71MiB ≈ 931.5GiB) ]
+
+NAME        FSTYPE FSVER LABEL      UUID                                 FSAVAIL FSUSE% MOUNTPOINTS
+nvme1n1
+└─nvme1n1p1 ext4   1.0   NewVolume1 72c22012-b161-4e2a-a762-94ff7fda47f9  311.3G    61% /media/lewis/NewVolume1
+-----------------------------------------------------------------------------------------------------------------------------------------------------------
+```
+
 ## Command Reference: `map`
 
 ```text
@@ -111,6 +141,17 @@ Create or modify a persistent mapping: map <name/id> <name>
         4.  Persistence: Writes the [Name <TAB> PDP] pair to luksmap.tsv.
 
         This ensures the disk is recognized correctly regardless of USB port or device node changes.
+```
+
+## Command Reference: `unmap`
+
+```text
+Remove a persistent mapping: unmap <name>
+
+        UNDER THE HOOD:
+        1.  Resolution: Verifies the mapping exists in luksmap.tsv.
+        2.  Removal: Deletes the [Name <TAB> PDP] pair from the internal dictionary.
+        3.  Persistence: Re-writes luksmap.tsv with the mapping removed.
 ```
 
 ## Command Reference: `open`
@@ -241,6 +282,39 @@ Initialize a disk: create <name> [options]
             - Formats the cleartext device with ext4 or xfs.
             - (ext4 only): Reclaims the 5% reserved space for root using 'tune2fs -m 0'.
         6.  Persistence: Adds the new disk's PDP to luksmap.tsv automatically.
+```
+
+## Command Reference: `clone`
+
+```text
+Clone one disk or partition to another: clone <src_name> <dst_name>
+
+        Note: The target disk MUST be the same size or larger than the source.
+
+        STEP-BY-STEP PROCESS:
+        1.  Resolution: Maps both friendly names to their physical device nodes (PDP).
+        2.  Size Validation: Queries 'blockdev --getsize64' for both. Aborts if dst < src.
+        3.  Safety Audit: Verifies that the target is NOT the system root drive.
+        4.  Confirmation: Requires solving two math problems to authorize data destruction.
+        5.  Cloning: Executes 'dd' with 16MiB buffers and direct I/O for maximum throughput.
+        6.  Sync: Flushes kernel buffers to ensure all data is physically committed to disk.
+
+        SCENARIOS:
+        - Drive to Drive:
+          Creates a 1:1 bit-perfect clone. The target disk becomes an identical twin,
+          including the Partition Table, UUIDs, and all partitions.
+          Note: If the target is larger, the extra space appears as 'free' at the end.
+        - Partition to Partition:
+          Copies the internal data of the source partition into the target partition.
+          Useful for moving a LUKS container or a specific filesystem.
+          Warning: Filesystem UUIDs will be duplicated; avoid mounting both simultaneously.
+        - Partition to Drive:
+          The source partition's content is written to the start of the physical disk.
+          This destroys the target's partition table and turns the disk into a
+          "partitionless" volume (e.g., a raw LUKS device).
+        - Drive to Partition (DANGEROUS):
+          Writes the source's boot sectors and partition table into the target partition.
+          This usually results in an unreadable "nested" structure.
 ```
 
 ## Configuration
