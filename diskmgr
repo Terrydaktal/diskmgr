@@ -336,7 +336,12 @@ class DiskMgrShell(cmd.Cmd):
                     if first_start > 0:
                         overhead_size = first_start
                         overhead_bytes = overhead_size * logical_sector
-                        segments.append(f"{Colors.FAIL}[ Overhead {overhead_size}s ({overhead_bytes:.2f}B) ]{Colors.ENDC}")
+                        
+                        label = "Overhead"
+                        if ptable == 'gpt': label = "GPT Primary"
+                        elif ptable in ['msdos', 'mbr']: label = "MBR"
+                        
+                        segments.append(f"{Colors.FAIL}[ {label} {overhead_size}s ({overhead_bytes:.2f}B) ]{Colors.ENDC}")
 
                 for line in data_lines:
                     parts = line.strip(';').split(':')
@@ -376,7 +381,11 @@ class DiskMgrShell(cmd.Cmd):
                     if last_end < total_logical_sectors - 1:
                         overhead_size = total_logical_sectors - 1 - last_end
                         overhead_bytes = overhead_size * logical_sector
-                        segments.append(f"{Colors.FAIL}[ Overhead {overhead_size}s ({overhead_bytes:.2f}B) ]{Colors.ENDC}")
+                        
+                        label = "Overhead"
+                        if ptable == 'gpt': label = "GPT Backup"
+                        
+                        segments.append(f"{Colors.FAIL}[ {label} {overhead_size}s ({overhead_bytes:.2f}B) ]{Colors.ENDC}")
 
                 print(" ".join(segments))
             except Exception as e:
