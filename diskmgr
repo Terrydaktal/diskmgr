@@ -729,6 +729,94 @@ class DiskMgrShell(cmd.Cmd):
         else:
             log("Mapping not open or already closed.")
 
+    def do_label(self, arg):
+        '''Get or set the filesystem label of an OPEN disk: label <name> [new_label]
+        
+        UNDER THE HOOD:
+        1.  Validation: Verifies that the disk is currently open/unlocked.
+        2.  Identification: Queries the filesystem type (ext4, xfs, etc.) via 'lsblk'.
+        3.  Labeling:
+            - ext4: Uses 'e2label' on the active mapper device.
+            - xfs: Requires a temporary unmount, then uses 'xfs_admin -L', then remounts.
+        
+        The label is written directly to the disk hardware and persists across different computers.
+        '''
+        args = arg.split()
+        if not args:
+            log("Usage: label <name> [new_label]", 'ERROR')
+            return
+            
+        name = args[0]
+        new_label = args[1] if len(args) > 1 else None
+        
+        # Check mapping
+        mapper_path = f"/dev/mapper/{name}"
+        if not os.path.exists(mapper_path):
+             # check if it is a known mapping
+             self.mappings = read_luks_map()
+             if name in self.mappings:
+                 log(f"Mapping '{name}' is not open. Please 'open {name}' first.", 'ERROR')
+                 return
+             log(f"Device not found: {mapper_path}. Is it an open mapping?", 'ERROR')
+             return
+             
+        # Get info
+        try:
+            cmd = ['lsblk', '-J', '-o', 'FSTYPE,MOUNTPOINT,LABEL', mapper_path]
+            res = run_command(cmd, capture_output=True)
+            data = json.loads(res.stdout)
+            dev = data.get('blockdevices', [{}])[0]
+            fstype = dev.get('fstype')
+            mountpoint = dev.get('mountpoint')
+            current_label = dev.get('label')
+        except Exception as e:
+            log(f"Failed to inspect device: {e}", 'ERROR')
+            return
+            
+        if not new_label:
+            print(f"Label for {name} ({fstype}): {current_label if current_label else '<none>'}")
+            return
+            
+        if current_label == new_label:
+            log("Label is already set to that value.")
+            return
+            
+        log(f"Changing label: '{current_label}' -> '{new_label}' ({fstype})")
+        
+        if fstype == 'ext4':
+            try:
+                run_command(['e2label', mapper_path, new_label], sudo=True)
+                log("Label updated.")
+            except:
+                pass # run_command logs error
+        elif fstype == 'xfs':
+            # XFS requires unmount
+            remount_needed = False
+            if mountpoint:
+                log(f"XFS requires unmounting to label. Unmounting {mountpoint}...")
+                try:
+                    run_command(['umount', mountpoint], sudo=True)
+                    remount_needed = True
+                except Exception as e:
+                    log(f"Failed to unmount: {e}", 'ERROR')
+                    return
+
+            try:
+                run_command(['xfs_admin', '-L', new_label, mapper_path], sudo=True)
+                log("Label updated.")
+            except:
+                pass
+            finally:
+                if remount_needed:
+                    log(f"Remounting {mountpoint}...")
+                    try:
+                         run_command(['mount', mapper_path, mountpoint], sudo=True)
+                    except Exception as e:
+                        log(f"Failed to remount: {e}. You may need to mount manually.", 'ERROR')
+
+        else:
+            log(f"Unsupported filesystem for labeling: {fstype}", 'ERROR')
+
     def do_erase(self, arg):
         '''Securely erase a disk: erase <name/target> [-y]
         
