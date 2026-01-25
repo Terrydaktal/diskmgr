@@ -188,7 +188,7 @@ class DiskMgrShell(cmd.Cmd):
             return
 
         print(f"\n{Colors.HEADER}Disk Manager (diskmgr){Colors.ENDC}")
-        print("A tool for managing LUKS encrypted disks with persistent mappings.\n")
+        print("A tool for managing encrypted and plain disks with persistent mappings.\n")
         
         print(f"{Colors.BOLD}COMMANDS:{Colors.ENDC}")
         print(f"  {Colors.OKGREEN}list{Colors.ENDC}")
@@ -201,10 +201,10 @@ class DiskMgrShell(cmd.Cmd):
         print("      Example: 'map U1 backup_drive'")
         
         print(f"  {Colors.OKGREEN}open <name>{Colors.ENDC}")
-        print("      Unlocks the LUKS container and mounts it to /media/$USER/<name>.")
+        print("      Unlocks LUKS (if encrypted) and mounts the disk.")
         
         print(f"  {Colors.OKGREEN}close <name>{Colors.ENDC}")
-        print("      Unmounts and closes the LUKS container.")
+        print("      Unmounts and closes the disk.")
 
         print(f"  {Colors.OKGREEN}label <name> [new_label]{Colors.ENDC}")
         print("      Get or set the filesystem label of an OPEN disk.")
