@@ -8,6 +8,7 @@ import csv
 import json
 import time
 import argparse
+import random
 from pathlib import Path
 
 # Configuration
@@ -445,93 +446,31 @@ class DiskMgrShell(cmd.Cmd):
             return None
         return target_str
 
-    def do_label(self, arg):
-        '''Get or set the filesystem label of an OPEN disk: label <name> [new_label]
+    def extensive_confirm(self, target_name):
+        print(f"\n{Colors.FAIL}{Colors.BOLD}!!! EXTENSIVE CONFIRMATION REQUIRED !!!{Colors.ENDC}")
+        print(f"You are about to perform a DESTRUCTIVE operation on: {Colors.WARNING}{target_name}{Colors.ENDC}")
+        print("To proceed, you must answer two math questions correctly.")
         
-        UNDER THE HOOD:
-        1.  Validation: Verifies that the disk is currently open/unlocked.
-        2.  Identification: Queries the filesystem type (ext4, xfs, etc.) via 'lsblk'.
-        3.  Labeling:
-            - ext4: Uses 'e2label' on the active mapper device.
-            - xfs: Requires a temporary unmount, then uses 'xfs_admin -L', then remounts.
-        
-        The label is written directly to the disk hardware and persists across different computers.
-        '''
-        args = arg.split()
-        if not args:
-            log("Usage: label <name> [new_label]", 'ERROR')
-            return
+        for i in range(2):
+            a = random.randint(11, 99)
+            b = random.randint(11, 99)
+            op = random.choice(['+', '-'])
+            if op == '+':
+                ans = a + b
+            else:
+                ans = a - b
             
-        name = args[0]
-        new_label = args[1] if len(args) > 1 else None
-        
-        # Check mapping
-        mapper_path = f"/dev/mapper/{name}"
-        if not os.path.exists(mapper_path):
-             # check if it is a known mapping
-             self.mappings = read_luks_map()
-             if name in self.mappings:
-                 log(f"Mapping '{name}' is not open. Please 'open {name}' first.", 'ERROR')
-                 return
-             log(f"Device not found: {mapper_path}. Is it an open mapping?", 'ERROR')
-             return
-             
-        # Get info
-        try:
-            cmd = ['lsblk', '-J', '-o', 'FSTYPE,MOUNTPOINT,LABEL', mapper_path]
-            res = run_command(cmd, capture_output=True)
-            data = json.loads(res.stdout)
-            dev = data.get('blockdevices', [{}])[0]
-            fstype = dev.get('fstype')
-            mountpoint = dev.get('mountpoint')
-            current_label = dev.get('label')
-        except Exception as e:
-            log(f"Failed to inspect device: {e}", 'ERROR')
-            return
-            
-        if not new_label:
-            print(f"Label for {name} ({fstype}): {current_label if current_label else '<none>'}")
-            return
-            
-        if current_label == new_label:
-            log("Label is already set to that value.")
-            return
-            
-        log(f"Changing label: '{current_label}' -> '{new_label}' ({fstype})")
-        
-        if fstype == 'ext4':
             try:
-                run_command(['e2label', mapper_path, new_label], sudo=True)
-                log("Label updated.")
-            except:
-                pass # run_command logs error
-        elif fstype == 'xfs':
-            # XFS requires unmount
-            remount_needed = False
-            if mountpoint:
-                log(f"XFS requires unmounting to label. Unmounting {mountpoint}...")
-                try:
-                    run_command(['umount', mountpoint], sudo=True)
-                    remount_needed = True
-                except Exception as e:
-                    log(f"Failed to unmount: {e}", 'ERROR')
-                    return
-
-            try:
-                run_command(['xfs_admin', '-L', new_label, mapper_path], sudo=True)
-                log("Label updated.")
-            except:
-                pass
-            finally:
-                if remount_needed:
-                    log(f"Remounting {mountpoint}...")
-                    try:
-                         run_command(['mount', mapper_path, mountpoint], sudo=True)
-                    except Exception as e:
-                        log(f"Failed to remount: {e}. You may need to mount manually.", 'ERROR')
-
-        else:
-            log(f"Unsupported filesystem for labeling: {fstype}", 'ERROR')
+                user_ans = input(f"Question {i+1}/2: What is {a} {op} {b}? ")
+                if not user_ans or int(user_ans) != ans:
+                    log("Incorrect answer. Aborting operation.", 'ERROR')
+                    return False
+            except ValueError:
+                log("Invalid input. Aborting operation.", 'ERROR')
+                return False
+        
+        print(f"{Colors.OKGREEN}Verification successful. Proceeding...{Colors.ENDC}")
+        return True
 
     def do_map(self, arg):
         '''Create or modify a persistent mapping: map <id> <name>
@@ -799,11 +738,7 @@ class DiskMgrShell(cmd.Cmd):
         log(f"Target resolved: {real_target}")
         
         if not args.yes:
-            print(f"\n{Colors.WARNING}DANGER: THIS WILL SECURELY ERASE ALL DATA ON {real_target}!{Colors.ENDC}")
-            print(f"This operation is IRREVERSIBLE.")
-            confirm = input(f"Type 'ERASE' to continue: ")
-            if confirm != "ERASE":
-                log("Confirmation failed. Aborting.", 'ERROR')
+            if not self.extensive_confirm(real_target):
                 return
 
         run_command(['sudo', '-v'])
@@ -883,12 +818,7 @@ class DiskMgrShell(cmd.Cmd):
         
         # Safety checks
         if not args.yes:
-            print(f"\n{Colors.WARNING}DANGER: ALL DATA ON {real_target} WILL BE LOST!{Colors.ENDC}")
-            mode_str = "plain" if args.plain else "encrypted"
-            print(f"Creating {mode_str} volume '{name}'")
-            confirm = input(f"Type 'ERASE {name}' to continue: ")
-            if confirm != f"ERASE {name}":
-                log("Confirmation failed. Aborting.", 'ERROR')
+            if not self.extensive_confirm(f"{name} ({real_target})"):
                 return
 
         run_command(['sudo', '-v'])
