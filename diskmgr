@@ -334,7 +334,10 @@ class DiskMgrShell(cmd.Cmd):
 
             mapper_path = f"/dev/mapper/{name}"
             if is_luks == "Y" and os.path.exists(mapper_path):
+                # Ensure all forms of the mapper path are added to hidden paths
                 mapped_real_paths.add(os.path.realpath(mapper_path))
+                mapped_real_paths.add(mapper_path)
+                
                 state = "OPEN"
                 try:
                     cmd_m = ['lsblk', '-n', '-P', '-o', 'FSTYPE,LABEL,SIZE', mapper_path]
@@ -364,7 +367,7 @@ class DiskMgrShell(cmd.Cmd):
             mapped_rows.append({
                 'idx': f"[{i}]", 'name': name, 'luks': is_luks, 'state': state, 
                 'fstype': fstype, 'label': label if label else "-", 'mount': mountpoint, 
-                'dev': device, 'size': size, 'path': path
+                'dev': device.replace('/dev/', ''), 'size': size, 'path': path
             })
             i += 1
 
@@ -378,17 +381,23 @@ class DiskMgrShell(cmd.Cmd):
             if not d_name or d_name.startswith('loop'):
                 continue
             
-            # Hide DM devices unless they aren't part of our mappings
-            if d_name.startswith('dm-'):
-                real_dm_path = os.path.realpath(f"/dev/{d_name}")
-                if real_dm_path in mapped_real_paths:
-                    continue
-
             dev_path = f"/dev/{d_name}"
             real_dev_path = os.path.realpath(dev_path)
-            if real_dev_path in mapped_real_paths:
+            
+            # Hide if this is a known mapped physical device or mapper device
+            if real_dev_path in mapped_real_paths or dev_path in mapped_real_paths:
                 continue
             
+            # Additional check for DM devices: if they are children of our mappings
+            if d_name.startswith('dm-'):
+                # Check if it has a slave/parent we recognize
+                try:
+                    slaves = list(Path(f"/sys/class/block/{d_name}/slaves").iterdir())
+                    if any(os.path.realpath(f"/dev/{s.name}") in mapped_real_paths for s in slaves):
+                        continue
+                except:
+                    pass
+
             fstype = dev.get('fstype') or '-'
             label = dev.get('label') or '-'
             size = dev.get('size') or '-'
@@ -404,7 +413,6 @@ class DiskMgrShell(cmd.Cmd):
             if fstype == 'crypto_LUKS':
                 is_luks_u = "Y"
             else:
-                # Double check with cryptsetup for unmapped too
                 try:
                     # Non-blocking check
                     res_c = subprocess.run(['sudo', 'cryptsetup', 'isLuks', dev_path], capture_output=True)
@@ -418,7 +426,7 @@ class DiskMgrShell(cmd.Cmd):
             unmapped_rows.append({
                 'idx': f"[U{u_idx}]", 'name': "-", 'luks': is_luks_u, 'state': state_u,
                 'fstype': fstype, 'label': label, 'mount': mountpoint,
-                'dev': dev_path, 'size': size, 'path': pdp
+                'dev': d_name, 'size': size, 'path': pdp
             })
             u_idx += 1
 
