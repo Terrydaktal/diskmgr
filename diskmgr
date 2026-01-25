@@ -328,11 +328,15 @@ class DiskMgrShell(cmd.Cmd):
                 data_lines = [l for l in lines if l and not l.startswith('BYT') and not l.startswith('/')]
                 
                 segments = []
-                # GPT/MBR Overhead
-                if ptable == 'gpt':
-                    segments.append(f"{Colors.FAIL}[ GPT Primary Header 34s (17.00KiB) ]{Colors.ENDC}")
-                elif ptable in ['msdos', 'mbr']:
-                    segments.append(f"{Colors.FAIL}[ MBR Sector 1s (512.00B) ]{Colors.ENDC}")
+                
+                # Dynamic Initial Overhead Detection
+                if data_lines:
+                    first_line_parts = data_lines[0].strip(';').split(':')
+                    first_start = int(first_line_parts[1].strip('s'))
+                    if first_start > 0:
+                        overhead_size = first_start
+                        overhead_bytes = overhead_size * logical_sector
+                        segments.append(f"{Colors.FAIL}[ Overhead {overhead_size}s ({overhead_bytes:.2f}B) ]{Colors.ENDC}")
 
                 for line in data_lines:
                     parts = line.strip(';').split(':')
@@ -361,15 +365,18 @@ class DiskMgrShell(cmd.Cmd):
                         if 'nvme' in d_name and not kname.startswith(f"{d_name}p"):
                             kname = f"{d_name}p{num}"
                         
-                        # Type logic
                         dtype = fs_or_type if fs_or_type else "-"
-                        
                         flag_info = f" ({flags})" if flags else ""
                         segments.append(f"{Colors.OKGREEN}[ {kname} {dtype} {size_sectors}s ({size_info}){flag_info} ]{Colors.ENDC}")
                 
-                # GPT Backup Overhead
-                if ptable == 'gpt':
-                    segments.append(f"{Colors.FAIL}[ GPT Backup Header 33s (16.50KiB) ]{Colors.ENDC}")
+                # Dynamic Final Overhead Detection (Backup GPT etc)
+                if data_lines:
+                    last_line_parts = data_lines[-1].strip(';').split(':')
+                    last_end = int(last_line_parts[2].strip('s'))
+                    if last_end < total_logical_sectors - 1:
+                        overhead_size = total_logical_sectors - 1 - last_end
+                        overhead_bytes = overhead_size * logical_sector
+                        segments.append(f"{Colors.FAIL}[ Overhead {overhead_size}s ({overhead_bytes:.2f}B) ]{Colors.ENDC}")
 
                 print(" ".join(segments))
             except Exception as e:
