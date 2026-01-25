@@ -284,7 +284,7 @@ class DiskMgrShell(cmd.Cmd):
         return "-"
 
     def do_list(self, arg):
-        '''List configured mappings and available system disks.
+        '''List all configured mappings and available system disks in a single table.
         
         UNDER THE HOOD:
         1.  Resolution: Refreshes mappings from luksmap.tsv.
@@ -841,9 +841,10 @@ class DiskMgrShell(cmd.Cmd):
         '''Securely erase a disk: erase <target> [options]
         
         Target can be:
-          - A friendly name from your mappings (e.g., backup)
-          - A discovery ID from the list command (e.g., U1)
-          - A raw device path (e.g., /dev/sdb)
+          - A mapping name (e.g., backup)
+          - A discovery ID (e.g., [U1])
+        
+        Note: Raw device paths (e.g., /dev/sdb) are NOT allowed.
         
         Options:
           -y, --yes         Skip math confirmation questions
@@ -904,9 +905,11 @@ class DiskMgrShell(cmd.Cmd):
         '''Initialize a new disk: create <target> <name> [options]
         
         Parameters:
-          <target>          The current ID or path (e.g., U1 or /dev/sdb)
+          <target>          Discovery ID from the list command (e.g., [U1])
           <name>            The permanent MAPPING NAME (used for mounting and commands).
                             This will also be used as the default filesystem LABEL.
+        
+        Note: Raw device paths (e.g., /dev/sdb) are NOT allowed.
         
         Options:
           --fs <ext4|xfs>   Filesystem type (default: ext4)
