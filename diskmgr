@@ -492,12 +492,24 @@ class DiskMgrShell(cmd.Cmd):
         print("")
 
     def resolve_target(self, target_str):
-        if target_str.startswith('U') and target_str[1:].isdigit():
-            idx = int(target_str[1:]) - 1
+        '''Resolves a target string to a physical path.
+        Only supports Discovery IDs (U1, [U1]) or existing mapping names.
+        '''
+        clean = target_str.strip('[]')
+        
+        # 1. Check Discovery ID
+        if clean.startswith('U') and clean[1:].isdigit():
+            idx = int(clean[1:]) - 1
             if 0 <= idx < len(self.unmapped_cache):
                 return self.unmapped_cache[idx]['pdp']
             return None
-        return target_str
+            
+        # 2. Check Mapping Name
+        self.mappings = read_luks_map()
+        if target_str in self.mappings:
+            return self.mappings[target_str]
+            
+        return None
 
     def extensive_confirm(self, target_name):
         print(f"\n{Colors.FAIL}{Colors.BOLD}!!! EXTENSIVE CONFIRMATION REQUIRED !!!{Colors.ENDC}")
@@ -526,53 +538,42 @@ class DiskMgrShell(cmd.Cmd):
         return True
 
     def do_map(self, arg):
-        '''Create or modify a persistent mapping: map <id> <name>
+        '''Create or modify a persistent mapping: map <id/name> <new_name>
         
         Usage:
-          map <id> <name>   Assigns friendly name to discovery ID (e.g., map U1 backup)
-          map <num> <name>  Renames an existing mapping by its index (e.g., map 1 backup)
+          map [U1] backup    Assigns friendly name to discovery ID (e.g., map U1 backup)
+          map 1a backup      Renames an existing mapping (e.g., map 1a backup)
+        
+        Note: Raw device paths (e.g., /dev/sdb) are NOT allowed.
         
         UNDER THE HOOD:
         1.  Input Resolution: 
-            - discovery ID (e.g., U1): Resolves the temporary device to its Persistent Device Path (PDP).
-            - mapping index (e.g., 1): Selects an existing mapping for RENAME operations.
+            - discovery ID (e.g., [U1]): Resolves the temporary device to its Persistent Device Path (PDP).
+            - mapping name (e.g., 1a): Selects an existing mapping for RENAME operations.
         2.  PDP Linking: Extracts the /dev/disk/by-id/ path for the target hardware.
         3.  Conflict Check: Ensures the new friendly name is not already in use.
         4.  Persistence: Writes the [Name <TAB> PDP] pair to luksmap.tsv.
-        
-        This ensures the disk is recognized correctly regardless of USB port or device node changes.
         '''
         args = arg.split()
         if len(args) != 2:
-            log("Usage: map <pdp_or_index> <name>", 'ERROR')
+            log("Usage: map <id/name> <new_name>", 'ERROR')
             return
 
         target, name = args
         self.mappings = read_luks_map() # Refresh
         
-        # Resolve target
-        real_target = target
-        
-        if target.startswith('U') and target[1:].isdigit():
-            res = self.resolve_target(target)
-            if res:
-                real_target = res
-                log(f"Resolved {target} -> {real_target}")
-            else:
-                log(f"Invalid unmapped index: {target}. Run 'list' first.", 'ERROR')
+        # 1. Check for Rename (target is a mapping name)
+        if target in self.mappings:
+            real_target = self.mappings[target]
+            log(f"Renaming mapping {target} -> {name}")
+            del self.mappings[target]
+        else:
+            # 2. Check for New Map (target is a discovery ID)
+            real_target = self.resolve_target(target)
+            if not real_target:
+                log(f"Invalid target: '{target}'. Use a Discovery ID (e.g., [U1]) or an existing name.", 'ERROR')
                 return
-        
-        elif target.isdigit():
-            # Rename logic: "map 1 newname"
-            idx = int(target) - 1
-            if 0 <= idx < len(self.mappings):
-                old_name = list(self.mappings.keys())[idx]
-                real_target = self.mappings[old_name]
-                log(f"Renaming mapping {old_name} -> {name}")
-                del self.mappings[old_name]
-            else:
-                log(f"Invalid mapping index: {target}. Run 'list' first.", 'ERROR')
-                return
+            log(f"Resolved {target} -> {real_target}")
         
         if name in self.mappings:
              log(f"Mapping '{name}' already exists.", 'ERROR')
@@ -607,7 +608,7 @@ class DiskMgrShell(cmd.Cmd):
              
         self.mappings = read_luks_map()
         if name not in self.mappings:
-            log(f"Unknown mapping: {name}", 'ERROR')
+            log(f"Unknown mapping: {name}. Use 'list' to find Discovery IDs and 'map' them first.", 'ERROR')
             return
             
         src = self.mappings[name]
@@ -871,17 +872,11 @@ class DiskMgrShell(cmd.Cmd):
             return
 
         target_arg = args.target
-        real_target = None
+        real_target = self.resolve_target(target_arg)
         
-        # Try to resolve if it's a name in map
-        self.mappings = read_luks_map()
-        if target_arg in self.mappings:
-            real_target = self.mappings[target_arg]
-        else:
-            # Try to resolve if it's U<n>
-            real_target = self.resolve_target(target_arg)
-            if not real_target:
-                real_target = target_arg # Assume path
+        if not real_target:
+            log(f"Invalid target: '{target_arg}'. Use a Discovery ID (e.g., [U1]) or an existing name.", 'ERROR')
+            return
         
         if not os.path.exists(real_target):
             log(f"Target not found: {real_target}", 'ERROR')
@@ -957,20 +952,20 @@ class DiskMgrShell(cmd.Cmd):
             # Must already exist in map
             self.mappings = read_luks_map()
             if name not in self.mappings:
-                log(f"Name '{name}' not found in map. Use 'create <target> <name>' or map it first.", 'ERROR')
+                log(f"Name '{name}' not found in map. Use 'create <target> <name>' to initialize it.", 'ERROR')
                 return
-            target_arg = self.mappings[name]
+            target_arg = name # Will be resolved to path
         elif len(args.args) == 2:
             target_arg = args.args[0]
             name = args.args[1]
         else:
-            log("Invalid arguments. Usage: create <name> OR create <target> <name>", 'ERROR')
+            log("Invalid arguments. Usage: create <target> <name>", 'ERROR')
             return
 
         # Resolve target
         target = self.resolve_target(target_arg)
         if not target:
-            log(f"Could not resolve target: {target_arg}", 'ERROR')
+            log(f"Invalid target: '{target_arg}'. Use a Discovery ID (e.g., [U1]) or an existing name.", 'ERROR')
             return
 
         # Wait/Verify target existence
