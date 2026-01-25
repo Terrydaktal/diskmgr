@@ -340,7 +340,7 @@ class DiskMgrShell(cmd.Cmd):
             if is_luks == "Y" and os.path.exists(mapper_path):
                 mapped_real_paths.add(os.path.realpath(mapper_path))
                 mapped_real_paths.add(mapper_path)
-                mapped_names.add(os.path.basename(mapper_path)) # Hide '1a'
+                mapped_names.add(name) # Hide '1a'
                 
                 state = "OPEN"
                 try:
@@ -352,8 +352,11 @@ class DiskMgrShell(cmd.Cmd):
                             if '=' in part:
                                 k, v = part.split('=', 1)
                                 props[k] = v
+                        # Get mapper kernel name (e.g. dm-0)
                         dm_device = props.get('KNAME', '')
-                        if dm_device: mapped_names.add(dm_device) # Hide 'dm-0'
+                        if dm_device: mapped_names.add(dm_device)
+                        
+                        # Use mapper properties for FS details
                         if props.get('FSTYPE'): fstype = props.get('FSTYPE')
                         if props.get('LABEL'): label = props.get('LABEL')
                         if props.get('SIZE'): size = props.get('SIZE')
