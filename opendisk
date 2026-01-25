@@ -143,49 +143,71 @@ get_unmapped_disks() {
 
 if [[ "${1:-}" == "-l" || "${1:-}" == "--list" ]]; then
   echo "--- Configured Mappings ($mapfile) ---"
-  printf "%-5s %-10s %-6s %-10s %-65s %s\n" "#" "NAME" "LUKS" "STATE" "PERSISTENT DEVICE PATH" "MOUNTPOINT"
-  echo "------------------------------------------------------------------------------------------------------------------------------------------------"
+  # Header: #, NAME, LUKS, STATE, FSTYPE, LABEL, MOUNTPOINT, DEVICE, SIZE, PERSISTENT PATH
+  printf "%-5s %-12s %-6s %-10s %-12s %-15s %-25s %-15s %-8s %s\n" \
+    "#" "NAME" "LUKS" "STATE" "FSTYPE" "LABEL" "MOUNTPOINT" "DEVICE" "SIZE" "PERSISTENT PATH"
+  echo "------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------"
   i=1
   declare -A mapped_devs
   while read -r m_name m_src || [[ -n "$m_name" ]]; do
     [[ -n "$m_name" && "$m_name" != "#"* ]] || continue
     m_state="MISSING"
     m_luks="-"
+    m_fstype="-"
+    m_label="-"
     m_mnt="/media/$USER/$m_name"
+    m_dev="-"
+    m_size="-"
     m_path="$m_src"
     
     if [[ -e "$m_src" ]]; then
       real_path=$(readlink -f "$m_src")
       mapped_devs["$real_path"]="$m_name"
-      m_fstype=$(lsblk -no FSTYPE "$m_src" | head -n1)
+      
+      eval "$(lsblk -no NAME,FSTYPE,LABEL,SIZE -P "$m_src" | head -n1)"
+      m_dev="/dev/$NAME"
+      m_fstype="${FSTYPE:- -}"
+      m_label="${LABEL:- -}"
+      m_size="${SIZE:- -}"
       
       if [[ "$m_fstype" == "crypto_LUKS" ]]; then
         m_luks="Y"
         m_state="CLOSED"
         if [[ -e "/dev/mapper/$m_name" ]]; then
           m_state="OPEN"
-          m_mnt=$(findmnt -rn -S "/dev/mapper/$m_name" -o TARGET || true)
-          [[ -n "$m_mnt" ]] && m_state="MOUNTED"
+          # Get inner props
+          eval "$(lsblk -no FSTYPE,LABEL,SIZE -P "/dev/mapper/$m_name" | head -n1)"
+          m_fstype="${FSTYPE:-$m_fstype}"
+          m_label="${LABEL:-$m_label}"
+          m_size="${SIZE:-$m_size}"
+          
+          m_actual_mnt=$(findmnt -rn -S "/dev/mapper/$m_name" -o TARGET || true)
+          if [[ -n "$m_actual_mnt" ]]; then
+             m_mnt="$m_actual_mnt"
+             m_state="MOUNTED"
+          fi
         fi
       else
         m_luks="N"
-        # Check plain mount
-        m_mnt=$(findmnt -rn -S "$real_path" -o TARGET || true)
-        if [[ -n "$m_mnt" ]]; then
+        m_actual_mnt=$(findmnt -rn -S "$real_path" -o TARGET || true)
+        if [[ -n "$m_actual_mnt" ]]; then
+           m_mnt="$m_actual_mnt"
            m_state="MOUNTED"
         else
            m_state="UNMOUNTED"
         fi
       fi
     fi
-    printf "%-5s %-10s %-6s %-10s %-65s %s\n" "[$i]" "$m_name" "$m_luks" "$m_state" "$m_path" "$m_mnt"
+    printf "%-5s %-12s %-6s %-10s %-12s %-15s %-25s %-15s %-8s %s\n" \
+      "[$i]" "$m_name" "$m_luks" "$m_state" "$m_fstype" "$m_label" "$m_mnt" "$m_dev" "$m_size" "$m_path"
     ((i++))
   done < "$mapfile"
   
   echo
   echo "--- Other System Disks (Unmapped) ---"
-  printf "%-5s %-15s %-6s %-10s %-65s %-10s %-15s %s\n" "#" "DEVICE" "LUKS" "STATE" "PERSISTENT DEVICE PATH" "SIZE" "LABEL" "MOUNTPOINT"
-  echo "------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------"
+  printf "%-5s %-12s %-6s %-10s %-12s %-15s %-25s %-15s %-8s %s\n" \
+    "#" "NAME" "LUKS" "STATE" "FSTYPE" "LABEL" "MOUNTPOINT" "DEVICE" "SIZE" "PERSISTENT PATH"
+  echo "------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------"
   j=1
   while IFS='|' read -r dev fstype pdp size label mnt; do
     is_luks="N"
@@ -195,7 +217,8 @@ if [[ "${1:-}" == "-l" || "${1:-}" == "--list" ]]; then
     [[ -n "$mnt" && "$mnt" != "-" ]] && state="MOUNTED"
     [[ "$is_luks" == "Y" ]] && state="LOCKED"
 
-    printf "%-5s %-15s %-6s %-10s %-65s %-10s %-15s %s\n" "[U$j]" "$dev" "$is_luks" "$state" "$pdp" "$size" "$label" "$mnt"
+    printf "%-5s %-12s %-6s %-10s %-12s %-15s %-25s %-15s %-8s %s\n" \
+      "[U$j]" "-" "$is_luks" "$state" "$fstype" "$label" "$mnt" "$dev" "$size" "$pdp"
     ((j++))
   done < <(get_unmapped_disks)
   exit 0

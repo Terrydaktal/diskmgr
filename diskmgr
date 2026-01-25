@@ -282,43 +282,31 @@ class DiskMgrShell(cmd.Cmd):
 
     def do_list(self, arg):
         'List configured mappings and available disks'
-        self.mappings = read_luks_map() # Refresh
+        self.mappings = read_luks_map()
+        mapped_rows = []
+        unmapped_rows = []
         
-        # Header Format:
-        # #, NAME, LUKS, STATE, FSTYPE, LABEL, MOUNTPOINT, DEVICE, SIZE, PERSISTENT PATH
-        header_fmt = "{:<5}{:<12}{:<6}{:<10}{:<10}{:<15}{:<25}{:<12}{:<8}{:<50}"
-        
-        print(f"\n{Colors.HEADER}--- Configured Mappings ({get_map_file_path()}) ---{Colors.ENDC}")
-        print(header_fmt.format("#", "NAME", "LUKS", "STATE", "FSTYPE", "LABEL", "MOUNTPOINT", "DEVICE", "SIZE", "PERSISTENT PATH"))
-        print("-" * 155)
-        
-        i = 1
+        # 1. Collect Mapped Disks
         mapped_real_paths = set()
-        
+        i = 1
         for name, path in self.mappings.items():
             device = "-"
             dtype = "-"
-            rm = "-"
             fstype = "-"
             size = "-"
             label = "-"
-            mountpoint = "-"
-            
+            mountpoint = f"/media/{os.environ.get('USER', 'root')}/{name}"
             is_luks = "-"
             state = "MISSING"
-            
-            real_path = None
-            mountpoint = f"/media/{os.environ.get('USER', 'root')}/{name}"
             
             if os.path.exists(path):
                 real_path = os.path.realpath(path)
                 mapped_real_paths.add(real_path)
-                state = "CLOSED" # Default if present
-                is_luks = "N" # Default if present
+                state = "CLOSED"
+                is_luks = "N"
                 
-                # 1. Get Physical Device Properties
                 try:
-                    cmd_p = ['lsblk', '-n', '-P', '-o', 'NAME,TYPE,RM,FSTYPE,SIZE,LABEL', path]
+                    cmd_p = ['lsblk', '-n', '-P', '-o', 'NAME,TYPE,FSTYPE,SIZE,LABEL', path]
                     res_p = run_command(cmd_p, check=False)
                     if res_p.stdout.strip():
                         props = {}
@@ -327,12 +315,11 @@ class DiskMgrShell(cmd.Cmd):
                                 k, v = part.split('=', 1)
                                 props[k] = v
                         
-                        device = props.get('NAME', '-')
+                        device = f"/dev/{props.get('NAME', '-')}"
                         dtype = props.get('TYPE', '-')
-                        rm = props.get('RM', '-')
                         fstype = props.get('FSTYPE', '-')
                         size = props.get('SIZE', '-')
-                        label = props.get('LABEL', '-') 
+                        label = props.get('LABEL', '-')
                         
                         if fstype == 'crypto_LUKS':
                             is_luks = "Y"
@@ -341,100 +328,99 @@ class DiskMgrShell(cmd.Cmd):
                 except:
                     pass
 
-            # 2. Check Mapper/Mount State
             mapper_path = f"/dev/mapper/{name}"
-            
-            # For plain disks, we mount the device directly
-            # For LUKS, we mount the mapper
-            target_to_check = mapper_path if is_luks == "Y" else real_path
-
-            if is_luks == "Y":
-                if os.path.exists(mapper_path):
-                    state = "OPEN"
-                    # Get Inner Stats
-                    try:
-                        cmd_m = ['lsblk', '-n', '-P', '-o', 'FSTYPE,LABEL,SIZE', mapper_path]
-                        res_m = run_command(cmd_m, check=False)
-                        if res_m.stdout.strip():
-                            props = {}
-                            for part in shlex.split(res_m.stdout.strip()):
-                                if '=' in part:
-                                    k, v = part.split('=', 1)
-                                    props[k] = v
-                            
-                            # Override with inner details
-                            if props.get('FSTYPE'): fstype = props.get('FSTYPE')
-                            if props.get('LABEL'): label = props.get('LABEL')
-                            if props.get('SIZE'): size = props.get('SIZE')
-                    except:
-                        pass
-                    
-                    # Check Mount
-                    res = run_command(['findmnt', '-rn', '-S', mapper_path, '-o', 'TARGET'], check=False)
-                    if res.returncode == 0 and res.stdout.strip():
-                        mountpoint = res.stdout.strip()
-                        state = "MOUNTED"
-            elif real_path:
-                 # Plain disk check mount
-                 res = run_command(['findmnt', '-rn', '-S', real_path, '-o', 'TARGET'], check=False)
+            if is_luks == "Y" and os.path.exists(mapper_path):
+                state = "OPEN"
+                try:
+                    cmd_m = ['lsblk', '-n', '-P', '-o', 'FSTYPE,LABEL,SIZE', mapper_path]
+                    res_m = run_command(cmd_m, check=False)
+                    if res_m.stdout.strip():
+                        props = {}
+                        for part in shlex.split(res_m.stdout.strip()):
+                            if '=' in part:
+                                k, v = part.split('=', 1)
+                                props[k] = v
+                        if props.get('FSTYPE'): fstype = props.get('FSTYPE')
+                        if props.get('LABEL'): label = props.get('LABEL')
+                        if props.get('SIZE'): size = props.get('SIZE')
+                except:
+                    pass
+                
+                res = run_command(['findmnt', '-rn', '-S', mapper_path, '-o', 'TARGET'], check=False)
+                if res.returncode == 0 and res.stdout.strip():
+                    mountpoint = res.stdout.strip()
+                    state = "MOUNTED"
+            elif state != "MISSING":
+                 res = run_command(['findmnt', '-rn', '-S', os.path.realpath(path), '-o', 'TARGET'], check=False)
                  if res.returncode == 0 and res.stdout.strip():
                      mountpoint = res.stdout.strip()
                      state = "MOUNTED"
 
-            
-            print(header_fmt.format(f"[{i}]", name, is_luks, state, fstype, label if label else "-", mountpoint, device, size, path))
+            mapped_rows.append({
+                'idx': f"[{i}]", 'name': name, 'luks': is_luks, 'state': state, 
+                'fstype': fstype, 'label': label if label else "-", 'mount': mountpoint, 
+                'dev': device, 'size': size, 'path': path
+            })
             i += 1
-        
-        print(f"\n{Colors.HEADER}--- Other System Disks (Unmapped) ---{Colors.ENDC}")
-        print(header_fmt.format("#", "NAME", "LUKS", "STATE", "FSTYPE", "LABEL", "MOUNTPOINT", "DEVICE", "SIZE", "PERSISTENT PATH"))
-        print("-" * 155)
-        
+
+        # 2. Collect Unmapped Disks
         all_disks = self.get_disk_info()
         flat_disks = self.flatten_disks(all_disks)
-        
-        self.unmapped_cache = [] # Reset cache
+        self.unmapped_cache = []
         u_idx = 1
-        
         for dev in flat_disks:
-            name = dev.get('name')
-            if not name: continue
-            
-            if name.startswith('loop') or name.startswith('dm-'):
+            d_name = dev.get('name')
+            if not d_name or d_name.startswith('loop') or d_name.startswith('dm-'):
                 continue
             
-            dev_path = f"/dev/{name}"
-            try:
-                real_dev_path = os.path.realpath(dev_path)
-            except:
-                real_dev_path = dev_path
-            
+            dev_path = f"/dev/{d_name}"
+            real_dev_path = os.path.realpath(dev_path)
             if real_dev_path in mapped_real_paths:
                 continue
             
             fstype = dev.get('fstype') or '-'
             label = dev.get('label') or '-'
             size = dev.get('size') or '-'
-            rm = '1' if dev.get('rm') else '0'
-            dtype = dev.get('type') or '-'
             mountpoint = dev.get('mountpoint') or '-'
-            
-            pdp = self.find_persistent_path(name, dev.get('wwn'))
+            pdp = self.find_persistent_path(d_name, dev.get('wwn'))
             
             self.unmapped_cache.append({
-                'dev': dev_path,
-                'pdp': pdp if pdp != '-' else dev_path,
-                'size': size,
-                'model': dev.get('model'),
-                'type': dtype
+                'dev': dev_path, 'pdp': pdp if pdp != '-' else dev_path,
+                'size': size, 'model': dev.get('model'), 'type': dev.get('type')
             })
             
             is_luks = "Y" if fstype == 'crypto_LUKS' else "N"
             state = "MOUNTED" if mountpoint != '-' else "UNMOUNTED"
-            if is_luks == "Y": state = "LOCKED" 
-            
-            # #, NAME, LUKS, STATE, FSTYPE, LABEL, MOUNTPOINT, DEVICE, SIZE, PERSISTENT PATH
-            print(header_fmt.format(f"[U{u_idx}]", dev_path, is_luks, state, fstype, label, mountpoint, "", size, pdp))
+            if is_luks == "Y": state = "LOCKED"
+
+            unmapped_rows.append({
+                'idx': f"[U{u_idx}]", 'name': "-", 'luks': is_luks, 'state': state,
+                'fstype': fstype, 'label': label, 'mount': mountpoint,
+                'dev': dev_path, 'size': size, 'path': pdp
+            })
             u_idx += 1
+
+        # 3. Calculate Widths
+        headers = ["#", "NAME", "LUKS", "STATE", "FSTYPE", "LABEL", "MOUNTPOINT", "DEVICE", "SIZE", "PERSISTENT PATH"]
+        keys = ['idx', 'name', 'luks', 'state', 'fstype', 'label', 'mount', 'dev', 'size', 'path']
+        widths = {k: len(h) for k, h in zip(keys, headers)}
+        
+        for row in mapped_rows + unmapped_rows:
+            for k in keys:
+                widths[k] = max(widths[k], len(str(row[k])))
+        
+        fmt = "  ".join([f"{{:<{widths[k]}}}" for k in keys])
+
+        # 4. Print
+        def print_table(title, rows):
+            print(f"\n{Colors.HEADER}--- {title} ---{Colors.ENDC}")
+            print(fmt.format(*headers))
+            print("-" * (sum(widths.values()) + len(keys)*2))
+            for row in rows:
+                print(fmt.format(*[row[k] for k in keys]))
+
+        print_table(f"Configured Mappings ({get_map_file_path()})", mapped_rows)
+        print_table("Other System Disks (Unmapped)", unmapped_rows)
         print("")
 
     def resolve_target(self, target_str):
