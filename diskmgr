@@ -928,7 +928,9 @@ class DiskMgrShell(cmd.Cmd):
         4.  LUKS Format (Default):
             - Uses 'passgen' to generate a master key.
             - Runs 'cryptsetup luksFormat' with LUKS2 encryption.
-        5.  Filesystem: Formats the cleartext device with ext4 or xfs.
+        5.  Filesystem: 
+            - Formats the cleartext device with ext4 or xfs.
+            - (ext4 only): Reclaims the 5% reserved space for root using 'tune2fs -m 0'.
         6.  Persistence: Adds the new disk's PDP to luksmap.tsv automatically.
         '''
         parser = CmdArgumentParser(prog='create', add_help=False)
@@ -1056,6 +1058,8 @@ class DiskMgrShell(cmd.Cmd):
         
         if args.fs == 'ext4':
             run_command(['mkfs.ext4', '-F', '-L', label, fs_target], sudo=True)
+            log("Reclaiming 5% reserved space (tune2fs -m 0)...")
+            run_command(['tune2fs', '-m', '0', fs_target], sudo=True)
         elif args.fs == 'xfs':
             run_command(['mkfs.xfs', '-f', '-L', label, fs_target], sudo=True)
 
