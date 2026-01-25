@@ -918,16 +918,6 @@ class DiskMgrShell(cmd.Cmd):
             log(f"Added mapping: {name} -> {stable_path}")
 
         log("Disk initialization complete.")
-            # Try to find by-id
-            pdp = self.find_persistent_path(os.path.basename(crypt_target))
-            if pdp != '-':
-                stable_path = pdp
-            
-            self.mappings[name] = stable_path
-            save_luks_map(self.mappings)
-            log(f"Added mapping: {name} -> {stable_path}")
-
-        log("Disk initialization complete.")
 
 
 if __name__ == '__main__':
