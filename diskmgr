@@ -330,9 +330,9 @@ class DiskMgrShell(cmd.Cmd):
                 segments = []
                 # GPT/MBR Overhead
                 if ptable == 'gpt':
-                    segments.append(f"{Colors.FAIL}[ GPT Primary 0-33 ]{Colors.ENDC}")
+                    segments.append(f"{Colors.FAIL}[ GPT Primary Header 34s (17.00KiB) ]{Colors.ENDC}")
                 elif ptable in ['msdos', 'mbr']:
-                    segments.append(f"{Colors.FAIL}[ MBR Sector 0 ]{Colors.ENDC}")
+                    segments.append(f"{Colors.FAIL}[ MBR Sector 1s (512.00B) ]{Colors.ENDC}")
 
                 for line in data_lines:
                     parts = line.strip(';').split(':')
@@ -343,30 +343,33 @@ class DiskMgrShell(cmd.Cmd):
                     fs_or_type = parts[4] if len(parts) > 4 else ""
                     
                     size_bytes = size_sectors * logical_sector
-                    size_mib = size_bytes / (1024 * 1024)
-                    size_gib = size_bytes / (1024 * 1024 * 1024)
-                    
-                    if size_mib >= 1024:
-                        size_info = f"{size_mib:.2f}MiB ≈ {size_gib:.1f}GiB"
+                    # Use B, KiB, MiB, GiB based on size
+                    if size_bytes < 1024:
+                        size_info = f"{size_bytes:.2f}B"
+                    elif size_bytes < 1024**2:
+                        size_info = f"{size_bytes/1024:.2f}KiB"
+                    elif size_bytes < 1024**3:
+                        size_info = f"{size_bytes/(1024**2):.2f}MiB"
                     else:
-                        size_info = f"{size_mib:.2f}MiB"
+                        size_info = f"{size_bytes/(1024**2):.2f}MiB ≈ {size_bytes/(1024**3):.1f}GiB"
 
                     if fs_or_type == 'free' or (not fs_or_type and len(parts) == 5):
-                        segments.append(f"{Colors.OKCYAN}[ free {size_info} ]{Colors.ENDC}")
+                        segments.append(f"{Colors.OKCYAN}[ free {size_sectors}s ({size_info}) ]{Colors.ENDC}")
                     else:
-                        name = parts[5] if len(parts) > 5 else ""
                         flags = parts[6] if len(parts) > 6 else ""
                         kname = f"{d_name}{num}"
                         if 'nvme' in d_name and not kname.startswith(f"{d_name}p"):
                             kname = f"{d_name}p{num}"
-                        desc = f" {name}" if name else ""
-                        if not desc and fs_or_type: desc = f" {fs_or_type}"
+                        
+                        # Type logic
+                        dtype = fs_or_type if fs_or_type else "-"
+                        
                         flag_info = f" ({flags})" if flags else ""
-                        segments.append(f"{Colors.OKGREEN}[ {kname}{desc} {size_info}{flag_info} ]{Colors.ENDC}")
+                        segments.append(f"{Colors.OKGREEN}[ {kname} {dtype} {size_sectors}s ({size_info}){flag_info} ]{Colors.ENDC}")
                 
                 # GPT Backup Overhead
                 if ptable == 'gpt':
-                    segments.append(f"{Colors.FAIL}[ GPT Backup {total_logical_sectors-33}-{total_logical_sectors-1} ]{Colors.ENDC}")
+                    segments.append(f"{Colors.FAIL}[ GPT Backup Header 33s (16.50KiB) ]{Colors.ENDC}")
 
                 print(" ".join(segments))
             except Exception as e:
