@@ -4,6 +4,7 @@ A utility designed to simplify the management of encrypted and plain removable m
 
 ## Overview
 
+```text
 A utility designed to simplify the management of encrypted and plain removable media.
 It maps friendly labels to hardware-specific Persistent Device Paths (PDP), ensuring
 that disks are recognized reliably even if device nodes (like /dev/sdb) change.
@@ -32,8 +33,9 @@ COMMANDS:
       Exit the application.
 
 Type 'help <command>' for more specific details.
+```
 
-## Command: `list`
+## Command Reference: `list`
 
 ```text
 List configured mappings and available system disks.
@@ -50,7 +52,7 @@ List configured mappings and available system disks.
         5.  Dynamic Layout: Calculates column widths based on current data for optimal alignment.
 ```
 
-## Command: `map`
+## Command Reference: `map`
 
 ```text
 Create or modify a persistent mapping: map <id> <name>
@@ -66,7 +68,7 @@ Create or modify a persistent mapping: map <id> <name>
         This ensures the disk is recognized correctly regardless of USB port or device node changes.
 ```
 
-## Command: `open`
+## Command Reference: `open`
 
 ```text
 Unlock (if encrypted) and mount a disk: open <name>
@@ -87,7 +89,7 @@ Unlock (if encrypted) and mount a disk: open <name>
             it unmounts and remounts it to the preferred /media/$USER/<name> path.
 ```
 
-## Command: `close`
+## Command Reference: `close`
 
 ```text
 Unmount and lock (if encrypted) a disk: close <name>
@@ -103,7 +105,7 @@ Unmount and lock (if encrypted) a disk: close <name>
         3.  Audit: Checks and displays remaining active mappings for security awareness.
 ```
 
-## Command: `label`
+## Command Reference: `label`
 
 ```text
 Get or set the filesystem label of an OPEN disk: label <name> [new_label]
@@ -118,7 +120,7 @@ Get or set the filesystem label of an OPEN disk: label <name> [new_label]
         The label is written directly to the disk hardware and persists across different computers.
 ```
 
-## Command: `erase`
+## Command Reference: `erase`
 
 ```text
 Securely erase a disk: erase <name/target> [-y]
@@ -134,7 +136,7 @@ Securely erase a disk: erase <name/target> [-y]
         WARNING: This operation is IRREVERSIBLE.
 ```
 
-## Command: `create`
+## Command Reference: `create`
 
 ```text
 Initialize a new disk: create <name> [options] OR create <target> <name> [options]
