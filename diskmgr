@@ -319,36 +319,41 @@ class DiskMgrShell(cmd.Cmd):
                 for line in data_lines:
                     parts = line.strip(';').split(':')
                     # Format: Number:Start:End:Size:FS:Name:Flags
+                    # Note: Free space lines only have 5 parts (0:1:2:3:4)
+                    if len(parts) < 4: continue
+                    
                     num = parts[0]
                     size_mib_str = parts[3]
-                    fs_or_type = parts[4]
-                    name = parts[5]
-                    flags = parts[6]
+                    fs_or_type = parts[4] if len(parts) > 4 else ""
                     
-                    if fs_or_type == 'free':
+                    if fs_or_type == 'free' or (not fs_or_type and len(parts) == 5):
                         segments.append(f"{Colors.OKCYAN}[ free {size_mib_str} ]{Colors.ENDC}")
                     else:
+                        name = parts[5] if len(parts) > 5 else ""
+                        flags = parts[6] if len(parts) > 6 else ""
+                        
                         # Find the actual kernel name for this partition number
-                        # (Parted numbers match the trailing digit of kname)
                         kname = f"{d_name}{num}"
-                        # Check if it should be d_name + 'p' + num (for NVMe)
                         if 'nvme' in d_name and not kname.startswith(f"{d_name}p"):
                             kname = f"{d_name}p{num}"
                         
-                        mib_val = float(size_mib_str.replace('MiB', ''))
-                        size_info = size_mib_str
-                        if mib_val >= 1024:
-                            size_info = f"{size_mib_str} ≈ {mib_val/1024:.1f}GiB"
+                        try:
+                            mib_val = float(size_mib_str.replace('MiB', ''))
+                            size_info = size_mib_str
+                            if mib_val >= 1024:
+                                size_info = f"{size_mib_str} ≈ {mib_val/1024:.1f}GiB"
+                        except:
+                            size_info = size_mib_str
                         
                         desc = f" {name}" if name else ""
-                        if not desc and fs_or_type and fs_or_type != 'free':
+                        if not desc and fs_or_type:
                             desc = f" {fs_or_type}"
                             
                         flag_info = f" ({flags})" if flags else ""
                         
                         segments.append(f"{Colors.OKGREEN}[ {kname}{desc} {size_info}{flag_info} ]{Colors.ENDC}")
                 
-                print("".join(segments))
+                print(" ".join(segments))
             except Exception as e:
                 log(f"Could not read layout for {dev_path}: {e}", 'WARN')
         print("")
