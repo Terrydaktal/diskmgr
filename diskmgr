@@ -1089,17 +1089,34 @@ class DiskMgrShell(cmd.Cmd):
             log("Secure erase failed.", 'ERROR')
 
     def do_clone(self, arg):
-        '''Clone one disk to another: clone <src_name> <dst_name>
+        '''Clone one disk or partition to another: clone <src_name> <dst_name>
         
         Note: The target disk MUST be the same size or larger than the source.
         
-        UNDER THE HOOD:
-        1.  Resolution: Maps both names to physical device paths.
-        2.  Size Check: Uses 'blockdev --getsize64' to compare exact byte counts.
-        3.  Safety:
-            - Blocks if target is part of the system root drive.
-            - Requires two math questions to be solved.
-        4.  Execution: Uses 'dd' with 16M buffer and direct I/O for high-speed cloning.
+        STEP-BY-STEP PROCESS:
+        1.  Resolution: Maps both friendly names to their physical device nodes (PDP).
+        2.  Size Validation: Queries 'blockdev --getsize64' for both. Aborts if dst < src.
+        3.  Safety Audit: Verifies that the target is NOT the system root drive.
+        4.  Confirmation: Requires solving two math problems to authorize data destruction.
+        5.  Cloning: Executes 'dd' with 16MiB buffers and direct I/O for maximum throughput.
+        6.  Sync: Flushes kernel buffers to ensure all data is physically committed to disk.
+
+        SCENARIOS:
+        - Drive to Drive: 
+          Creates a 1:1 bit-perfect clone. The target disk becomes an identical twin, 
+          including the Partition Table, UUIDs, and all partitions. 
+          Note: If the target is larger, the extra space appears as 'free' at the end.
+        - Partition to Partition: 
+          Copies the internal data of the source partition into the target partition. 
+          Useful for moving a LUKS container or a specific filesystem. 
+          Warning: Filesystem UUIDs will be duplicated; avoid mounting both simultaneously.
+        - Partition to Drive: 
+          The source partition's content is written to the start of the physical disk. 
+          This destroys the target's partition table and turns the disk into a 
+          "partitionless" volume (e.g., a raw LUKS device).
+        - Drive to Partition (DANGEROUS): 
+          Writes the source's boot sectors and partition table into the target partition. 
+          This usually results in an unreadable "nested" structure.
         '''
         args = arg.split()
         if len(args) != 2:
