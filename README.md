@@ -50,6 +50,23 @@ List configured mappings and available system disks.
             - MOUNTED: Filesystem is active and attached to the preferred mountpoint.
         4.  Discovery: Identifies disks not in the mapping table and assigns discovery IDs (U1, U2...).
         5.  Dynamic Layout: Calculates column widths based on current data for optimal alignment.
+
+--- Configured Mappings (/home/lewis/Dev/diskmgr/luksmap.tsv) ---
+#     NAME  LUKS  STATE      FSTYPE  LABEL       MOUNTPOINT               DEVICE      SIZE    PERSISTENT PATH                                                 
+----------------------------------------------------------------------------------------------------------------------------------------------------------------
+[1]   1b    -     MISSING    -       -           /media/lewis/1b          -           -       /dev/disk/by-id/wwn-0x5000c500e31e6cb2                          
+[2]   1a    Y     MOUNTED    ext4    -           /media/lewis/1a          sda2(dm-0)  931.4G  /dev/disk/by-id/wwn-0x5000c500a89d6e44-part2                    
+
+--- Other System Disks (Unmapped) ---
+#     NAME  LUKS  STATE      FSTYPE  LABEL       MOUNTPOINT               DEVICE      SIZE    PERSISTENT PATH                                                 
+----------------------------------------------------------------------------------------------------------------------------------------------------------------
+[U1]  -     N     UNMOUNTED  -       -           -                        sda         931.5G  /dev/disk/by-id/wwn-0x5000c500a89d6e44                          
+[U2]  -     N     UNMOUNTED  -       -           -                        sda1        128M    /dev/disk/by-id/ata-ST1000LM035-1RK172_WDE63N22-part1           
+[U3]  -     N     UNMOUNTED  -       -           -                        nvme0n1     1.8T    /dev/disk/by-id/nvme-eui.e8238fa6bf530001001b448b42d60852       
+[U4]  -     N     MOUNTED    ext4    -           /                        nvme0n1p1   1.8T    /dev/disk/by-id/nvme-WD_BLACK_SN8100_2000GB_25334X800147_1-part1
+[U5]  -     N     UNMOUNTED  -       -           -                        nvme1n1     931.5G  /dev/disk/by-id/nvme-eui.e8238fa6bf530001001b444a49598af9       
+[U6]  -     N     MOUNTED    ext4    NewVolume1  /media/lewis/NewVolume1  nvme1n1p1   931.5G  /dev/disk/by-id/nvme-WD_Blue_SN570_1TB_21353X644609-part1       
+
 ```
 
 ## Command Reference: `map`
