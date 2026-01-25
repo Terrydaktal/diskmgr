@@ -328,9 +328,11 @@ class DiskMgrShell(cmd.Cmd):
                 data_lines = [l for l in lines if l and not l.startswith('BYT') and not l.startswith('/')]
                 
                 segments = []
-                # GPT Primary Overhead
+                # GPT/MBR Overhead
                 if ptable == 'gpt':
                     segments.append(f"{Colors.FAIL}[ GPT Primary 0-33 ]{Colors.ENDC}")
+                elif ptable in ['msdos', 'mbr']:
+                    segments.append(f"{Colors.FAIL}[ MBR Sector 0 ]{Colors.ENDC}")
 
                 for line in data_lines:
                     parts = line.strip(';').split(':')
