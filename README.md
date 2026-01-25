@@ -7,28 +7,23 @@ A utility designed to simplify the management of encrypted and plain removable m
 ```text
 A utility designed to simplify the management of encrypted and plain removable media.
 It maps friendly labels to hardware-specific Persistent Device Paths (PDP), ensuring
-that disks are recognized reliably even if device nodes (like /dev/sdb) change.
+that disks are recognized reliably even if device nodes change.
 
 COMMANDS:
   list
-      Shows all configured mappings and their status (Open/Mounted).
-      Also lists unmapped system disks with discovery IDs (e.g., U1, U2).
-  map <id> <name>
-      Assigns a friendly name to a disk.
-      <id> can be a discovery ID (U1) or an existing index (1).
-      Example: 'map U1 backup_drive'
-  open <name>
+      Shows all configured mappings and unmapped system disks in one table.
+  map <name/id> <name>
+      Assigns a friendly name to a disk or renames an existing mapping.
+  open <name/id>
       Unlocks LUKS (if encrypted) and mounts the disk.
-  close <name>
+  close <name/id>
       Unmounts and closes the disk.
-  label <name> [new_label]
+  label <name/id> [new_label]
       Get or set the filesystem label of an OPEN disk.
-  create <name> [options]
+  create <name/id> <name> [options]
       Initializes a new disk (Erase -> LUKS -> Format -> Mount).
-      Use 'help create' for full options.
-  erase <name/target>
+  erase <name/id>
       Securely erases a disk (NVMe format, blkdiscard, or dd overwrite).
-      WARNING: Destructive!
   exit / quit / Ctrl+D
       Exit the application.
 
