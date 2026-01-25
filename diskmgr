@@ -528,6 +528,10 @@ class DiskMgrShell(cmd.Cmd):
     def do_map(self, arg):
         '''Create or modify a persistent mapping: map <id> <name>
         
+        Usage:
+          map <id> <name>   Assigns friendly name to discovery ID (e.g., map U1 backup)
+          map <num> <name>  Renames an existing mapping by its index (e.g., map 1 backup)
+        
         UNDER THE HOOD:
         1.  Input Resolution: 
             - discovery ID (e.g., U1): Resolves the temporary device to its Persistent Device Path (PDP).
@@ -833,7 +837,10 @@ class DiskMgrShell(cmd.Cmd):
             log(f"Unsupported filesystem for labeling: {fstype}", 'ERROR')
 
     def do_erase(self, arg):
-        '''Securely erase a disk: erase <name/target> [-y]
+        '''Securely erase a disk: erase <name/target> [options]
+        
+        Options:
+          -y, --yes         Skip math confirmation questions
         
         UNDER THE HOOD:
         1.  Target Resolution: Maps friendly name or ID to a raw block device.
@@ -895,6 +902,14 @@ class DiskMgrShell(cmd.Cmd):
 
     def do_create(self, arg):
         '''Initialize a new disk: create <name> [options] OR create <target> <name> [options]
+        
+        Options:
+          --fs <ext4|xfs>   Filesystem type (default: ext4)
+          --label <label>   Filesystem label (default: name)
+          --plain           Create a non-encrypted disk (skips LUKS)
+          --gpt             Create GPT partition table + 1 partition
+          --mbr             Create MBR partition table + 1 partition
+          -y, --yes         Skip math confirmation questions
         
         UNDER THE HOOD:
         1.  Unmount: Forcefully unmounts any existing partitions on the target.
