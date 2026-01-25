@@ -265,6 +265,9 @@ class DiskMgrShell(cmd.Cmd):
 
         print(f"  {Colors.OKGREEN}erase <name>{Colors.ENDC}")
         print("      Securely erases a disk (NVMe format, blkdiscard, or dd overwrite).")
+
+        print(f"  {Colors.OKGREEN}clone <src_name> <dst_name>{Colors.ENDC}")
+        print("      Clones one disk to another (requires target >= source size).")
         
         print(f"  {Colors.OKGREEN}exit / quit / Ctrl+D{Colors.ENDC}")
         print("      Exit the application.")
@@ -1085,6 +1088,73 @@ class DiskMgrShell(cmd.Cmd):
         else:
             log("Secure erase failed.", 'ERROR')
 
+    def do_clone(self, arg):
+        '''Clone one disk to another: clone <src_name> <dst_name>
+        
+        Note: The target disk MUST be the same size or larger than the source.
+        
+        UNDER THE HOOD:
+        1.  Resolution: Maps both names to physical device paths.
+        2.  Size Check: Uses 'blockdev --getsize64' to compare exact byte counts.
+        3.  Safety:
+            - Blocks if target is part of the system root drive.
+            - Requires two math questions to be solved.
+        4.  Execution: Uses 'dd' with 16M buffer and direct I/O for high-speed cloning.
+        '''
+        args = arg.split()
+        if len(args) != 2:
+            log("Usage: clone <src_name> <dst_name>", 'ERROR')
+            return
+
+        src_name, dst_name = args
+        src_path = self.resolve_target(src_name, allow_id=False)
+        dst_path = self.resolve_target(dst_name, allow_id=False)
+
+        if not src_path:
+            log(f"Unknown source mapping: '{src_name}'", 'ERROR')
+            return
+        if not dst_path:
+            log(f"Unknown target mapping: '{dst_name}'", 'ERROR')
+            return
+
+        src_real = os.path.realpath(src_path)
+        dst_real = os.path.realpath(dst_path)
+
+        if src_real == dst_real:
+            log("Source and target are the same device!", 'ERROR')
+            return
+
+        if self.is_root_disk(dst_real):
+            log(f"OPERATION BLOCKED: {dst_name} ({dst_real}) is the system root drive!", 'ERROR')
+            return
+
+        # Compare sizes
+        try:
+            src_bytes = int(run_command(['sudo', 'blockdev', '--getsize64', src_real], capture_output=True).stdout.strip())
+            dst_bytes = int(run_command(['sudo', 'blockdev', '--getsize64', dst_real], capture_output=True).stdout.strip())
+            
+            if dst_bytes < src_bytes:
+                log(f"Target disk is too small! (Source: {src_bytes}B, Target: {dst_bytes}B)", 'ERROR')
+                return
+        except Exception as e:
+            log(f"Failed to verify disk sizes: {e}", 'ERROR')
+            return
+
+        # Confirmation
+        if not self.extensive_confirm(f"{dst_name} ({dst_real})"):
+            return
+
+        run_command(['sudo', '-v'])
+        log(f"Cloning {src_name} -> {dst_name}...")
+        
+        # Perform clone
+        try:
+            # dd if=src of=dst bs=16M status=progress oflag=direct conv=fsync
+            cmd = ['dd', f'if={src_real}', f'of={dst_real}', 'bs=16M', 'status=progress', 'oflag=direct', 'conv=fsync']
+            run_command(cmd, sudo=True)
+            log("Cloning complete.")
+        except Exception as e:
+            log(f"Cloning failed: {e}", 'ERROR')
 
     def do_create(self, arg):
         '''Initialize a disk: create <name> [options]
