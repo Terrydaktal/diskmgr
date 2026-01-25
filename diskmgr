@@ -248,19 +248,19 @@ class DiskMgrShell(cmd.Cmd):
         print(f"  {Colors.OKGREEN}map <name/id> <name>{Colors.ENDC}")
         print("      Assigns a friendly name to a disk or renames an existing mapping.")
         
-        print(f"  {Colors.OKGREEN}open <name/id>{Colors.ENDC}")
+        print(f"  {Colors.OKGREEN}open <name>{Colors.ENDC}")
         print("      Unlocks LUKS (if encrypted) and mounts the disk.")
         
-        print(f"  {Colors.OKGREEN}close <name/id>{Colors.ENDC}")
+        print(f"  {Colors.OKGREEN}close <name>{Colors.ENDC}")
         print("      Unmounts and closes the disk.")
 
-        print(f"  {Colors.OKGREEN}label <name/id> [new_label]{Colors.ENDC}")
+        print(f"  {Colors.OKGREEN}label <name> [new_label]{Colors.ENDC}")
         print("      Get or set the filesystem label of an OPEN disk.")
         
-        print(f"  {Colors.OKGREEN}create <name/id> <name> [options]{Colors.ENDC}")
+        print(f"  {Colors.OKGREEN}create <name> [options]{Colors.ENDC}")
         print("      Initializes a new disk (Erase -> LUKS -> Format -> Mount).")
 
-        print(f"  {Colors.OKGREEN}erase <name/id>{Colors.ENDC}")
+        print(f"  {Colors.OKGREEN}erase <name>{Colors.ENDC}")
         print("      Securely erases a disk (NVMe format, blkdiscard, or dd overwrite).")
         
         print(f"  {Colors.OKGREEN}exit / quit / Ctrl+D{Colors.ENDC}")
@@ -738,10 +738,10 @@ class DiskMgrShell(cmd.Cmd):
         log(f"Mapping saved: {name} -> {real_target}")
 
     def do_open(self, arg):
-        '''Unlock (if encrypted) and mount a disk: open <name/id>
+        '''Unlock (if encrypted) and mount a disk: open <name>
         
         UNDER THE HOOD:
-        1.  Identity Resolution: Looks up the name or Discovery ID to find the PDP.
+        1.  Identity Resolution: Looks up the friendly name in luksmap.tsv.
         2.  Hardware Wait: Polls for up to 10 seconds to allow for hardware spin-up/udev events.
         3.  Validation: 
             - Runs 'cryptsetup isLuks' to check for encryption.
@@ -755,7 +755,7 @@ class DiskMgrShell(cmd.Cmd):
         6.  Policy Enforcement: If the disk is already mounted at a non-standard path, 
             it unmounts and remounts it to the preferred /media/$USER/<name> path.
         '''
-        target_arg = arg.strip()
+        name = arg.strip()
         if not name:
              log("Usage: open <name>", 'ERROR')
              return
@@ -844,7 +844,7 @@ class DiskMgrShell(cmd.Cmd):
             log(f"Already mounted at {mountpoint}.")
 
     def do_close(self, arg):
-        '''Unmount and lock (if encrypted) a disk: close <name/id>
+        '''Unmount and lock (if encrypted) a disk: close <name>
         
         UNDER THE HOOD:
         1.  Unmounting (Encrypted & Plain): 
@@ -904,7 +904,7 @@ class DiskMgrShell(cmd.Cmd):
             log("Mapping not open or already closed.")
 
     def do_label(self, arg):
-        '''Get or set the filesystem label of an OPEN disk: label <name/id> [new_label]
+        '''Get or set the filesystem label of an OPEN disk: label <name> [new_label]
         
         UNDER THE HOOD:
         1.  Validation: Verifies that the disk is currently open/unlocked.
@@ -992,25 +992,19 @@ class DiskMgrShell(cmd.Cmd):
             log(f"Unsupported filesystem for labeling: {fstype}", 'ERROR')
 
     def do_erase(self, arg):
-        '''Securely erase a disk: erase <name/id> [options]
+        '''Securely erase a disk: erase <name> [options]
         
-        Target can be:
-          - A mapping name (e.g., backup)
-          - A discovery ID (e.g., [U1])
-        
-        Note: Raw device paths (e.g., /dev/sdb) are NOT allowed.
+        Note: You must 'map' a disk first to give it a name before erasing it.
         
         NUANCES & SAFETY:
-        - Whole Disk (sda): Wipes the Partition Table (GPT/MBR) and ALL partitions.
-        - Partition (sda2): Wipes only that partition. Other partitions are safe.
-        - Mapped Name (1a): Resolves to the physical partition. Wiping it destroys 
-          the LUKS Header, making data recovery impossible even with the password.
+        - Scope: Wipes the physical hardware associated with the name. 
+        - Whole Disk vs Partition: Destruction is limited to the mapped boundary.
         
         Options:
           -y, --yes         Skip math confirmation questions
         
         UNDER THE HOOD:
-        1.  Target Resolution: Maps friendly name or ID to a raw block device.
+        1.  Target Resolution: Maps friendly name to a raw block device.
         2.  Destructive Wipe:
             - NVMe: Uses 'nvme format --ses=1' for firmware-level crypto-erase.
             - SSD: Uses 'blkdiscard' to inform the controller that all blocks are empty.
@@ -1066,37 +1060,9 @@ class DiskMgrShell(cmd.Cmd):
 
 
     def do_create(self, arg):
-        '''Initialize a new disk: create <name/id> <name> [options]
+        '''Initialize a disk: create <name> [options]
         
-        Parameters:
-          <name/id>         Discovery ID from the list command (e.g., [U1])
-          <name>            The permanent MAPPING NAME (used for mounting and commands).
-                            This will also be used as the default filesystem LABEL.
-        
-        Note: Raw device paths (e.g., /dev/sdb) are NOT allowed.
-        
-        NUANCES & SCOPE:
-        1. Running create on a Partition (e.g., sda2)
-           The Result: Container-in-a-Box.
-           The script treats the existing partition as its "entire world."
-           - Partitioning: It skips the GPT/MBR step because you've already given it a partition.
-           - Encryption: It sets up LUKS directly inside the sda2 boundary.
-           - Filesystem: It formats the area inside sda2.
-           - The Big Picture: The rest of your disk (like sda1 or sda3) is untouched. 
-             You are simply replacing whatever was inside partition #2 with a new encrypted volume.
-
-        2. Running create on a Whole Disk (e.g., sda)
-           The Result: Total Takeover.
-           The script wipes the slate clean and rebuilds the drive from scratch.
-           - Wipe: It deletes the Partition Table (GPT/MBR) at the start of the disk. 
-             All existing partitions (sda1, sda2, etc.) are instantly lost.
-           - Rebuild:
-             * If you didn't use --gpt or --mbr: It formats the Entire Disk as one 
-               giant LUKS container (no partition table).
-             * If you used --gpt: It creates a fresh GPT table, creates a new 
-               partition #1 spanning the whole drive, and puts LUKS inside that.
-           - The Big Picture: You lose everything on the physical drive, and it 
-             becomes a single, clean encrypted volume.
+        Note: You must 'map' a disk first to give it a name before initializing it.
         
         Options:
           --fs <ext4|xfs>   Filesystem type (default: ext4)

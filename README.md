@@ -16,15 +16,15 @@ COMMANDS:
       Displays the physical partition layout and free space for all disks.
   map <name/id> <name>
       Assigns a friendly name to a disk or renames an existing mapping.
-  open <name/id>
+  open <name>
       Unlocks LUKS (if encrypted) and mounts the disk.
-  close <name/id>
+  close <name>
       Unmounts and closes the disk.
-  label <name/id> [new_label]
+  label <name> [new_label]
       Get or set the filesystem label of an OPEN disk.
-  create <name/id> <name> [options]
+  create <name> [options]
       Initializes a new disk (Erase -> LUKS -> Format -> Mount).
-  erase <name/id>
+  erase <name>
       Securely erases a disk (NVMe format, blkdiscard, or dd overwrite).
   exit / quit / Ctrl+D
       Exit the application.
@@ -87,36 +87,6 @@ Display the physical partition layout and free space for all plugged-in disks.
             - Calculates MiB and GiB values from sector counts.
 ```
 
-### Example Output
-
-```text
-Disk: /dev/sda (ST1000LM035-1RK172) [gpt] [Sector: L512/P4096] [Total Sectors: 1953525168]
-[ GPT Primary 34s (17408.00B) ] [ free 2014s (1007.00KiB) ] [ sda1 - 262144s (128.00MiB) (msftres, no_automount) ] [ sda2 - 1953259520s (953740.00MiB ≈ 931.4GiB) (msftdata) ] [ free 1423s (711.50KiB) ] [ GPT Backup 33s (16896.00B) ]
-
-NAME   FSTYPE      FSVER LABEL UUID                                 FSAVAIL FSUSE% MOUNTPOINTS
-sda
-├─sda1
-└─sda2 crypto_LUKS 2           e038a8b5-d3a7-4bbb-bbea-5bed8cc07a04
-  └─1a ext4        1.0         5933d845-1098-4f16-ad7f-ff1f4a4a2105   18.3G    98% /media/lewis/1a
------------------------------------------------------------------------------------------------------------------------------------------------------------
-
-Disk: /dev/nvme0n1 (WD_BLACK SN8100 2000GB) [msdos] [Sector: L512/P512] [Total Sectors: 3907029168]
-[ MBR 2s (1024.00B) ] [ free 2046s (1023.00KiB) ] [ nvme0n1p1 ext4 3907026944s (1907728.00MiB ≈ 1863.0GiB) (boot) ] [ free 176s (88.00KiB) ]
-
-NAME        FSTYPE FSVER LABEL UUID                                 FSAVAIL FSUSE% MOUNTPOINTS
-nvme0n1
-└─nvme0n1p1 ext4   1.0         88f1dad3-95c6-418e-bea8-f5f3e072ea29  769.6G    53% /
------------------------------------------------------------------------------------------------------------------------------------------------------------
-
-Disk: /dev/nvme1n1 (WD Blue SN570 1TB) [msdos] [Sector: L512/P512] [Total Sectors: 1953525168]
-[ MBR 2s (1024.00B) ] [ free 2046s (1023.00KiB) ] [ nvme1n1p1 ext4 1953523120s (953868.71MiB ≈ 931.5GiB) ]
-
-NAME        FSTYPE FSVER LABEL      UUID                                 FSAVAIL FSUSE% MOUNTPOINTS
-nvme1n1
-└─nvme1n1p1 ext4   1.0   NewVolume1 72c22012-b161-4e2a-a762-94ff7fda47f9  311.3G    61% /media/lewis/NewVolume1
------------------------------------------------------------------------------------------------------------------------------------------------------------
-```
-
 ## Command Reference: `map`
 
 ```text
@@ -142,10 +112,10 @@ Create or modify a persistent mapping: map <name/id> <name>
 ## Command Reference: `open`
 
 ```text
-Unlock (if encrypted) and mount a disk: open <name/id>
+Unlock (if encrypted) and mount a disk: open <name>
 
         UNDER THE HOOD:
-        1.  Identity Resolution: Looks up the name or Discovery ID to find the PDP.
+        1.  Identity Resolution: Looks up the friendly name in luksmap.tsv.
         2.  Hardware Wait: Polls for up to 10 seconds to allow for hardware spin-up/udev events.
         3.  Validation:
             - Runs 'cryptsetup isLuks' to check for encryption.
@@ -163,7 +133,7 @@ Unlock (if encrypted) and mount a disk: open <name/id>
 ## Command Reference: `close`
 
 ```text
-Unmount and lock (if encrypted) a disk: close <name/id>
+Unmount and lock (if encrypted) a disk: close <name>
 
         UNDER THE HOOD:
         1.  Unmounting (Encrypted & Plain):
@@ -179,7 +149,7 @@ Unmount and lock (if encrypted) a disk: close <name/id>
 ## Command Reference: `label`
 
 ```text
-Get or set the filesystem label of an OPEN disk: label <name/id> [new_label]
+Get or set the filesystem label of an OPEN disk: label <name> [new_label]
 
         UNDER THE HOOD:
         1.  Validation: Verifies that the disk is currently open/unlocked.
@@ -194,25 +164,19 @@ Get or set the filesystem label of an OPEN disk: label <name/id> [new_label]
 ## Command Reference: `erase`
 
 ```text
-Securely erase a disk: erase <name/id> [options]
+Securely erase a disk: erase <name> [options]
 
-        Target can be:
-          - A mapping name (e.g., backup)
-          - A discovery ID (e.g., [U1])
-
-        Note: Raw device paths (e.g., /dev/sdb) are NOT allowed.
+        Note: You must 'map' a disk first to give it a name before erasing it.
 
         NUANCES & SAFETY:
-        - Whole Disk (sda): Wipes the Partition Table (GPT/MBR) and ALL partitions.
-        - Partition (sda2): Wipes only that partition. Other partitions are safe.
-        - Mapped Name (1a): Resolves to the physical partition. Wiping it destroys
-          the LUKS Header, making data recovery impossible even with the password.
+        - Scope: Wipes the physical hardware associated with the name.
+        - Whole Disk vs Partition: Destruction is limited to the mapped boundary.
 
         Options:
           -y, --yes         Skip math confirmation questions
 
         UNDER THE HOOD:
-        1.  Target Resolution: Maps friendly name or ID to a raw block device.
+        1.  Target Resolution: Maps friendly name to a raw block device.
         2.  Destructive Wipe:
             - NVMe: Uses 'nvme format --ses=1' for firmware-level crypto-erase.
             - SSD: Uses 'blkdiscard' to inform the controller that all blocks are empty.
@@ -225,37 +189,9 @@ Securely erase a disk: erase <name/id> [options]
 ## Command Reference: `create`
 
 ```text
-Initialize a new disk: create <name/id> <name> [options]
+Initialize a disk: create <name> [options]
 
-        Parameters:
-          <name/id>         Discovery ID from the list command (e.g., [U1])
-          <name>            The permanent MAPPING NAME (used for mounting and commands).
-                            This will also be used as the default filesystem LABEL.
-
-        Note: Raw device paths (e.g., /dev/sdb) are NOT allowed.
-
-        NUANCES & SCOPE:
-        1. Running create on a Partition (e.g., sda2)
-           The Result: Container-in-a-Box.
-           The script treats the existing partition as its "entire world."
-           - Partitioning: It skips the GPT/MBR step because you've already given it a partition.
-           - Encryption: It sets up LUKS directly inside the sda2 boundary.
-           - Filesystem: It formats the area inside sda2.
-           - The Big Picture: The rest of your disk (like sda1 or sda3) is untouched.
-             You are simply replacing whatever was inside partition #2 with a new encrypted volume.
-
-        2. Running create on a Whole Disk (e.g., sda)
-           The Result: Total Takeover.
-           The script wipes the slate clean and rebuilds the drive from scratch.
-           - Wipe: It deletes the Partition Table (GPT/MBR) at the start of the disk.
-             All existing partitions (sda1, sda2, etc.) are instantly lost.
-           - Rebuild:
-             * If you didn't use --gpt or --mbr: It formats the Entire Disk as one
-               giant LUKS container (no partition table).
-             * If you used --gpt: It creates a fresh GPT table, creates a new
-               partition #1 spanning the whole drive, and puts LUKS inside that.
-           - The Big Picture: You lose everything on the physical drive, and it
-             becomes a single, clean encrypted volume.
+        Note: You must 'map' a disk first to give it a name before initializing it.
 
         Options:
           --fs <ext4|xfs>   Filesystem type (default: ext4)
