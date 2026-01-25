@@ -304,7 +304,7 @@ class DiskMgrShell(cmd.Cmd):
             label = "-"
             mountpoint = "-"
             
-            is_luks = "N"
+            is_luks = "-"
             state = "MISSING"
             
             real_path = None
@@ -312,6 +312,7 @@ class DiskMgrShell(cmd.Cmd):
                 real_path = os.path.realpath(path)
                 mapped_real_paths.add(real_path)
                 state = "CLOSED" # Default if present
+                is_luks = "N" # Default if present
                 
                 # 1. Get Physical Device Properties
                 try:
