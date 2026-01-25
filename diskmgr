@@ -288,14 +288,19 @@ class DiskMgrShell(cmd.Cmd):
         
         UNDER THE HOOD:
         1.  Resolution: Refreshes mappings from luksmap.tsv.
-        2.  Scanning: Executes 'lsblk' to gather hardware properties (FSTYPE, SIZE, etc.).
-        3.  Status Check:
+        2.  Hardware Discovery: Uses 'lsblk' to gather hardware properties and identifies 
+            underlying physical partitions even when opened as virtual devices.
+        3.  Zero-Sudo LUKS Detection: Queries the system 'udev' database via 'udevadm info' 
+            to accurately identify encrypted disks without requiring root privileges.
+        4.  Status Logic:
             - MISSING: Persistent path not found in /dev.
-            - CLOSED: Persistent path exists, but no active mapping in /dev/mapper.
-            - OPEN: Active mapping exists in /dev/mapper but is not mounted.
-            - MOUNTED: Filesystem is active and attached to the preferred mountpoint.
-        4.  Discovery: Identifies disks not in the mapping table and assigns discovery IDs (U1, U2...).
-        5.  Dynamic Layout: Calculates column widths based on current data for optimal alignment.
+            - CLOSED: Present but locked (LUKS) or unmounted (Plain).
+            - OPEN: Unlocked/Decrypted but not yet mounted.
+            - MOUNTED: Active filesystem attached to the preferred path (/media/$USER/name).
+        5.  Dynamic Formatting: Pre-calculates the maximum width of every column across 
+            all rows for a perfectly aligned, readable table.
+        6.  Exclusion Logic: Rigorously filters out virtual mapper devices and their 
+            kernel aliases (dm-X) from the unmapped list once they are active.
         '''
         self.mappings = read_luks_map()
         mapped_rows = []
