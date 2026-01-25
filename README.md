@@ -12,6 +12,8 @@ that disks are recognized reliably even if device nodes change.
 COMMANDS:
   list
       Shows all configured mappings and unmapped system disks in one table.
+  layout
+      Displays the physical partition layout and free space for all disks.
   map <name/id> <name>
       Assigns a friendly name to a disk or renames an existing mapping.
   open <name/id>
@@ -66,6 +68,21 @@ List all configured mappings and available system disks in a single table.
 [U4]  -     N     MOUNTED    ext4    -           /                        nvme0n1p1   1.8T    /dev/disk/by-id/nvme-WD_BLACK_SN8100_2000GB_25334X800147_1-part1
 [U5]  -     N     UNMOUNTED  -       -           -                        nvme1n1     931.5G  /dev/disk/by-id/nvme-eui.e8238fa6bf530001001b444a49598af9
 [U6]  -     N     MOUNTED    ext4    NewVolume1  /media/lewis/NewVolume1  nvme1n1p1   931.5G  /dev/disk/by-id/nvme-WD_Blue_SN570_1TB_21353X644609-part1
+```
+
+## Command Reference: `layout`
+
+```text
+Display the physical partition layout and free space for all plugged-in disks.
+
+        UNDER THE HOOD:
+        1.  Hardware Scan: Identifies all physical 'disk' devices (excluding partitions).
+        2.  Geometry Query: Runs 'sudo parted -m <dev> unit MiB print free'.
+        3.  Parsing: Extracts partition numbers, names, sizes, and flags from the machine output.
+        4.  Formatting:
+            - Identifies 'free' space segments.
+            - Correlates partition numbers to kernel names (e.g., sda1).
+            - Adds GiB approximations for partitions larger than 1024MiB.
 ```
 
 ## Command Reference: `map`

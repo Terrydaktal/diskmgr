@@ -182,57 +182,6 @@ class DiskMgrShell(cmd.Cmd):
         self.mappings = read_luks_map()
         self.unmapped_cache = []
 
-    def do_help(self, arg):
-        'List available commands with "help" or detailed help with "help cmd".'
-        if arg:
-            super().do_help(arg)
-            return
-
-        print(f"\n{Colors.HEADER}Disk Manager (diskmgr){Colors.ENDC}")
-        print("A utility designed to simplify the management of encrypted and plain removable media.")
-        print("It maps friendly labels to hardware-specific Persistent Device Paths (PDP), ensuring")
-        print("that disks are recognized reliably even if device nodes change.\n")
-        
-        print(f"{Colors.BOLD}COMMANDS:{Colors.ENDC}")
-        print(f"  {Colors.OKGREEN}list{Colors.ENDC}")
-        print("      Shows all configured mappings and unmapped system disks in one table.")
-        
-        print(f"  {Colors.OKGREEN}map <name/id> <name>{Colors.ENDC}")
-        print("      Assigns a friendly name to a disk or renames an existing mapping.")
-        
-        print(f"  {Colors.OKGREEN}open <name/id>{Colors.ENDC}")
-        print("      Unlocks LUKS (if encrypted) and mounts the disk.")
-        
-        print(f"  {Colors.OKGREEN}close <name/id>{Colors.ENDC}")
-        print("      Unmounts and closes the disk.")
-
-        print(f"  {Colors.OKGREEN}label <name/id> [new_label]{Colors.ENDC}")
-        print("      Get or set the filesystem label of an OPEN disk.")
-        
-        print(f"  {Colors.OKGREEN}create <name/id> <name> [options]{Colors.ENDC}")
-        print("      Initializes a new disk (Erase -> LUKS -> Format -> Mount).")
-
-        print(f"  {Colors.OKGREEN}erase <name/id>{Colors.ENDC}")
-        print("      Securely erases a disk (NVMe format, blkdiscard, or dd overwrite).")
-        
-        print(f"  {Colors.OKGREEN}exit / quit / Ctrl+D{Colors.ENDC}")
-        print("      Exit the application.")
-
-        print("\nType 'help <command>' for more specific details.")
-
-    def do_exit(self, arg):
-        'Exit the application'
-        return True
-
-    def do_quit(self, arg):
-        'Exit the application'
-        return True
-
-    def do_EOF(self, arg):
-        'Exit the application'
-        print("")
-        return True
-
     def get_disk_info(self):
         # Use lsblk -J for JSON output
         cmd = ['lsblk', '-J', '-e', '7', '-o', 'NAME,KNAME,TYPE,RM,SIZE,FSTYPE,LABEL,MOUNTPOINT,MODEL,WWN,PKNAME,TRAN,DISC-MAX']
@@ -277,6 +226,132 @@ class DiskMgrShell(cmd.Cmd):
                     continue
         
         return "-"
+
+    def do_help(self, arg):
+        'List available commands with "help" or detailed help with "help cmd".'
+        if arg:
+            super().do_help(arg)
+            return
+
+        print(f"\n{Colors.HEADER}Disk Manager (diskmgr){Colors.ENDC}")
+        print("A utility designed to simplify the management of encrypted and plain removable media.")
+        print("It maps friendly labels to hardware-specific Persistent Device Paths (PDP), ensuring")
+        print("that disks are recognized reliably even if device nodes change.\n")
+        
+        print(f"{Colors.BOLD}COMMANDS:{Colors.ENDC}")
+        print(f"  {Colors.OKGREEN}list{Colors.ENDC}")
+        print("      Shows all configured mappings and unmapped system disks in one table.")
+
+        print(f"  {Colors.OKGREEN}layout{Colors.ENDC}")
+        print("      Displays the physical partition layout and free space for all disks.")
+        
+        print(f"  {Colors.OKGREEN}map <name/id> <name>{Colors.ENDC}")
+        print("      Assigns a friendly name to a disk or renames an existing mapping.")
+        
+        print(f"  {Colors.OKGREEN}open <name/id>{Colors.ENDC}")
+        print("      Unlocks LUKS (if encrypted) and mounts the disk.")
+        
+        print(f"  {Colors.OKGREEN}close <name/id>{Colors.ENDC}")
+        print("      Unmounts and closes the disk.")
+
+        print(f"  {Colors.OKGREEN}label <name/id> [new_label]{Colors.ENDC}")
+        print("      Get or set the filesystem label of an OPEN disk.")
+        
+        print(f"  {Colors.OKGREEN}create <name/id> <name> [options]{Colors.ENDC}")
+        print("      Initializes a new disk (Erase -> LUKS -> Format -> Mount).")
+
+        print(f"  {Colors.OKGREEN}erase <name/id>{Colors.ENDC}")
+        print("      Securely erases a disk (NVMe format, blkdiscard, or dd overwrite).")
+        
+        print(f"  {Colors.OKGREEN}exit / quit / Ctrl+D{Colors.ENDC}")
+        print("      Exit the application.")
+
+        print("\nType 'help <command>' for more specific details.")
+
+    def do_exit(self, arg):
+        'Exit the application'
+        return True
+
+    def do_quit(self, arg):
+        'Exit the application'
+        return True
+
+    def do_EOF(self, arg):
+        'Exit the application'
+        print("")
+        return True
+
+    def do_layout(self, arg):
+        '''Display the physical partition layout and free space for all plugged-in disks.
+        
+        UNDER THE HOOD:
+        1.  Hardware Scan: Identifies all physical 'disk' devices (excluding partitions).
+        2.  Geometry Query: Runs 'sudo parted -m <dev> unit MiB print free'.
+        3.  Parsing: Extracts partition numbers, names, sizes, and flags from the machine output.
+        4.  Formatting:
+            - Identifies 'free' space segments.
+            - Correlates partition numbers to kernel names (e.g., sda1).
+            - Adds GiB approximations for partitions larger than 1024MiB.
+        '''
+        all_devs = self.get_disk_info()
+        disks = [d for d in all_devs if d.get('type') == 'disk']
+        
+        if not disks:
+            log("No physical disks found.", 'WARN')
+            return
+
+        for disk in disks:
+            d_name = disk['name']
+            dev_path = f"/dev/{d_name}"
+            model = disk.get('model', 'Unknown')
+            
+            print(f"\n{Colors.BOLD}Disk: {dev_path} ({model}){Colors.ENDC}")
+            
+            try:
+                # Use machine-readable parted output for reliable parsing
+                res = run_command(['parted', '-m', '-s', dev_path, 'unit', 'MiB', 'print', 'free'], sudo=True)
+                lines = res.stdout.strip().splitlines()
+                
+                # Filter out the header lines (BYT; and device path line)
+                data_lines = [l for l in lines if l and not l.startswith('BYT') and not l.startswith('/')]
+                
+                segments = []
+                for line in data_lines:
+                    parts = line.strip(';').split(':')
+                    # Format: Number:Start:End:Size:FS:Name:Flags
+                    num = parts[0]
+                    size_mib_str = parts[3]
+                    fs_or_type = parts[4]
+                    name = parts[5]
+                    flags = parts[6]
+                    
+                    if fs_or_type == 'free':
+                        segments.append(f"{Colors.OKCYAN}[ free {size_mib_str} ]{Colors.ENDC}")
+                    else:
+                        # Find the actual kernel name for this partition number
+                        # (Parted numbers match the trailing digit of kname)
+                        kname = f"{d_name}{num}"
+                        # Check if it should be d_name + 'p' + num (for NVMe)
+                        if 'nvme' in d_name and not kname.startswith(f"{d_name}p"):
+                            kname = f"{d_name}p{num}"
+                        
+                        mib_val = float(size_mib_str.replace('MiB', ''))
+                        size_info = size_mib_str
+                        if mib_val >= 1024:
+                            size_info = f"{size_mib_str} ≈ {mib_val/1024:.1f}GiB"
+                        
+                        desc = f" {name}" if name else ""
+                        if not desc and fs_or_type and fs_or_type != 'free':
+                            desc = f" {fs_or_type}"
+                            
+                        flag_info = f" ({flags})" if flags else ""
+                        
+                        segments.append(f"{Colors.OKGREEN}[ {kname}{desc} {size_info}{flag_info} ]{Colors.ENDC}")
+                
+                print("".join(segments))
+            except Exception as e:
+                log(f"Could not read layout for {dev_path}: {e}", 'WARN')
+        print("")
 
     def do_list(self, arg):
         '''List all configured mappings and available system disks in a single table.
