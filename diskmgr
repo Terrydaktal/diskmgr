@@ -906,11 +906,16 @@ class DiskMgrShell(cmd.Cmd):
 
 
     def do_create(self, arg):
-        '''Initialize a new disk: create <name> [options] OR create <target> <name> [options]
+        '''Initialize a new disk: create <target> <name> [options]
+        
+        Parameters:
+          <target>          The current ID or path (e.g., U1 or /dev/sdb)
+          <name>            The permanent MAPPING NAME (used for mounting and commands).
+                            This will also be used as the default filesystem LABEL.
         
         Options:
           --fs <ext4|xfs>   Filesystem type (default: ext4)
-          --label <label>   Filesystem label (default: name)
+          --label <label>   Set a different internal filesystem label (other than <name>)
           --plain           Create a non-encrypted disk (skips LUKS)
           --gpt             Create GPT partition table + 1 partition
           --mbr             Create MBR partition table + 1 partition
