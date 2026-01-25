@@ -286,11 +286,13 @@ class DiskMgrShell(cmd.Cmd):
         
         UNDER THE HOOD:
         1.  Hardware Scan: Identifies all physical 'disk' devices (excluding partitions).
-        2.  Geometry Query: Runs 'sudo parted -m <dev> unit MiB print free'.
-        3.  Parsing: Extracts partition numbers, names, sizes, and flags from the machine output.
+        2.  Geometry Query: Runs 'sudo parted -m <dev> unit s print free'.
+        3.  Parsing: 
+            - Extracts Partition Table type (gpt/mbr) and sector sizes.
+            - Extracts partition numbers, names, and sector-based sizes.
         4.  Formatting:
             - Identifies 'free' space segments.
-            - Correlates partition numbers to kernel names (e.g., sda1).
+            - Calculates MiB and GiB values from sector counts (Size * Logical Sector / 1024^2).
             - Adds GiB approximations for partitions larger than 1024MiB.
         '''
         all_devs = self.get_disk_info()
@@ -305,45 +307,52 @@ class DiskMgrShell(cmd.Cmd):
             dev_path = f"/dev/{d_name}"
             model = disk.get('model', 'Unknown')
             
-            print(f"\n{Colors.BOLD}Disk: {dev_path} ({model}){Colors.ENDC}")
-            
             try:
-                # Use machine-readable parted output for reliable parsing
-                res = run_command(['parted', '-m', '-s', dev_path, 'unit', 'MiB', 'print', 'free'], sudo=True)
+                # Use sector units for precise calculation
+                res = run_command(['parted', '-m', '-s', dev_path, 'unit', 's', 'print', 'free'], sudo=True)
                 lines = res.stdout.strip().splitlines()
                 
-                # Filter out the header lines (BYT; and device path line)
+                # Header Format: /path:size:transport:logical_sector:physical_sector:ptable:model:;
+                header_parts = lines[1].strip(';').split(':')
+                logical_sector = int(header_parts[3])
+                physical_sector = int(header_parts[4])
+                ptable = header_parts[5]
+                
+                print(f"\n{Colors.BOLD}Disk: {dev_path} ({model}) [{ptable}] [Sector: L{logical_sector}/P{physical_sector}]{Colors.ENDC}")
+
+                # Filter out the headers
                 data_lines = [l for l in lines if l and not l.startswith('BYT') and not l.startswith('/')]
                 
                 segments = []
                 for line in data_lines:
                     parts = line.strip(';').split(':')
                     # Format: Number:Start:End:Size:FS:Name:Flags
-                    # Note: Free space lines only have 5 parts (0:1:2:3:4)
                     if len(parts) < 4: continue
                     
                     num = parts[0]
-                    size_mib_str = parts[3]
+                    # Size is in sectors
+                    size_sectors = int(parts[3].strip('s'))
                     fs_or_type = parts[4] if len(parts) > 4 else ""
                     
+                    # Convert sectors to human readable
+                    size_bytes = size_sectors * logical_sector
+                    size_mib = size_bytes / (1024 * 1024)
+                    size_gib = size_bytes / (1024 * 1024 * 1024)
+                    
+                    if size_mib >= 1024:
+                        size_info = f"{size_mib:.2f}MiB ≈ {size_gib:.1f}GiB"
+                    else:
+                        size_info = f"{size_mib:.2f}MiB"
+
                     if fs_or_type == 'free' or (not fs_or_type and len(parts) == 5):
-                        segments.append(f"{Colors.OKCYAN}[ free {size_mib_str} ]{Colors.ENDC}")
+                        segments.append(f"{Colors.OKCYAN}[ free {size_info} ]{Colors.ENDC}")
                     else:
                         name = parts[5] if len(parts) > 5 else ""
                         flags = parts[6] if len(parts) > 6 else ""
                         
-                        # Find the actual kernel name for this partition number
                         kname = f"{d_name}{num}"
                         if 'nvme' in d_name and not kname.startswith(f"{d_name}p"):
                             kname = f"{d_name}p{num}"
-                        
-                        try:
-                            mib_val = float(size_mib_str.replace('MiB', ''))
-                            size_info = size_mib_str
-                            if mib_val >= 1024:
-                                size_info = f"{size_mib_str} ≈ {mib_val/1024:.1f}GiB"
-                        except:
-                            size_info = size_mib_str
                         
                         desc = f" {name}" if name else ""
                         if not desc and fs_or_type:
@@ -355,6 +364,7 @@ class DiskMgrShell(cmd.Cmd):
                 
                 print(" ".join(segments))
             except Exception as e:
+                print(f"\n{Colors.BOLD}Disk: {dev_path} ({model}){Colors.ENDC}")
                 log(f"Could not read layout for {dev_path}: {e}", 'WARN')
         print("")
 
