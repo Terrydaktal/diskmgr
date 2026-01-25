@@ -4,42 +4,39 @@ A utility designed to simplify the management of encrypted and plain removable m
 
 ## Overview
 
-[0m
-[0m
 A utility designed to simplify the management of encrypted and plain removable media.
 It maps friendly labels to hardware-specific Persistent Device Paths (PDP), ensuring
 that disks are recognized reliably even if device nodes (like /dev/sdb) change.
 
-[1mCOMMANDS:[0m
-  [92mlist[0m
+COMMANDS:
+  list
       Shows all configured mappings and their status (Open/Mounted).
       Also lists unmapped system disks with discovery IDs (e.g., U1, U2).
-  [92mmap <id> <name>[0m
+  map <id> <name>
       Assigns a friendly name to a disk.
       <id> can be a discovery ID (U1) or an existing index (1).
       Example: 'map U1 backup_drive'
-  [92mopen <name>[0m
+  open <name>
       Unlocks LUKS (if encrypted) and mounts the disk.
-  [92mclose <name>[0m
+  close <name>
       Unmounts and closes the disk.
-  [92mlabel <name> [new_label][0m
+  label <name> [new_label]
       Get or set the filesystem label of an OPEN disk.
-  [92mcreate <name> [options][0m
+  create <name> [options]
       Initializes a new disk (Erase -> LUKS -> Format -> Mount).
       Use 'help create' for full options.
-  [92merase <name/target>[0m
+  erase <name/target>
       Securely erases a disk (NVMe format, blkdiscard, or dd overwrite).
       WARNING: Destructive!
-  [92mexit / quit / Ctrl+D[0m
+  exit / quit / Ctrl+D
       Exit the application.
 
 Type 'help <command>' for more specific details.
-[0m
 
 ## Command: `list`
 
 ```text
-[0mList configured mappings and available system disks.
+List configured mappings and available system disks.
 
         UNDER THE HOOD:
         1.  Resolution: Refreshes mappings from luksmap.tsv.
@@ -51,14 +48,12 @@ Type 'help <command>' for more specific details.
             - MOUNTED: Filesystem is active and attached to the preferred mountpoint.
         4.  Discovery: Identifies disks not in the mapping table and assigns discovery IDs (U1, U2...).
         5.  Dynamic Layout: Calculates column widths based on current data for optimal alignment.
-
-[0m
 ```
 
 ## Command: `map`
 
 ```text
-[0mCreate or modify a persistent mapping: map <id> <name>
+Create or modify a persistent mapping: map <id> <name>
 
         UNDER THE HOOD:
         1.  Input Resolution:
@@ -69,14 +64,12 @@ Type 'help <command>' for more specific details.
         4.  Persistence: Writes the [Name <TAB> PDP] pair to luksmap.tsv.
 
         This ensures the disk is recognized correctly regardless of USB port or device node changes.
-
-[0m
 ```
 
 ## Command: `open`
 
 ```text
-[0mUnlock (if encrypted) and mount a disk: open <name>
+Unlock (if encrypted) and mount a disk: open <name>
 
         UNDER THE HOOD:
         1.  Identity Resolution: Looks up the friendly name in luksmap.tsv to find the PDP.
@@ -92,14 +85,12 @@ Type 'help <command>' for more specific details.
             - Attaches the (decrypted) device to the mountpoint.
         6.  Policy Enforcement: If the disk is already mounted at a non-standard path,
             it unmounts and remounts it to the preferred /media/$USER/<name> path.
-
-[0m
 ```
 
 ## Command: `close`
 
 ```text
-[0mUnmount and lock (if encrypted) a disk: close <name>
+Unmount and lock (if encrypted) a disk: close <name>
 
         UNDER THE HOOD:
         1.  Unmounting:
@@ -110,14 +101,12 @@ Type 'help <command>' for more specific details.
             - Commands the kernel to wipe encryption keys from RAM.
             - Removes the virtual cleartext device from /dev/mapper/.
         3.  Audit: Checks and displays remaining active mappings for security awareness.
-
-[0m
 ```
 
 ## Command: `label`
 
 ```text
-[0mGet or set the filesystem label of an OPEN disk: label <name> [new_label]
+Get or set the filesystem label of an OPEN disk: label <name> [new_label]
 
         UNDER THE HOOD:
         1.  Validation: Verifies that the disk is currently open/unlocked.
@@ -127,14 +116,12 @@ Type 'help <command>' for more specific details.
             - xfs: Requires a temporary unmount, then uses 'xfs_admin -L', then remounts.
 
         The label is written directly to the disk hardware and persists across different computers.
-
-[0m
 ```
 
 ## Command: `erase`
 
 ```text
-[0mSecurely erase a disk: erase <name/target> [-y]
+Securely erase a disk: erase <name/target> [-y]
 
         UNDER THE HOOD:
         1.  Target Resolution: Maps friendly name or ID to a raw block device.
@@ -145,14 +132,12 @@ Type 'help <command>' for more specific details.
         3.  Verification: Executes 'udevadm settle' and 'sync' to ensure all operations are committed.
 
         WARNING: This operation is IRREVERSIBLE.
-
-[0m
 ```
 
 ## Command: `create`
 
 ```text
-[0mInitialize a new disk: create <name> [options] OR create <target> <name> [options]
+Initialize a new disk: create <name> [options] OR create <target> <name> [options]
 
         UNDER THE HOOD:
         1.  Unmount: Forcefully unmounts any existing partitions on the target.
@@ -163,8 +148,6 @@ Type 'help <command>' for more specific details.
             - Runs 'cryptsetup luksFormat' with LUKS2 encryption.
         5.  Filesystem: Formats the cleartext device with ext4 or xfs.
         6.  Persistence: Adds the new disk's PDP to luksmap.tsv automatically.
-
-[0m
 ```
 
 ## Configuration
