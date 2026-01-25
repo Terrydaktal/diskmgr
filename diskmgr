@@ -320,7 +320,7 @@ class DiskMgrShell(cmd.Cmd):
                 
                 # Get Physical Device Properties
                 try:
-                    cmd_p = ['lsblk', '-n', '-P', '-o', 'KNAME,FSTYPE,SIZE,LABEL', real_path]
+                    cmd_p = ['lsblk', '-n', '-P', '-o', 'KNAME,PKNAME,FSTYPE,SIZE,LABEL', real_path]
                     res_p = run_command(cmd_p, check=False)
                     if res_p.stdout.strip():
                         props = {}
@@ -330,6 +330,11 @@ class DiskMgrShell(cmd.Cmd):
                                 props[k] = v
                         
                         phys_device = props.get('KNAME', '-')
+                        # If the 'physical' device is actually a DM device, try to get its parent
+                        if phys_device.startswith('dm-'):
+                            parent = props.get('PKNAME', '')
+                            if parent: phys_device = parent
+
                         fstype = props.get('FSTYPE', '-')
                         size = props.get('SIZE', '-')
                         label = props.get('LABEL', '-')
@@ -344,7 +349,7 @@ class DiskMgrShell(cmd.Cmd):
                 
                 state = "OPEN"
                 try:
-                    cmd_m = ['lsblk', '-n', '-P', '-o', 'KNAME,FSTYPE,LABEL,SIZE', mapper_path]
+                    cmd_m = ['lsblk', '-n', '-P', '-o', 'KNAME,PKNAME,FSTYPE,LABEL,SIZE', mapper_path]
                     res_m = run_command(cmd_m, check=False)
                     if res_m.stdout.strip():
                         props = {}
@@ -355,6 +360,12 @@ class DiskMgrShell(cmd.Cmd):
                         # Get mapper kernel name (e.g. dm-0)
                         dm_device = props.get('KNAME', '')
                         if dm_device: mapped_names.add(dm_device)
+                        
+                        # Also hide the physical parent of the DM device
+                        dm_parent = props.get('PKNAME', '')
+                        if dm_parent: 
+                            mapped_names.add(dm_parent)
+                            if phys_device == '-': phys_device = dm_parent
                         
                         # Use mapper properties for FS details
                         if props.get('FSTYPE'): fstype = props.get('FSTYPE')
