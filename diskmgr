@@ -324,7 +324,15 @@ class DiskMgrShell(cmd.Cmd):
 
                 print(f"\n{Colors.BOLD}Disk: {dev_path} ({model}) [{ptable}] [Sector: L{logical_sector}/P{physical_sector}] [Total Sectors: {total_logical_sectors}]{Colors.ENDC}")
 
-                # 3. Parse Data Lines
+                # 3. Print lsblk hierarchy
+                try:
+                    ls_res = run_command(['lsblk', '-f', dev_path], check=False)
+                    if ls_res.stdout.strip():
+                        print(ls_res.stdout.strip())
+                except:
+                    pass
+
+                # 4. Parse Data Lines from parted for visual blocks
                 data_lines = [l for l in lines if l and not l.startswith('BYT') and not l.startswith('/')]
                 
                 segments = []
