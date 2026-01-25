@@ -59,8 +59,11 @@ OPTIONS
     -y, --yes
         Non-interactive. Skips the "ERASE <name>" confirmation prompt.
 
-    -n, --dry-run
+    --n, --dry-run
         Print what would happen without making changes.
+
+    --plain
+        Create a PLAIN (non-encrypted) disk. Skips LUKS formatting.
 
     --gpt-partition
         Create a GPT partition table + 1 partition spanning the disk, then LUKS on the partition.
@@ -366,6 +369,7 @@ FS="ext4"
 FSLABEL=""
 ALLOW_NONREMOVABLE=0
 SECURE_ERASE=0
+PLAIN=0
 
 # Partition mode: default = none (whole-drive LUKS)
 PARTMODE="none"   # none|gpt|mbr
@@ -383,6 +387,7 @@ while [[ $# -gt 0 ]]; do
     -n|--dry-run) DRYRUN=1; shift ;;
     --fs) FS="${2:-}"; shift 2 ;;
     --label) FSLABEL="${2:-}"; shift 2 ;;
+    --plain) PLAIN=1; shift ;;
     --allow-nonremovable) ALLOW_NONREMOVABLE=1; shift ;;
     --secure-erase) SECURE_ERASE=1; shift ;;
     --gpt-partition) PARTMODE="gpt"; shift ;;
@@ -520,7 +525,11 @@ log "  secure erase: $SECURE_ERASE"
 if [[ "$YES" -eq 0 ]]; then
   echo
   echo "DANGER: This will IRREVERSIBLY ERASE all data on: $disk"
-  echo "It will create an encrypted mapping as: /dev/mapper/$name"
+  if [[ "$PLAIN" -eq 1 ]]; then
+    echo "It will create a PLAIN (non-encrypted) volume named: $name"
+  else
+    echo "It will create an encrypted mapping as: /dev/mapper/$name"
+  fi
   echo
   read -r -p "Type exactly: ERASE $name   > " confirm
   [[ "$confirm" == "ERASE $name" ]] || die "Confirmation failed; aborting."
@@ -586,47 +595,50 @@ if findmnt -rn -S "$crypt_target" >/dev/null 2>&1; then
   die "Target is still mounted: $crypt_target (refusing)"
 fi
 
-# Final signature wipe on the actual LUKS target (cheap + prevents warnings)
-log "Final signature wipe on LUKS target: $crypt_target"
+# Final signature wipe on the actual target (cheap + prevents warnings)
+log "Final signature wipe on target: $crypt_target"
 run sudo wipefs -a "$crypt_target"
 run sudo udevadm settle
 
-# LUKS format
-log "LUKS-formatting (LUKS2): $crypt_target"
-if [[ "$DRYRUN" -eq 1 ]]; then
-  log "[dry-run] $PASSGEN_BIN | sudo cryptsetup luksFormat --type luks2 --batch-mode --key-file - '$crypt_target'"
-else
-  "$PASSGEN_BIN" | sudo cryptsetup luksFormat --type luks2 --batch-mode --key-file - "$crypt_target"
-fi
+if [[ "$PLAIN" -eq 0 ]]; then
+    # LUKS format
+    log "LUKS-formatting (LUKS2): $crypt_target"
+    if [[ "$DRYRUN" -eq 1 ]]; then
+      log "[dry-run] $PASSGEN_BIN | sudo cryptsetup luksFormat --type luks2 --batch-mode --key-file - '$crypt_target'"
+    else
+      "$PASSGEN_BIN" | sudo cryptsetup luksFormat --type luks2 --batch-mode --key-file - "$crypt_target"
+    fi
 
-# Open mapping
-log "Opening mapping: $crypt_target -> /dev/mapper/$name"
-if [[ "$DRYRUN" -eq 1 ]]; then
-  log "[dry-run] $PASSGEN_BIN | sudo cryptsetup open --key-file - '$crypt_target' '$name'"
+    # Open mapping
+    log "Opening mapping: $crypt_target -> /dev/mapper/$name"
+    if [[ "$DRYRUN" -eq 1 ]]; then
+      log "[dry-run] $PASSGEN_BIN | sudo cryptsetup open --key-file - '$crypt_target' '$name'"
+    else
+      "$PASSGEN_BIN" | sudo cryptsetup open --key-file - "$crypt_target" "$name"
+    fi
+    fs_target="/dev/mapper/$name"
 else
-  "$PASSGEN_BIN" | sudo cryptsetup open --key-file - "$crypt_target" "$name"
+    log "Skipping LUKS (--plain enabled)"
+    fs_target="$crypt_target"
 fi
-
-mapper="/dev/mapper/$name"
-[[ "$DRYRUN" -eq 1 || -b "$mapper" ]] || die "Mapper device not created: $mapper"
 
 # Filesystem create
-log "Creating filesystem on $mapper: $FS (label=$FSLABEL)"
+log "Creating filesystem on $fs_target: $FS (label=$FSLABEL)"
 case "$FS" in
   ext4)
-    run sudo mkfs.ext4 -F -L "$FSLABEL" "$mapper"
-    run sudo tune2fs -m 0 "$mapper"
+    run sudo mkfs.ext4 -F -L "$FSLABEL" "$fs_target"
+    run sudo tune2fs -m 0 "$fs_target"
     ;;
   xfs)
-    run sudo mkfs.xfs -f -L "$FSLABEL" "$mapper"
+    run sudo mkfs.xfs -f -L "$FSLABEL" "$fs_target"
     ;;
 esac
 
 # Mount
 mnt="/media/$USER/$name"
-log "Mounting $mapper -> $mnt"
+log "Mounting $fs_target -> $mnt"
 run sudo mkdir -p "$mnt"
-run sudo mount "$mapper" "$mnt"
+run sudo mount "$fs_target" "$mnt"
 
 # Determine stable by-id path for mapping (disk vs partition)
 pdp="-"

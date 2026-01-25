@@ -751,6 +751,7 @@ class DiskMgrShell(cmd.Cmd):
         Options:
           --fs <ext4|xfs>
           --label <label>
+          --plain (Create a non-encrypted disk)
           --gpt (Create GPT partition table + 1 partition)
           --mbr (Create MBR partition table + 1 partition)
           -y, --yes (Skip confirmation)
@@ -759,6 +760,7 @@ class DiskMgrShell(cmd.Cmd):
         parser.add_argument('args', nargs='+', help='<name> or <target> <name>')
         parser.add_argument('--fs', default='ext4', choices=['ext4', 'xfs'])
         parser.add_argument('--label', help='Filesystem label')
+        parser.add_argument('--plain', action='store_true', help='No LUKS encryption')
         parser.add_argument('--gpt', action='store_true')
         parser.add_argument('--mbr', action='store_true')
         parser.add_argument('-y', '--yes', action='store_true')
@@ -808,7 +810,8 @@ class DiskMgrShell(cmd.Cmd):
         # Safety checks
         if not args.yes:
             print(f"\n{Colors.WARNING}DANGER: ALL DATA ON {real_target} WILL BE LOST!{Colors.ENDC}")
-            print(f"Creating encrypted volume '{name}'")
+            mode_str = "plain" if args.plain else "encrypted"
+            print(f"Creating {mode_str} volume '{name}'")
             confirm = input(f"Type 'ERASE {name}' to continue: ")
             if confirm != f"ERASE {name}":
                 log("Confirmation failed. Aborting.", 'ERROR')
@@ -817,10 +820,8 @@ class DiskMgrShell(cmd.Cmd):
         run_command(['sudo', '-v'])
 
         # Unmount anything on the disk
-        # (Simplified: check if mounted and unmount)
-        # In a real tool, we'd need more robust checking of partitions
         log("Ensuring target is unmounted...")
-        # TODO: Better recursive unmount logic
+        # (Simplified unmount check)
         
         # Always do a soft wipe for create
         run_command(['wipefs', '-a', real_target], sudo=True)
@@ -851,53 +852,62 @@ class DiskMgrShell(cmd.Cmd):
             else:
                 crypt_target = f"{real_target}1"
 
-        # LUKS Format
-        log(f"Formatting LUKS on {crypt_target}...")
-        pg_cmd = subprocess.Popen([PASSGEN_BIN], stdout=subprocess.PIPE, text=True)
-        try:
+        if not args.plain:
+            # LUKS Format
+            log(f"Formatting LUKS on {crypt_target}...")
+            pg_cmd = subprocess.Popen([PASSGEN_BIN], stdout=subprocess.PIPE, text=True)
+            try:
+                run_command(
+                    ['cryptsetup', 'luksFormat', '--type', 'luks2', '--batch-mode', '--key-file', '-', crypt_target],
+                    input_str=pg_cmd.communicate()[0],
+                    sudo=True,
+                    check=True
+                )
+            except Exception as e:
+                log(f"LUKS Format failed: {e}", 'ERROR')
+                return
+
+            # Open
+            log("Opening new LUKS volume...")
+            pg_cmd = subprocess.Popen([PASSGEN_BIN], stdout=subprocess.PIPE, text=True)
             run_command(
-                ['cryptsetup', 'luksFormat', '--type', 'luks2', '--batch-mode', '--key-file', '-', crypt_target],
+                ['cryptsetup', 'open', '--key-file', '-', crypt_target, name],
                 input_str=pg_cmd.communicate()[0],
                 sudo=True,
                 check=True
             )
-        except Exception as e:
-            log(f"LUKS Format failed: {e}", 'ERROR')
-            return
-
-        # Open
-        log("Opening new LUKS volume...")
-        pg_cmd = subprocess.Popen([PASSGEN_BIN], stdout=subprocess.PIPE, text=True)
-        run_command(
-            ['cryptsetup', 'open', '--key-file', '-', crypt_target, name],
-            input_str=pg_cmd.communicate()[0],
-            sudo=True,
-            check=True
-        )
+            fs_target = f"/dev/mapper/{name}"
+        else:
+            fs_target = crypt_target
 
         # Mkfs
-        mapper_path = f"/dev/mapper/{name}"
         label = args.label if args.label else name
-        log(f"Formatting filesystem {args.fs} (label={label})...")
+        log(f"Formatting filesystem {args.fs} (label={label}) on {fs_target}...")
         
         if args.fs == 'ext4':
-            run_command(['mkfs.ext4', '-F', '-L', label, mapper_path], sudo=True)
+            run_command(['mkfs.ext4', '-F', '-L', label, fs_target], sudo=True)
         elif args.fs == 'xfs':
-            run_command(['mkfs.xfs', '-f', '-L', label, mapper_path], sudo=True)
+            run_command(['mkfs.xfs', '-f', '-L', label, fs_target], sudo=True)
 
         # Mount
         mountpoint = f"/media/{os.environ.get('USER', 'root')}/{name}"
         run_command(['mkdir', '-p', mountpoint], sudo=True)
-        run_command(['mount', mapper_path, mountpoint], sudo=True)
+        run_command(['mount', fs_target, mountpoint], sudo=True)
 
         # Update map if needed
         self.mappings = read_luks_map()
         if name not in self.mappings:
-            # Try to resolve stable path for the crypt_target
-            # If we partitioned, we need the PARTITION's stable path or we store the disk's stable path?
-            # The map usually stores the CRYPT TARGET.
-            
             stable_path = crypt_target
+            # Try to find by-id
+            pdp = self.find_persistent_path(os.path.basename(crypt_target))
+            if pdp != '-':
+                stable_path = pdp
+            
+            self.mappings[name] = stable_path
+            save_luks_map(self.mappings)
+            log(f"Added mapping: {name} -> {stable_path}")
+
+        log("Disk initialization complete.")
             # Try to find by-id
             pdp = self.find_persistent_path(os.path.basename(crypt_target))
             if pdp != '-':
