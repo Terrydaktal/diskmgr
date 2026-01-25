@@ -191,34 +191,29 @@ class DiskMgrShell(cmd.Cmd):
         print(f"\n{Colors.HEADER}Disk Manager (diskmgr){Colors.ENDC}")
         print("A utility designed to simplify the management of encrypted and plain removable media.")
         print("It maps friendly labels to hardware-specific Persistent Device Paths (PDP), ensuring")
-        print("that disks are recognized reliably even if device nodes (like /dev/sdb) change.\n")
+        print("that disks are recognized reliably even if device nodes change.\n")
         
         print(f"{Colors.BOLD}COMMANDS:{Colors.ENDC}")
         print(f"  {Colors.OKGREEN}list{Colors.ENDC}")
-        print("      Shows all configured mappings and their status (Open/Mounted).")
-        print("      Also lists unmapped system disks with discovery IDs (e.g., U1, U2).")
+        print("      Shows all configured mappings and unmapped system disks in one table.")
         
-        print(f"  {Colors.OKGREEN}map <id> <name>{Colors.ENDC}")
-        print("      Assigns a friendly name to a disk.")
-        print("      <id> can be a discovery ID (U1) or an existing index (1).")
-        print("      Example: 'map U1 backup_drive'")
+        print(f"  {Colors.OKGREEN}map <name/id> <name>{Colors.ENDC}")
+        print("      Assigns a friendly name to a disk or renames an existing mapping.")
         
-        print(f"  {Colors.OKGREEN}open <name>{Colors.ENDC}")
+        print(f"  {Colors.OKGREEN}open <name/id>{Colors.ENDC}")
         print("      Unlocks LUKS (if encrypted) and mounts the disk.")
         
-        print(f"  {Colors.OKGREEN}close <name>{Colors.ENDC}")
+        print(f"  {Colors.OKGREEN}close <name/id>{Colors.ENDC}")
         print("      Unmounts and closes the disk.")
 
-        print(f"  {Colors.OKGREEN}label <name> [new_label]{Colors.ENDC}")
+        print(f"  {Colors.OKGREEN}label <name/id> [new_label]{Colors.ENDC}")
         print("      Get or set the filesystem label of an OPEN disk.")
         
-        print(f"  {Colors.OKGREEN}create <name> [options]{Colors.ENDC}")
+        print(f"  {Colors.OKGREEN}create <name/id> <name> [options]{Colors.ENDC}")
         print("      Initializes a new disk (Erase -> LUKS -> Format -> Mount).")
-        print("      Use 'help create' for full options.")
 
-        print(f"  {Colors.OKGREEN}erase <name/target>{Colors.ENDC}")
+        print(f"  {Colors.OKGREEN}erase <name/id>{Colors.ENDC}")
         print("      Securely erases a disk (NVMe format, blkdiscard, or dd overwrite).")
-        print("      WARNING: Destructive!")
         
         print(f"  {Colors.OKGREEN}exit / quit / Ctrl+D{Colors.ENDC}")
         print("      Exit the application.")
@@ -566,7 +561,7 @@ class DiskMgrShell(cmd.Cmd):
         return False
 
     def do_map(self, arg):
-        '''Create or modify a persistent mapping: map <id/name> <new_name>
+        '''Create or modify a persistent mapping: map <name/id> <name>
         
         Usage:
           map [U1] backup    Assigns friendly name to discovery ID (e.g., map U1 backup)
@@ -581,6 +576,8 @@ class DiskMgrShell(cmd.Cmd):
         2.  PDP Linking: Extracts the /dev/disk/by-id/ path for the target hardware.
         3.  Conflict Check: Ensures the new friendly name is not already in use.
         4.  Persistence: Writes the [Name <TAB> PDP] pair to luksmap.tsv.
+        
+        This ensures the disk is recognized correctly regardless of USB port or device node changes.
         '''
         args = arg.split()
         if len(args) != 2:
@@ -618,10 +615,10 @@ class DiskMgrShell(cmd.Cmd):
         log(f"Mapping saved: {name} -> {real_target}")
 
     def do_open(self, arg):
-        '''Unlock (if encrypted) and mount a disk: open <name>
+        '''Unlock (if encrypted) and mount a disk: open <name/id>
         
         UNDER THE HOOD:
-        1.  Identity Resolution: Looks up the friendly name in luksmap.tsv to find the PDP.
+        1.  Identity Resolution: Looks up the name or Discovery ID to find the PDP.
         2.  Hardware Wait: Polls for up to 10 seconds to allow for hardware spin-up/udev events.
         3.  Validation: 
             - Runs 'cryptsetup isLuks' to check for encryption.
@@ -635,7 +632,7 @@ class DiskMgrShell(cmd.Cmd):
         6.  Policy Enforcement: If the disk is already mounted at a non-standard path, 
             it unmounts and remounts it to the preferred /media/$USER/<name> path.
         '''
-        name = arg.strip()
+        target_arg = arg.strip()
         if not name:
              log("Usage: open <name>", 'ERROR')
              return
@@ -724,7 +721,7 @@ class DiskMgrShell(cmd.Cmd):
             log(f"Already mounted at {mountpoint}.")
 
     def do_close(self, arg):
-        '''Unmount and lock (if encrypted) a disk: close <name>
+        '''Unmount and lock (if encrypted) a disk: close <name/id>
         
         UNDER THE HOOD:
         1.  Unmounting (Encrypted & Plain): 
@@ -784,7 +781,7 @@ class DiskMgrShell(cmd.Cmd):
             log("Mapping not open or already closed.")
 
     def do_label(self, arg):
-        '''Get or set the filesystem label of an OPEN disk: label <name> [new_label]
+        '''Get or set the filesystem label of an OPEN disk: label <name/id> [new_label]
         
         UNDER THE HOOD:
         1.  Validation: Verifies that the disk is currently open/unlocked.
@@ -872,7 +869,7 @@ class DiskMgrShell(cmd.Cmd):
             log(f"Unsupported filesystem for labeling: {fstype}", 'ERROR')
 
     def do_erase(self, arg):
-        '''Securely erase a disk: erase <target> [options]
+        '''Securely erase a disk: erase <name/id> [options]
         
         Target can be:
           - A mapping name (e.g., backup)
@@ -946,10 +943,10 @@ class DiskMgrShell(cmd.Cmd):
 
 
     def do_create(self, arg):
-        '''Initialize a new disk: create <target> <name> [options]
+        '''Initialize a new disk: create <name/id> <name> [options]
         
         Parameters:
-          <target>          Discovery ID from the list command (e.g., [U1])
+          <name/id>         Discovery ID from the list command (e.g., [U1])
           <name>            The permanent MAPPING NAME (used for mounting and commands).
                             This will also be used as the default filesystem LABEL.
         
