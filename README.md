@@ -189,11 +189,27 @@ Initialize a new disk: create <target> <name> [options]
         Note: Raw device paths (e.g., /dev/sdb) are NOT allowed.
 
         NUANCES & SCOPE:
-        - Whole Disk (sda): Replaces the entire partition map. All existing data lost.
-        - Partition (sda2): Operates strictly within the partition boundaries.
-          Other partitions on the same disk remain untouched.
-        - Partition Flags: Flags like --gpt or --mbr are ignored if a partition is
-          targeted directly, as the drive already has a partition table.
+        1. Running create on a Partition (e.g., sda2)
+           The Result: Container-in-a-Box.
+           The script treats the existing partition as its "entire world."
+           - Partitioning: It skips the GPT/MBR step because you've already given it a partition.
+           - Encryption: It sets up LUKS directly inside the sda2 boundary.
+           - Filesystem: It formats the area inside sda2.
+           - The Big Picture: The rest of your disk (like sda1 or sda3) is untouched.
+             You are simply replacing whatever was inside partition #2 with a new encrypted volume.
+
+        2. Running create on a Whole Disk (e.g., sda)
+           The Result: Total Takeover.
+           The script wipes the slate clean and rebuilds the drive from scratch.
+           - Wipe: It deletes the Partition Table (GPT/MBR) at the start of the disk.
+             All existing partitions (sda1, sda2, etc.) are instantly lost.
+           - Rebuild:
+             * If you didn't use --gpt or --mbr: It formats the Entire Disk as one
+               giant LUKS container (no partition table).
+             * If you used --gpt: It creates a fresh GPT table, creates a new
+               partition #1 spanning the whole drive, and puts LUKS inside that.
+           - The Big Picture: You lose everything on the physical drive, and it
+             becomes a single, clean encrypted volume.
 
         Options:
           --fs <ext4|xfs>   Filesystem type (default: ext4)
