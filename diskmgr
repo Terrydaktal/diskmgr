@@ -688,10 +688,10 @@ class DiskMgrShell(cmd.Cmd):
         '''Unmount and lock (if encrypted) a disk: close <name>
         
         UNDER THE HOOD:
-        1.  Unmounting: 
+        1.  Unmounting (Encrypted & Plain): 
             - Flushes all pending writes to the disk (data integrity).
-            - Terminates active file handles to the decrypted device.
-            - Attempts unmount by mapper path, source path, or guessed mountpoint.
+            - Terminates active file handles to the device.
+            - Attempts unmount by mapper path (LUKS), source path (Plain), or guessed mountpoint.
         2.  Locking (LUKS only):
             - Commands the kernel to wipe encryption keys from RAM.
             - Removes the virtual cleartext device from /dev/mapper/.
