@@ -24,6 +24,8 @@ COMMANDS:
       Unmounts and closes the disk.
   label <name> [new_label]
       Get or set the filesystem label of an OPEN disk.
+  passwd <name>
+      Changes the LUKS encryption passphrase for a disk.
   create <name> [options]
       Initializes a new disk (Erase -> LUKS -> Format -> Mount).
   erase <name>
@@ -204,6 +206,20 @@ Get or set the filesystem label of an OPEN disk: label <name> [new_label]
             - xfs: Requires a temporary unmount, then uses 'xfs_admin -L', then remounts.
 
         The label is written directly to the disk hardware and persists across different computers.
+```
+
+## Command Reference: `passwd`
+
+```text
+Change the LUKS encryption passphrase: passwd <name>
+
+        UNDER THE HOOD:
+        1.  Resolution: Maps the friendly name to its physical device node.
+        2.  Validation: Verifies the device is a valid LUKS container.
+        3.  Execution: Runs 'cryptsetup luksChangeKey'. This is an interactive
+            process that prompts for the current passphrase and the new one.
+
+        Note: This command communicates directly with the kernel to update the LUKS slot.
 ```
 
 ## Command Reference: `erase`

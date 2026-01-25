@@ -259,6 +259,9 @@ class DiskMgrShell(cmd.Cmd):
 
         print(f"  {Colors.OKGREEN}label <name> [new_label]{Colors.ENDC}")
         print("      Get or set the filesystem label of an OPEN disk.")
+
+        print(f"  {Colors.OKGREEN}passwd <name>{Colors.ENDC}")
+        print("      Changes the LUKS encryption passphrase for a disk.")
         
         print(f"  {Colors.OKGREEN}create <name> [options]{Colors.ENDC}")
         print("      Initializes a new disk (Erase -> LUKS -> Format -> Mount).")
@@ -1018,6 +1021,44 @@ class DiskMgrShell(cmd.Cmd):
 
         else:
             log(f"Unsupported filesystem for labeling: {fstype}", 'ERROR')
+
+    def do_passwd(self, arg):
+        '''Change the LUKS encryption passphrase: passwd <name>
+        
+        UNDER THE HOOD:
+        1.  Resolution: Maps the friendly name to its physical device node.
+        2.  Validation: Verifies the device is a valid LUKS container.
+        3.  Execution: Runs 'cryptsetup luksChangeKey'. This is an interactive 
+            process that prompts for the current passphrase and the new one.
+        
+        Note: This command communicates directly with the kernel to update the LUKS slot.
+        '''
+        name = arg.strip()
+        if not name:
+            log("Usage: passwd <name>", 'ERROR')
+            return
+
+        src = self.resolve_target(name, allow_id=False)
+        if not src:
+            log(f"Unknown mapping: '{name}'.", 'ERROR')
+            return
+
+        devnode = os.path.realpath(src)
+        
+        # Check LUKS
+        try:
+            run_command(['sudo', 'cryptsetup', 'isLuks', devnode])
+        except subprocess.CalledProcessError:
+            log(f"Device {name} ({devnode}) is not a LUKS encrypted device.", 'ERROR')
+            return
+
+        log(f"Starting passphrase change for {name} ({devnode})...")
+        # Run interactively (capture_output=False)
+        try:
+            run_command(['cryptsetup', 'luksChangeKey', devnode], sudo=True, capture_output=False)
+            log("Passphrase updated successfully.")
+        except Exception as e:
+            log(f"Failed to change passphrase: {e}", 'ERROR')
 
     def do_erase(self, arg):
         '''Securely erase a disk: erase <name> [options]
