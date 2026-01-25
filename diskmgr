@@ -848,6 +848,12 @@ class DiskMgrShell(cmd.Cmd):
         
         Note: Raw device paths (e.g., /dev/sdb) are NOT allowed.
         
+        NUANCES & SAFETY:
+        - Whole Disk (sda): Wipes the Partition Table (GPT/MBR) and ALL partitions.
+        - Partition (sda2): Wipes only that partition. Other partitions are safe.
+        - Mapped Name (1a): Resolves to the physical partition. Wiping it destroys 
+          the LUKS Header, making data recovery impossible even with the password.
+        
         Options:
           -y, --yes         Skip math confirmation questions
         
@@ -913,12 +919,19 @@ class DiskMgrShell(cmd.Cmd):
         
         Note: Raw device paths (e.g., /dev/sdb) are NOT allowed.
         
+        NUANCES & SCOPE:
+        - Whole Disk (sda): Replaces the entire partition map. All existing data lost.
+        - Partition (sda2): Operates strictly within the partition boundaries. 
+          Other partitions on the same disk remain untouched.
+        - Partition Flags: Flags like --gpt or --mbr are ignored if a partition is 
+          targeted directly, as the drive already has a partition table.
+        
         Options:
           --fs <ext4|xfs>   Filesystem type (default: ext4)
           --label <label>   Set a different internal filesystem label (other than <name>)
           --plain           Create a non-encrypted disk (skips LUKS)
-          --gpt             Create GPT partition table + 1 partition
-          --mbr             Create MBR partition table + 1 partition
+          --gpt             Create GPT partition table + 1 partition (Whole disk only)
+          --mbr             Create MBR partition table + 1 partition (Whole disk only)
           -y, --yes         Skip math confirmation questions
         
         UNDER THE HOOD:
