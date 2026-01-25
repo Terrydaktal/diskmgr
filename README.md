@@ -16,6 +16,8 @@ COMMANDS:
       Displays the physical partition layout and free space for all disks.
   map <name/id> <name>
       Assigns a friendly name to a disk or renames an existing mapping.
+  unmap <name>
+      Removes an existing mapping from the configuration.
   open <name>
       Unlocks LUKS (if encrypted) and mounts the disk.
   close <name>

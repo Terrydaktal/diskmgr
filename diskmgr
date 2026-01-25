@@ -247,6 +247,9 @@ class DiskMgrShell(cmd.Cmd):
         
         print(f"  {Colors.OKGREEN}map <name/id> <name>{Colors.ENDC}")
         print("      Assigns a friendly name to a disk or renames an existing mapping.")
+
+        print(f"  {Colors.OKGREEN}unmap <name>{Colors.ENDC}")
+        print("      Removes an existing mapping from the configuration.")
         
         print(f"  {Colors.OKGREEN}open <name>{Colors.ENDC}")
         print("      Unlocks LUKS (if encrypted) and mounts the disk.")
@@ -736,6 +739,28 @@ class DiskMgrShell(cmd.Cmd):
         self.mappings[name] = real_target
         save_luks_map(self.mappings)
         log(f"Mapping saved: {name} -> {real_target}")
+
+    def do_unmap(self, arg):
+        '''Remove a persistent mapping: unmap <name>
+        
+        UNDER THE HOOD:
+        1.  Resolution: Verifies the mapping exists in luksmap.tsv.
+        2.  Removal: Deletes the [Name <TAB> PDP] pair from the internal dictionary.
+        3.  Persistence: Re-writes luksmap.tsv with the mapping removed.
+        '''
+        name = arg.strip()
+        if not name:
+            log("Usage: unmap <name>", 'ERROR')
+            return
+
+        self.mappings = read_luks_map()
+        if name not in self.mappings:
+            log(f"Unknown mapping: '{name}'", 'ERROR')
+            return
+
+        del self.mappings[name]
+        save_luks_map(self.mappings)
+        log(f"Mapping '{name}' removed successfully.")
 
     def do_open(self, arg):
         '''Unlock (if encrypted) and mount a disk: open <name>
