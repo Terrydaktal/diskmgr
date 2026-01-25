@@ -308,6 +308,8 @@ class DiskMgrShell(cmd.Cmd):
             state = "MISSING"
             
             real_path = None
+            mountpoint = f"/media/{os.environ.get('USER', 'root')}/{name}"
+            
             if os.path.exists(path):
                 real_path = os.path.realpath(path)
                 mapped_real_paths.add(real_path)

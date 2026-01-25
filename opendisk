@@ -151,7 +151,7 @@ if [[ "${1:-}" == "-l" || "${1:-}" == "--list" ]]; then
     [[ -n "$m_name" && "$m_name" != "#"* ]] || continue
     m_state="MISSING"
     m_luks="-"
-    m_mnt=""
+    m_mnt="/media/$USER/$m_name"
     m_path="$m_src"
     
     if [[ -e "$m_src" ]]; then
