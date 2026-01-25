@@ -321,14 +321,7 @@ class DiskMgrShell(cmd.Cmd):
                 real_path = os.path.realpath(path)
                 mapped_real_paths.add(real_path)
                 state = "CLOSED"
-                
-                # Check LUKS status using cryptsetup
-                try:
-                    run_command(['sudo', 'cryptsetup', 'isLuks', real_path])
-                    is_luks = "Y"
-                except:
-                    is_luks = "N"
-                    state = "UNMOUNTED"
+                is_luks = "N"
                 
                 # Get Physical Device Properties
                 try:
@@ -350,6 +343,9 @@ class DiskMgrShell(cmd.Cmd):
                         fstype = props.get('FSTYPE', '-')
                         size = props.get('SIZE', '-')
                         label = props.get('LABEL', '-')
+                        
+                        if fstype == 'crypto_LUKS':
+                            is_luks = "Y"
                 except:
                     pass
 
@@ -447,13 +443,6 @@ class DiskMgrShell(cmd.Cmd):
             is_luks_u = "N"
             if fstype == 'crypto_LUKS':
                 is_luks_u = "Y"
-            else:
-                try:
-                    # Non-blocking check
-                    res_c = subprocess.run(['sudo', 'cryptsetup', 'isLuks', dev_path], capture_output=True)
-                    if res_c.returncode == 0: is_luks_u = "Y"
-                except:
-                    pass
 
             state_u = "MOUNTED" if mountpoint != '-' else "UNMOUNTED"
             if is_luks_u == "Y": state_u = "LOCKED"
