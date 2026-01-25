@@ -284,7 +284,19 @@ class DiskMgrShell(cmd.Cmd):
         return "-"
 
     def do_list(self, arg):
-        'List configured mappings and available disks'
+        '''List configured mappings and available system disks.
+        
+        UNDER THE HOOD:
+        1.  Resolution: Refreshes mappings from luksmap.tsv.
+        2.  Scanning: Executes 'lsblk' to gather hardware properties (FSTYPE, SIZE, etc.).
+        3.  Status Check:
+            - MISSING: Persistent path not found in /dev.
+            - CLOSED: Persistent path exists, but no active mapping in /dev/mapper.
+            - OPEN: Active mapping exists in /dev/mapper but is not mounted.
+            - MOUNTED: Filesystem is active and attached to the preferred mountpoint.
+        4.  Discovery: Identifies disks not in the mapping table and assigns discovery IDs (U1, U2...).
+        5.  Dynamic Layout: Calculates column widths based on current data for optimal alignment.
+        '''
         self.mappings = read_luks_map()
         mapped_rows = []
         unmapped_rows = []
