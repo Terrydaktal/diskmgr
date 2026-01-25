@@ -303,12 +303,17 @@ fi
 mnt="/media/$USER/$name"
 sudo mkdir -p "$mnt"
 
-if findmnt -rn -S "$target_to_mount" >/dev/null 2>&1; then
-  log "Already mounted: $target_to_mount"
-else
+current_mnt=$(findmnt -rn -S "$target_to_mount" -o TARGET || true)
+if [[ -z "$current_mnt" ]]; then
   log "Mounting: $target_to_mount -> $mnt ..."
   sudo mount "$target_to_mount" "$mnt"
   log "Mounted: $mnt"
+elif [[ "$current_mnt" != "$mnt" ]]; then
+  log "Disk is mounted at $current_mnt (system default). Overriding to $mnt ..."
+  sudo umount "$current_mnt" && sudo mount "$target_to_mount" "$mnt"
+  log "Successfully moved mount to $mnt"
+else
+  log "Already mounted at $mnt"
 fi
 
 log "Done."

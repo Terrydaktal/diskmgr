@@ -634,13 +634,23 @@ class DiskMgrShell(cmd.Cmd):
             run_command(['mkdir', '-p', mountpoint], sudo=True)
             
         # Check if mounted
-        res = run_command(['findmnt', '-rn', '-S', target_to_mount], check=False)
-        if res.returncode != 0:
+        res = run_command(['findmnt', '-rn', '-S', target_to_mount, '-o', 'TARGET'], check=False)
+        current_mnt = res.stdout.strip()
+
+        if not current_mnt:
             log(f"Mounting {target_to_mount} to {mountpoint}...")
             run_command(['mount', target_to_mount, mountpoint], sudo=True)
             log("Mounted.")
+        elif current_mnt != mountpoint:
+            log(f"Disk is mounted at {current_mnt} (system default). Overriding...")
+            try:
+                run_command(['umount', current_mnt], sudo=True)
+                run_command(['mount', target_to_mount, mountpoint], sudo=True)
+                log(f"Successfully moved mount to {mountpoint}")
+            except Exception as e:
+                log(f"Failed to override mount: {e}. It may be in use.", 'WARN')
         else:
-            log("Already mounted.")
+            log(f"Already mounted at {mountpoint}.")
 
     def do_close(self, arg):
         'Unmount and close a mapped disk: close <name>'
