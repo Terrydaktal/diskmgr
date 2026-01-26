@@ -72,7 +72,7 @@ List all configured mappings and available system disks in a single table.
 [2]   1a    Y     CLOSED     crypto_LUKS  -      /media/root/1a     sda2       931.4G  /dev/disk/by-id/wwn-0x5000c500a89d6e44-part2
 [3]   data  N     MOUNTED    ext4         data   /media/lewis/data  nvme1n1p1  931.5G  /dev/disk/by-id/nvme-WD_Blue_SN570_1TB_21353X644609-part1
 [U1]  -     N     UNMOUNTED  -            -      -                  sda        931.5G  /dev/disk/by-id/wwn-0x5000c500a89d6e44
-[U2]  -     N     UNMOUNTED  -            -      -                  sda1       128M    /dev/disk/by-id/wwn-0x5000c500a89d6e44-part1
+[U2]  -     N     UNMOUNTED  -            -      -                  sda1       128M    /dev/disk/by-id/usb-SABRENT_SABRENT_DD5641988396B-0:0-part1
 [U3]  -     N     UNMOUNTED  -            -      -                  nvme0n1    1.8T    /dev/disk/by-id/nvme-eui.e8238fa6bf530001001b448b42d60852
 [U4]  -     N     MOUNTED    ext4         -      /                  nvme0n1p1  1.8T    /dev/disk/by-id/nvme-WD_BLACK_SN8100_2000GB_25334X800147_1-part1
 [U5]  -     N     UNMOUNTED  -            -      -                  nvme1n1    931.5G  /dev/disk/by-id/nvme-eui.e8238fa6bf530001001b444a49598af9
@@ -236,10 +236,15 @@ Securely erase a disk: erase <name> [options]
         Note: You must 'map' a disk first to give it a name before erasing it.
 
         NUANCES & SAFETY:
-        - Whole Disk (sda): Wipes the Partition Table (GPT/MBR) and ALL partitions.
-        - Partition (sda2): Wipes only that partition. Other partitions are safe.
-        - Mapped Name (1a): Resolves to the physical partition. Wiping it destroys
-          the LUKS Header, making data recovery impossible even with the password.
+        - Whole Disk (sda):
+          Attempts deep hardware-level wipes (NVMe Sanitize, ATA Secure Erase, etc.).
+          Destroys the Partition Table and ALL partitions on the drive.
+        - Partition (sda2):
+          Hardware-level wipes are SKIPPED for safety. The script falls back to
+          highly effective software wipes (blkdiscard or dd zero-overwrite).
+          ONLY the specified partition is wiped; other partitions remain safe.
+        - Mapped Name (1a):
+          Resolves to the physical partition and follows partition-level safety rules.
 
         UNDER THE HOOD:
         1.  Target Resolution: Maps friendly name to a raw block device.
