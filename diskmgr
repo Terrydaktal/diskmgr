@@ -1202,9 +1202,6 @@ class DiskMgrShell(cmd.Cmd):
         - Mapped Name (1a): Resolves to the physical partition. Wiping it destroys 
           the LUKS Header, making data recovery impossible even with the password.
         
-        Options:
-          -y, --yes         Skip math confirmation questions
-        
         UNDER THE HOOD:
         1.  Target Resolution: Maps friendly name to a raw block device.
         2.  Destructive Wipe:
@@ -1217,7 +1214,6 @@ class DiskMgrShell(cmd.Cmd):
         '''
         parser = CmdArgumentParser(prog='erase', add_help=False)
         parser.add_argument('target', help='Target name or device')
-        parser.add_argument('-y', '--yes', action='store_true')
         
         try:
             split_args = shlex.split(arg)
@@ -1246,9 +1242,8 @@ class DiskMgrShell(cmd.Cmd):
             log(f"OPERATION BLOCKED: {real_target} is part of the system root drive!", 'ERROR')
             return
 
-        if not args.yes:
-            if not self.extensive_confirm(real_target):
-                return
+        if not self.extensive_confirm(real_target):
+            return
 
         run_command(['sudo', '-v'])
         
@@ -1379,7 +1374,6 @@ class DiskMgrShell(cmd.Cmd):
           --plain           Create a non-encrypted disk (skips LUKS)
           --gpt             Create GPT partition table + 1 partition (Whole disk only)
           --mbr             Create MBR partition table + 1 partition (Whole disk only)
-          -y, --yes         Skip math confirmation questions
         
         UNDER THE HOOD:
         1.  Unmount: Forcefully unmounts any existing partitions on the target.
@@ -1400,7 +1394,6 @@ class DiskMgrShell(cmd.Cmd):
         parser.add_argument('--plain', action='store_true', help='No LUKS encryption')
         parser.add_argument('--gpt', action='store_true')
         parser.add_argument('--mbr', action='store_true')
-        parser.add_argument('-y', '--yes', action='store_true')
 
         try:
             split_args = shlex.split(arg)
@@ -1431,9 +1424,8 @@ class DiskMgrShell(cmd.Cmd):
         log(f"Name: {name}")
         
         # Safety checks
-        if not args.yes:
-            if not self.extensive_confirm(f"{name} ({real_target})"):
-                return
+        if not self.extensive_confirm(f"{name} ({real_target})"):
+            return
 
         run_command(['sudo', '-v'])
 
