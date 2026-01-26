@@ -723,6 +723,10 @@ class DiskMgrShell(cmd.Cmd):
                      mountpoint = res.stdout.strip()
                      state = "MOUNTED"
 
+            # Only show mountpoint if actually MOUNTED
+            if state != "MOUNTED":
+                mountpoint = "-"
+
             display_dev = phys_device
             if dm_device and dm_device != phys_device:
                 display_dev = f"{phys_device}({dm_device})"

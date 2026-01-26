@@ -5,77 +5,13 @@ A utility designed to simplify the management of encrypted and plain removable m
 ## Overview
 
 ```text
-A utility designed to simplify the management of encrypted and plain removable media.
-It maps friendly labels to hardware-specific Persistent Device Paths (PDP), ensuring
-that disks are recognized reliably even if device nodes change.
-
-COMMANDS:
-  list
-      Shows all configured mappings and unmapped system disks in one table.
-  layout
-      Displays the physical partition layout and free space for all disks.
-  map <id/name> <name>
-      Assigns a friendly name to a disk or renames an existing mapping.
-  unmap <name>
-      Removes an existing mapping from the configuration.
-  open <name>
-      Unlocks LUKS (if encrypted) and mounts the disk.
-      Mounts to /media/$USER/<label> (prefers label over mapping name).
-  close <name>
-      Unmounts and closes the disk.
-  label <name> [new_label] [--remount]
-      Get or set the filesystem label of an OPEN disk.
-      Use --remount to immediately move the mount to the new label path.
-  passwd <name>
-      Changes the LUKS encryption passphrase for a disk.
-  create <name> [options]
-      Initializes a new disk (Erase -> LUKS -> Format -> Mount).
-  erase <name>
-      Securely erases a disk (multi-step hardware-aware wipe).
-  clone <src_name> <dst_name>
-      Clones one disk to another (requires target >= source size).
-  exit / quit / Ctrl+D
-      Exit the application.
-
-Type 'help <command>' for more specific details.
+Error capturing help: Command '['sudo', './diskmgr']' timed out after 10 seconds
 ```
 
 ## Command Reference: `list`
 
 ```text
-List all configured mappings and available system disks in a single table.
-
-        UNDER THE HOOD:
-        1.  Resolution: Refreshes mappings from luksmap.tsv.
-        2.  Hardware Discovery: Uses 'lsblk' to gather hardware properties and identifies
-            underlying physical partitions even when opened as virtual devices.
-        3.  Zero-Sudo LUKS Detection: Queries the system 'udev' database via 'udevadm info'
-            to accurately identify encrypted disks without requiring root privileges.
-        4.  Status Logic:
-            - MISSING: Persistent path not found in /dev.
-            - CLOSED: Present but locked (LUKS) or unmounted (Plain).
-            - OPEN: Unlocked/Decrypted but not yet mounted.
-            - MOUNTED: Active filesystem attached to the preferred path (/media/$USER/name).
-        5.  Dynamic Formatting: Pre-calculates the maximum width of every column across
-            all rows for a perfectly aligned, readable table.
-        6.  Exclusion Logic: Rigorously filters out virtual mapper devices and their
-            kernel aliases (dm-X) from the unmapped list once they are active.
-```
-
-### Example Output
-
-```text
---- Disk Management Table (/home/lewis/Dev/diskmgr/luksmap.tsv) ---
-#     NAME  LUKS  STATE      FSTYPE       LABEL  MOUNTPOINT         DEVICE     SIZE    PERSISTENT PATH
----------------------------------------------------------------------------------------------------------------------------------------------------------
-[1]   1b    -     MISSING    -            -      /media/root/1b     -          -       /dev/disk/by-id/wwn-0x5000c500e31e6cb2
-[2]   1a    Y     CLOSED     crypto_LUKS  -      /media/root/1a     sda2       931.4G  /dev/disk/by-id/wwn-0x5000c500a89d6e44-part2
-[3]   data  N     MOUNTED    ext4         data   /media/lewis/data  nvme1n1p1  931.5G  /dev/disk/by-id/nvme-WD_Blue_SN570_1TB_21353X644609-part1
-[U1]  -     N     UNMOUNTED  -            -      -                  sda        931.5G  /dev/disk/by-id/wwn-0x5000c500a89d6e44
-[U2]  -     N     UNMOUNTED  -            -      -                  sda1       128M    /dev/disk/by-id/usb-SABRENT_SABRENT_DD5641988396B-0:0-part1
-[U3]  -     N     UNMOUNTED  -            -      -                  nvme0n1    1.8T    /dev/disk/by-id/nvme-eui.e8238fa6bf530001001b448b42d60852
-[U4]  -     N     MOUNTED    ext4         -      /                  nvme0n1p1  1.8T    /dev/disk/by-id/nvme-WD_BLACK_SN8100_2000GB_25334X800147_1-part1
-[U5]  -     N     UNMOUNTED  -            -      -                  nvme1n1    931.5G  /dev/disk/by-id/nvme-eui.e8238fa6bf530001001b444a49598af9
+Error capturing help: Command '['sudo', './diskmgr']' timed out after 10 seconds
 ```
 
 ## Command Reference: `layout`
@@ -112,7 +48,7 @@ Disk: /dev/nvme0n1 (WD_BLACK SN8100 2000GB) [msdos] [Sector: L512/P512] [Total S
 
 NAME        FSTYPE FSVER LABEL UUID                                 FSAVAIL FSUSE% MOUNTPOINTS
 nvme0n1
-└─nvme0n1p1 ext4   1.0         88f1dad3-95c6-418e-bea8-f5f3e072ea29  771.7G    53% /
+└─nvme0n1p1 ext4   1.0         88f1dad3-95c6-418e-bea8-f5f3e072ea29  771.8G    53% /
 -----------------------------------------------------------------------------------------------------------------------------------------------------------
 
 Disk: /dev/nvme1n1 (WD Blue SN570 1TB) [msdos] [Sector: L512/P512] [Total Sectors: 1953525168]
