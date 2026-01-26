@@ -31,7 +31,7 @@ COMMANDS:
   create <name> [options]
       Initializes a new disk (Erase -> LUKS -> Format -> Mount).
   erase <name>
-      Securely erases a disk (NVMe format, blkdiscard, or dd overwrite).
+      Securely erases a disk (multi-step hardware-aware wipe).
   clone <src_name> <dst_name>
       Clones one disk to another (requires target >= source size).
   exit / quit / Ctrl+D

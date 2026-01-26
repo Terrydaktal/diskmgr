@@ -380,7 +380,7 @@ class DiskMgrShell(cmd.Cmd):
         print("      Initializes a new disk (Erase -> LUKS -> Format -> Mount).")
 
         print(f"  {Colors.OKGREEN}erase <name>{Colors.ENDC}")
-        print("      Securely erases a disk (NVMe format, blkdiscard, or dd overwrite).")
+        print("      Securely erases a disk (multi-step hardware-aware wipe).")
 
         print(f"  {Colors.OKGREEN}clone <src_name> <dst_name>{Colors.ENDC}")
         print("      Clones one disk to another (requires target >= source size).")
