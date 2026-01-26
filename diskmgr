@@ -134,15 +134,62 @@ def secure_erase_disk(dev_path):
         return False
         
     if disk_is_nvme(dev_path):
-        log(f"Secure erase: NVMe detected ({dev_path}) -> nvme format --ses=1")
-        # Ensure nvme-cli is present?
+        # Query capabilities
         try:
-            run_command(['nvme', 'format', dev_path, '--ses=1'], sudo=True)
-            run_command(['udevadm', 'settle'], sudo=True)
-            return True
-        except Exception as e:
-            log(f"NVMe format failed: {e}", 'ERROR')
+            res = run_command(['nvme', 'id-ctrl', '-o', 'json', dev_path], sudo=True, capture_output=True)
+            ctrl_data = json.loads(res.stdout)
+            oacs = ctrl_data.get('oacs', 0)
+            sanicap = ctrl_data.get('sanicap', 0)
+            
+            can_format_crypto = bool(oacs & 0x02)
+            can_sanitize_block = bool(sanicap & 0x02)
+            can_sanitize_crypto = bool(sanicap & 0x01)
+            
+            # 1. Sanitize Crypto Erase (Priority 1)
+            if can_sanitize_crypto:
+                log(f"NVMe Secure Erase: Sanitize Crypto Erase supported -> nvme sanitize {dev_path} -a 4")
+                try:
+                    run_command(['nvme', 'sanitize', dev_path, '-a', '4'], sudo=True)
+                    run_command(['udevadm', 'settle'], sudo=True)
+                    return True
+                except Exception as e:
+                    log(f"Sanitize Crypto Erase failed: {e}", 'WARN')
+
+            # 2. Sanitize Block Erase (Priority 2)
+            if can_sanitize_block:
+                log(f"NVMe Secure Erase: Sanitize Block Erase supported -> nvme sanitize {dev_path} -a 2")
+                try:
+                    run_command(['nvme', 'sanitize', dev_path, '-a', '2'], sudo=True)
+                    run_command(['udevadm', 'settle'], sudo=True)
+                    return True
+                except Exception as e:
+                    log(f"Sanitize Block Erase failed: {e}", 'WARN')
+
+            # 3. Format Crypto Erase (Priority 3)
+            if can_format_crypto:
+                log(f"NVMe Secure Erase: Format Crypto Erase supported -> nvme format {dev_path} --ses=1")
+                try:
+                    run_command(['nvme', 'format', dev_path, '--ses=1'], sudo=True)
+                    run_command(['udevadm', 'settle'], sudo=True)
+                    return True
+                except Exception as e:
+                    log(f"Format Crypto Erase failed: {e}", 'ERROR')
+                    return False
+            
+            log("No NVMe secure erase methods (Sanitize/Format) are supported by this controller.", 'ERROR')
             return False
+
+        except Exception as e:
+            log(f"Failed to query NVMe capabilities: {e}", 'ERROR')
+            # Fallback to a blind format attempt if capability check itself fails
+            log(f"Blindly attempting NVMe format --ses=1 on {dev_path}...")
+            try:
+                run_command(['nvme', 'format', dev_path, '--ses=1'], sudo=True)
+                run_command(['udevadm', 'settle'], sudo=True)
+                return True
+            except Exception as e:
+                log(f"Blind NVMe format failed: {e}", 'ERROR')
+                return False
 
     if disk_is_rotational(dev_path):
         log(f"Secure erase: HDD detected ({dev_path}) -> full zero overwrite (dd)")
