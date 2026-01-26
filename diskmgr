@@ -1305,6 +1305,16 @@ class DiskMgrShell(cmd.Cmd):
         if args.remount:
             new_mountpoint = f"/media/{os.environ.get('USER', 'root')}/{new_label}"
             
+            # Safety Check: Is this mountpoint already in use by another device?
+            res_check = run_command(['findmnt', '-rn', '-M', new_mountpoint], check=False)
+            if res_check.returncode == 0:
+                # Check if it's a DIFFERENT device
+                res_src = run_command(['findmnt', '-rn', '-M', new_mountpoint, '-o', 'SOURCE'], capture_output=True)
+                current_src = os.path.realpath(res_src.stdout.strip())
+                if current_src != os.path.realpath(target_dev):
+                    log(f"REMOUNT BLOCKED: Mountpoint {new_mountpoint} is already in use by {current_src}.", 'ERROR')
+                    return
+
             # Get latest mountpoint after label changes (especially for XFS which we might have remounted)
             res = run_command(['findmnt', '-rn', '-S', target_dev, '-o', 'TARGET'], check=False)
             current_mp = res.stdout.strip()
