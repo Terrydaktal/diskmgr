@@ -246,8 +246,8 @@ Securely erase a disk: erase <name> [options]
         2.  Destructive Wipe:
             - NVMe: Prioritizes (1) Sanitize Crypto Erase, (2) Sanitize Block Erase,
               (3) Format Crypto Erase, and (4) Format Block Erase.
-            - SSD: Prioritizes (1) PSID Revert, (2) ATA Sanitize, (3) ATA Secure Erase,
-              (4) blkdiscard --secure, and (5) blkdiscard.
+            - SSD: Prioritizes (1) PSID Revert, (2) ATA Sanitize, (3) ATA Secure Erase (Enhanced),
+              (4) ATA Secure Erase (Standard), (5) blkdiscard --secure, and (6) blkdiscard.
             - HDD: Prioritizes (1) ATA Sanitize, (2) ATA Secure Erase (Enhanced),
               (3) ATA Secure Erase (Standard), and (4) Zero Overwrite + Verify.
         3.  Verification: Executes 'udevadm settle' and 'sync' to ensure all operations are committed.

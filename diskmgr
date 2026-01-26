@@ -277,7 +277,7 @@ def secure_erase_disk(dev_path):
     except:
         pass
 
-    # 3. ATA Secure Erase
+    # 3. ATA Secure Erase (Enhanced & Standard)
     try:
         res = run_command(['hdparm', '-I', dev_path], sudo=True, capture_output=True)
         # Check security section
@@ -289,17 +289,29 @@ def secure_erase_disk(dev_path):
                 try:
                     pw = "diskmgr"
                     run_command(['hdparm', '--user-master', 'u', '--security-set-pass', pw, dev_path], sudo=True)
-                    erase_cmd = '--security-erase'
+                    
+                    # 3. ATA Secure Erase (Enhanced)
                     if "enhanced" in res.stdout.lower():
-                        erase_cmd = '--security-erase-enhanced'
-                    run_command(['hdparm', '--user-master', 'u', erase_cmd, pw, dev_path], sudo=True)
-                    return True
+                        log(f"SSD Secure Erase: Attempting ATA Secure Erase (Enhanced)...")
+                        try:
+                            run_command(['hdparm', '--user-master', 'u', '--security-erase-enhanced', pw, dev_path], sudo=True)
+                            return True
+                        except Exception as e:
+                            log(f"ATA Secure Erase (Enhanced) failed: {e}", 'WARN')
+
+                    # 4. ATA Secure Erase (Standard)
+                    log(f"SSD Secure Erase: Attempting ATA Secure Erase (Standard)...")
+                    try:
+                        run_command(['hdparm', '--user-master', 'u', '--security-erase', pw, dev_path], sudo=True)
+                        return True
+                    except Exception as e:
+                        log(f"ATA Secure Erase (Standard) failed: {e}", 'WARN')
                 except Exception as e:
-                    log(f"ATA Secure Erase failed: {e}", 'WARN')
+                    log(f"Failed to set security password: {e}", 'WARN')
     except:
         pass
 
-    # 4. blkdiscard --secure
+    # 5. blkdiscard --secure
     log(f"SSD Secure Erase: Attempting blkdiscard --secure")
     try:
         run_command(['blkdiscard', '--secure', dev_path], sudo=True)
@@ -1360,8 +1372,8 @@ class DiskMgrShell(cmd.Cmd):
         2.  Destructive Wipe:
             - NVMe: Prioritizes (1) Sanitize Crypto Erase, (2) Sanitize Block Erase, 
               (3) Format Crypto Erase, and (4) Format Block Erase.
-            - SSD: Prioritizes (1) PSID Revert, (2) ATA Sanitize, (3) ATA Secure Erase, 
-              (4) blkdiscard --secure, and (5) blkdiscard.
+            - SSD: Prioritizes (1) PSID Revert, (2) ATA Sanitize, (3) ATA Secure Erase (Enhanced), 
+              (4) ATA Secure Erase (Standard), (5) blkdiscard --secure, and (6) blkdiscard.
             - HDD: Prioritizes (1) ATA Sanitize, (2) ATA Secure Erase (Enhanced), 
               (3) ATA Secure Erase (Standard), and (4) Zero Overwrite + Verify.
         3.  Verification: Executes 'udevadm settle' and 'sync' to ensure all operations are committed.
