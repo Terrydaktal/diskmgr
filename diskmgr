@@ -245,7 +245,7 @@ class DiskMgrShell(cmd.Cmd):
         print(f"  {Colors.OKGREEN}layout{Colors.ENDC}")
         print("      Displays the physical partition layout and free space for all disks.")
         
-        print(f"  {Colors.OKGREEN}map <name/id> <name>{Colors.ENDC}")
+        print(f"  {Colors.OKGREEN}map <id/name> <name>{Colors.ENDC}")
         print("      Assigns a friendly name to a disk or renames an existing mapping.")
 
         print(f"  {Colors.OKGREEN}unmap <name>{Colors.ENDC}")
@@ -253,12 +253,14 @@ class DiskMgrShell(cmd.Cmd):
         
         print(f"  {Colors.OKGREEN}open <name>{Colors.ENDC}")
         print("      Unlocks LUKS (if encrypted) and mounts the disk.")
+        print("      Mounts to /media/$USER/<label> (prefers label over mapping name).")
         
         print(f"  {Colors.OKGREEN}close <name>{Colors.ENDC}")
         print("      Unmounts and closes the disk.")
 
-        print(f"  {Colors.OKGREEN}label <name> [new_label]{Colors.ENDC}")
+        print(f"  {Colors.OKGREEN}label <name> [new_label] [--remount]{Colors.ENDC}")
         print("      Get or set the filesystem label of an OPEN disk.")
+        print("      Use --remount to immediately move the mount to the new label path.")
 
         print(f"  {Colors.OKGREEN}passwd <name>{Colors.ENDC}")
         print("      Changes the LUKS encryption passphrase for a disk.")
@@ -448,6 +450,9 @@ class DiskMgrShell(cmd.Cmd):
             state = "MISSING"
             
             mapped_names.add(name)
+            
+            # Default mountpoint based on name
+            mount_name = name
 
             if os.path.exists(path):
                 real_path = os.path.realpath(path)
@@ -476,6 +481,17 @@ class DiskMgrShell(cmd.Cmd):
                         size = props.get('SIZE', '-')
                         label = props.get('LABEL', '-')
                         
+                        # Fallback to blkid for more reliable label (lsblk is often stale)
+                        try:
+                            res_b = run_command(['blkid', '-o', 'value', '-s', 'LABEL', real_path], sudo=True, check=False)
+                            if res_b.stdout.strip():
+                                label = res_b.stdout.strip()
+                        except:
+                            pass
+                        
+                        if label and label != '-':
+                            mount_name = label
+
                         # Check LUKS status using udev (No sudo required)
                         res_u = run_command(['udevadm', 'info', '--query=property', f'--name={real_path}'], check=False)
                         if 'ID_FS_TYPE=crypto_LUKS' in res_u.stdout:
@@ -485,7 +501,11 @@ class DiskMgrShell(cmd.Cmd):
                 except:
                     pass
 
+            mountpoint = f"/media/{os.environ.get('USER', 'root')}/{mount_name}"
+
             mapper_path = f"/dev/mapper/{name}"
+            target_to_mount = mapper_path
+
             if is_luks == "Y" and os.path.exists(mapper_path):
                 mapped_real_paths.add(os.path.realpath(mapper_path))
                 mapped_real_paths.add(mapper_path)
@@ -513,7 +533,10 @@ class DiskMgrShell(cmd.Cmd):
                         
                         # Use mapper properties for FS details
                         if props.get('FSTYPE'): fstype = props.get('FSTYPE')
-                        if props.get('LABEL'): label = props.get('LABEL')
+                        if props.get('LABEL'): 
+                            label = props.get('LABEL')
+                            if label and label != '-':
+                                mountpoint = f"/media/{os.environ.get('USER', 'root')}/{label}"
                         if props.get('SIZE'): size = props.get('SIZE')
                 except:
                     pass
@@ -567,6 +590,15 @@ class DiskMgrShell(cmd.Cmd):
 
             fstype = dev.get('fstype') or '-'
             label = dev.get('label') or '-'
+            
+            # Fallback to blkid for more reliable label
+            try:
+                res_b = run_command(['blkid', '-o', 'value', '-s', 'LABEL', dev_path], sudo=True, check=False)
+                if res_b.stdout.strip():
+                    label = res_b.stdout.strip()
+            except:
+                pass
+
             size = dev.get('size') or '-'
             mountpoint = dev.get('mountpoint') or '-'
             pdp = self.find_persistent_path(d_name, dev.get('wwn'))
@@ -585,8 +617,27 @@ class DiskMgrShell(cmd.Cmd):
                 if 'ID_FS_TYPE=crypto_LUKS' in res_uu.stdout:
                     is_luks_u = "Y"
 
-            state_u = "MOUNTED" if mountpoint != '-' else "UNMOUNTED"
-            if is_luks_u == "Y": state_u = "LOCKED"
+            # Check if this device has any active LUKS children (is it open?)
+            is_open = False
+            has_mount = mountpoint != '-'
+            
+            # Look for crypt children in the flattened list
+            # A bit inefficient but reliable: find if any device has this one as PKNAME
+            for child in flat_disks:
+                if child.get('pkname') == d_name or child.get('pkname') == d_kname:
+                    if child.get('type') == 'crypt':
+                        is_open = True
+                        if child.get('mountpoint'):
+                            has_mount = True
+                            mountpoint = child.get('mountpoint')
+
+            state_u = "UNMOUNTED"
+            if has_mount:
+                state_u = "MOUNTED"
+            elif is_open:
+                state_u = "OPEN"
+            elif is_luks_u == "Y":
+                state_u = "LOCKED"
 
             unmapped_rows.append({
                 'idx': f"[U{u_idx}]", 'name': "-", 'luks': is_luks_u, 'state': state_u,
@@ -781,10 +832,10 @@ class DiskMgrShell(cmd.Cmd):
             - Executes 'passgen' to retrieve the passphrase.
             - Pipes the passphrase into 'cryptsetup open' to create a cleartext device in /dev/mapper/.
         5.  Mounting:
-            - Ensures the directory /media/$USER/<name> exists.
-            - Attaches the (decrypted) device to the mountpoint.
+            - Identifies the preferred mountpoint: /media/$USER/<label> (falls back to mapping name).
+            - Ensures the directory exists and attaches the device.
         6.  Policy Enforcement: If the disk is already mounted at a non-standard path, 
-            it unmounts and remounts it to the preferred /media/$USER/<name> path.
+            it unmounts and remounts it to the preferred path.
         '''
         name = arg.strip()
         if not name:
@@ -814,9 +865,13 @@ class DiskMgrShell(cmd.Cmd):
         # Check LUKS
         is_luks = False
         try:
-            run_command(['sudo', 'cryptsetup', 'isLuks', devnode])
-            is_luks = True
-        except subprocess.CalledProcessError:
+            res = run_command(['cryptsetup', 'isLuks', devnode], sudo=True, check=False)
+            if res.returncode == 0:
+                is_luks = True
+        except:
+             pass
+
+        if not is_luks:
              # Not LUKS, check if it has a filesystem
              res = run_command(['lsblk', '-n', '-o', 'FSTYPE', devnode], check=False)
              if not res.stdout.strip():
@@ -850,8 +905,17 @@ class DiskMgrShell(cmd.Cmd):
             # Plain disk
             target_to_mount = devnode
 
+        # Detect label for mountpoint
+        mount_name = name
+        try:
+            res_b = run_command(['blkid', '-o', 'value', '-s', 'LABEL', target_to_mount], sudo=True, check=False)
+            if res_b.stdout.strip():
+                mount_name = res_b.stdout.strip()
+        except:
+            pass
+
         # Mount
-        mountpoint = f"/media/{os.environ.get('USER', 'root')}/{name}"
+        mountpoint = f"/media/{os.environ.get('USER', 'root')}/{mount_name}"
         if not os.path.exists(mountpoint):
             run_command(['mkdir', '-p', mountpoint], sudo=True)
             
@@ -935,24 +999,38 @@ class DiskMgrShell(cmd.Cmd):
             log("Mapping not open or already closed.")
 
     def do_label(self, arg):
-        '''Get or set the filesystem label of an OPEN disk: label <name> [new_label]
+        '''Get or set the filesystem label of an OPEN disk: label <name> [new_label] [--remount]
         
+        Options:
+          --remount        Unmount and remount the disk to the new label's path.
+
         UNDER THE HOOD:
         1.  Validation: Verifies that the disk is currently open/unlocked.
         2.  Identification: Queries the filesystem type (ext4, xfs, etc.) via 'lsblk'.
         3.  Labeling:
             - ext4: Uses 'e2label' on the active device.
             - xfs: Requires a temporary unmount, then uses 'xfs_admin -L', then remounts.
+        4.  Refresh: Executes 'udevadm trigger' to force tools like 'lsblk' to see the change.
+        5.  Remount (Optional): If --remount is set, moves the mount to /media/$USER/new_label.
         
         The label is written directly to the disk hardware and persists across different computers.
         '''
-        args = arg.split()
-        if not args:
-            log("Usage: label <name> [new_label]", 'ERROR')
+        parser = CmdArgumentParser(prog='label', add_help=False)
+        parser.add_argument('name')
+        parser.add_argument('new_label', nargs='?')
+        parser.add_argument('--remount', action='store_true')
+        
+        try:
+            split_args = shlex.split(arg)
+            args = parser.parse_args(split_args)
+        except argparse.ArgumentError as e:
+            log(str(e), 'ERROR')
             return
-            
-        name = args[0]
-        new_label = args[1] if len(args) > 1 else None
+        except SystemExit:
+            return
+
+        name = args.name
+        new_label = args.new_label
         
         # Resolve target device
         target_dev = None
@@ -971,12 +1049,15 @@ class DiskMgrShell(cmd.Cmd):
                 devnode = os.path.realpath(src)
                 # Check if it's LUKS
                 try:
-                    run_command(['sudo', 'cryptsetup', 'isLuks', devnode])
-                    log(f"Mapping '{name}' is LUKS but not open. Please 'open {name}' first.", 'ERROR')
-                    return
-                except subprocess.CalledProcessError:
-                    # Plain disk
-                    target_dev = devnode
+                    res = run_command(['cryptsetup', 'isLuks', devnode], sudo=True, check=False)
+                    if res.returncode == 0:
+                        log(f"Mapping '{name}' is LUKS but not open. Please 'open {name}' first.", 'ERROR')
+                        return
+                    # if returncode != 0, it's not LUKS, which is what we want for a plain disk
+                except:
+                    pass
+                
+                target_dev = devnode
             else:
                 log(f"Device not found or unknown mapping: {name}", 'ERROR')
                 return
@@ -1000,43 +1081,77 @@ class DiskMgrShell(cmd.Cmd):
             
         if current_label == new_label:
             log("Label is already set to that value.")
-            return
+            # Still process remount if requested
+        else:
+            log(f"Changing label: '{current_label}' -> '{new_label}' ({fstype})")
             
-        log(f"Changing label: '{current_label}' -> '{new_label}' ({fstype})")
-        
-        if fstype == 'ext4':
-            try:
-                run_command(['e2label', target_dev, new_label], sudo=True)
-                log("Label updated.")
-            except:
-                pass # run_command logs error
-        elif fstype == 'xfs':
-            # XFS requires unmount
-            remount_needed = False
-            if mountpoint:
-                log(f"XFS requires unmounting to label. Unmounting {mountpoint}...")
+            if fstype == 'ext4':
                 try:
-                    run_command(['umount', mountpoint], sudo=True)
-                    remount_needed = True
+                    run_command(['e2label', target_dev, new_label], sudo=True)
+                    run_command(['udevadm', 'trigger', '--name-match=' + target_dev], sudo=True)
+                    run_command(['udevadm', 'settle'], sudo=True)
+                    log("Label updated.")
+                except:
+                    pass # run_command logs error
+            elif fstype == 'xfs':
+                # XFS requires unmount
+                remount_needed = False
+                if mountpoint:
+                    log(f"XFS requires unmounting to label. Unmounting {mountpoint}...")
+                    try:
+                        run_command(['umount', mountpoint], sudo=True)
+                        remount_needed = True
+                    except Exception as e:
+                        log(f"Failed to unmount: {e}", 'ERROR')
+                        return
+
+                try:
+                    run_command(['xfs_admin', '-L', new_label, target_dev], sudo=True)
+                    run_command(['udevadm', 'trigger', '--name-match=' + target_dev], sudo=True)
+                    run_command(['udevadm', 'settle'], sudo=True)
+                    log("Label updated.")
+                except:
+                    pass
+                finally:
+                    if remount_needed:
+                        log(f"Remounting {mountpoint}...")
+                        try:
+                             run_command(['mount', target_dev, mountpoint], sudo=True)
+                             # Update mountpoint variable for the --remount logic below
+                             mountpoint = run_command(['findmnt', '-rn', '-S', target_dev, '-o', 'TARGET'], check=False).stdout.strip()
+                        except Exception as e:
+                            log(f"Failed to remount: {e}. You may need to mount manually.", 'ERROR')
+
+            else:
+                log(f"Unsupported filesystem for labeling: {fstype}", 'ERROR')
+                return
+
+        if args.remount:
+            new_mountpoint = f"/media/{os.environ.get('USER', 'root')}/{new_label}"
+            
+            # Get latest mountpoint after label changes (especially for XFS which we might have remounted)
+            res = run_command(['findmnt', '-rn', '-S', target_dev, '-o', 'TARGET'], check=False)
+            current_mp = res.stdout.strip()
+            
+            if current_mp == new_mountpoint:
+                log(f"Already mounted at {new_mountpoint}.")
+                return
+
+            if current_mp:
+                log(f"Unmounting {current_mp} for remount...")
+                try:
+                    run_command(['umount', current_mp], sudo=True)
                 except Exception as e:
-                    log(f"Failed to unmount: {e}", 'ERROR')
+                    log(f"Failed to unmount {current_mp}: {e}", 'ERROR')
                     return
 
+            log(f"Mounting {target_dev} to {new_mountpoint}...")
             try:
-                run_command(['xfs_admin', '-L', new_label, target_dev], sudo=True)
-                log("Label updated.")
-            except:
-                pass
-            finally:
-                if remount_needed:
-                    log(f"Remounting {mountpoint}...")
-                    try:
-                         run_command(['mount', target_dev, mountpoint], sudo=True)
-                    except Exception as e:
-                        log(f"Failed to remount: {e}. You may need to mount manually.", 'ERROR')
-
-        else:
-            log(f"Unsupported filesystem for labeling: {fstype}", 'ERROR')
+                run_command(['mkdir', '-p', new_mountpoint], sudo=True)
+                run_command(['mount', target_dev, new_mountpoint], sudo=True)
+                log(f"Remounted successfully at {new_mountpoint}")
+            except Exception as e:
+                log(f"Failed to mount at {new_mountpoint}: {e}", 'ERROR')
 
     def do_passwd(self, arg):
         '''Change the LUKS encryption passphrase: passwd <name>
@@ -1395,7 +1510,7 @@ class DiskMgrShell(cmd.Cmd):
             run_command(['mkfs.xfs', '-f', '-L', label, fs_target], sudo=True)
 
         # Mount
-        mountpoint = f"/media/{os.environ.get('USER', 'root')}/{name}"
+        mountpoint = f"/media/{os.environ.get('USER', 'root')}/{label}"
         run_command(['mkdir', '-p', mountpoint], sudo=True)
         run_command(['mount', fs_target, mountpoint], sudo=True)
 
