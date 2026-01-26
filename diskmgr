@@ -401,7 +401,7 @@ class DiskMgrShell(cmd.Cmd):
                 # 4. Print lsblk hierarchy at the bottom
                 print("")
                 try:
-                    ls_res = run_command(['lsblk', '-f', dev_path], check=False)
+                    ls_res = run_command(['lsblk', '-f', dev_path], sudo=True, check=False)
                     if ls_res.stdout.strip():
                         print(ls_res.stdout.strip())
                 except:
