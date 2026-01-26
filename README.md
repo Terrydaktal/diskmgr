@@ -74,7 +74,7 @@ List all configured mappings and available system disks in a single table.
 [2]   1a    Y     CLOSED     crypto_LUKS  -      -                  sda2       931.4G  /dev/disk/by-id/wwn-0x5000c500a89d6e44-part2
 [3]   data  N     MOUNTED    ext4         data   /media/lewis/data  nvme1n1p1  931.5G  /dev/disk/by-id/nvme-WD_Blue_SN570_1TB_21353X644609-part1
 [U1]  -     N     UNMOUNTED  -            -      -                  sda        931.5G  /dev/disk/by-id/wwn-0x5000c500a89d6e44
-[U2]  -     N     UNMOUNTED  -            -      -                  sda1       128M    /dev/disk/by-id/usb-SABRENT_SABRENT_DD5641988396B-0:0-part1
+[U2]  -     N     UNMOUNTED  -            -      -                  sda1       128M    /dev/disk/by-id/wwn-0x5000c500a89d6e44-part1
 [U3]  -     N     UNMOUNTED  -            -      -                  nvme0n1    1.8T    /dev/disk/by-id/nvme-eui.e8238fa6bf530001001b448b42d60852
 [U4]  -     N     MOUNTED    ext4         -      /                  nvme0n1p1  1.8T    /dev/disk/by-id/nvme-WD_BLACK_SN8100_2000GB_25334X800147_1-part1
 [U5]  -     N     UNMOUNTED  -            -      -                  nvme1n1    931.5G  /dev/disk/by-id/nvme-eui.e8238fa6bf530001001b444a49598af9
@@ -360,6 +360,20 @@ Clone one disk or partition to another: clone <src_name> <dst_name>
         - Source is MAPPER (e.g., clone dm-0 sdb):
           Performs a "Strip-and-Clone." The destination receives RAW DECRYPTED
           DATA. The resulting clone will be completely UNENCRYPTED.
+```
+
+## Command Reference: `sync`
+
+```text
+Synchronize two mounted disks: sync <secondary_name> <primary_name>
+
+        UNDER THE HOOD:
+        1.  Validation: Verifies both disks are mapped and currently mounted.
+        2.  Confirmation: Requires solving two math problems (DESTRUCTIVE for secondary).
+        3.  Execution: Runs 'rsync -avh --delete --progress <primary_mnt>/ <secondary_mnt>/'.
+
+        Note: The SECONDARY disk will be modified to match the PRIMARY disk.
+        All files on the secondary that do not exist on the primary will be DELETED.
 ```
 
 ## Configuration
