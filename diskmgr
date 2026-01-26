@@ -615,9 +615,9 @@ class DiskMgrShell(cmd.Cmd):
         all_devs = self.get_disk_info()
         flat_disks = self.flatten_disks(all_devs)
         
-        # AWK script parses GRUB config and returns Title <TAB> Entry <TAB> UUID
+        # AWK script parses Title <TAB> Entry <TAB> SEARCH <TAB> ROOT
         awk_script = r"""
-  /search[[:space:]].*--fs-uuid/ {g=$NF}
+  /search[[:space:]].*--fs-uuid/ {g_search=$NF}
 
   /^[[:space:]]*submenu / {
     submenu_title=$2
@@ -625,22 +625,23 @@ class DiskMgrShell(cmd.Cmd):
   }
 
   /^[[:space:]]*menuentry / {
-    e=$2; u=""; in_entry=1
+    e=$2; search_u=""; root_u=""; in_entry=1
     next
   }
 
-  in_entry && u=="" && /search[[:space:]].*--fs-uuid/ {u=$NF}
-  in_entry && u=="" && /(linux|linuxefi)[[:space:]].*root=UUID=/ {
+  in_entry && search_u=="" && /search[[:space:]].*--fs-uuid/ {search_u=$NF}
+  in_entry && root_u=="" && /(linux|linuxefi)[[:space:]].*root=UUID=/ {
     match($0,/root=UUID=[0-9a-fA-F-]+/)
-    if (RSTART) u=substr($0,RSTART+10,RLENGTH-10)
+    if (RSTART) root_u=substr($0,RSTART+10,RLENGTH-10)
   }
 
   in_entry && /^[[:space:]]*}/ {
-    if (e ~ /UEFI Firmware Settings/) u="(firmware)"
     if (submenu_title=="") submenu_title="Top-level"
+    s = (search_u!="" ? search_u : g_search)
+    r = (root_u!=""   ? root_u   : "-")
+    if (e ~ /UEFI Firmware Settings/) { s="(firmware)"; r="(firmware)" }
     
-    # Format: Submenu <TAB> Entry <TAB> UUID (or global uuid)
-    print submenu_title "\t" e "\t" (u!=""?u:g)
+    print submenu_title "\t" e "\t" s "\t" r
     in_entry=0
   }
 """
@@ -656,7 +657,6 @@ class DiskMgrShell(cmd.Cmd):
             fstype = dev.get('fstype')
             mountpoint = dev.get('mountpoint')
 
-            # Skip loops and disks with children (partitions only)
             if d_type == 'loop' or (d_type == 'disk' and 'children' in dev):
                 continue
             
@@ -674,9 +674,7 @@ class DiskMgrShell(cmd.Cmd):
                 else:
                     print(f"  {Colors.WARNING}Result: No recognizable filesystem found.{Colors.ENDC}")
             else:
-                # Mounted!
                 cfg_path = Path(mountpoint) / "boot/grub/grub.cfg"
-                # Normalize path for display
                 display_path = str(cfg_path).replace("//", "/")
                 try:
                     if cfg_path.exists():
@@ -685,22 +683,29 @@ class DiskMgrShell(cmd.Cmd):
                         res = run_command(cmd, capture_output=True)
                         
                         if res.stdout.strip():
-                            # Group entries by submenu
                             entries = {}
                             for line in res.stdout.strip().splitlines():
                                 if '\t' in line:
-                                    sub, title, uuid = [x.strip() for x in line.split('\t')]
-                                    if sub not in entries: entries[sub] = []
-                                    entries[sub].append((title, uuid))
+                                    parts = [x.strip() for x in line.split('\t')]
+                                    if len(parts) == 4:
+                                        sub, title, s_uuid, r_uuid = parts
+                                        if sub not in entries: entries[sub] = []
+                                        entries[sub].append((title, s_uuid, r_uuid))
                             
-                            # Print groups
                             for sub, items in entries.items():
                                 print(f"\n{sub}")
-                                for i, (title, uuid) in enumerate(items):
+                                for i, (title, s_uuid, r_uuid) in enumerate(items):
                                     connector = "  └─" if i == len(items) - 1 else "  ├─"
-                                    dev_name = self.resolve_uuid_to_dev(uuid)
-                                    dev_info = f"[{dev_name}]" if dev_name else ""
-                                    print(f"{connector} {title:<72} {uuid} {Colors.OKCYAN}{dev_info}{Colors.ENDC}")
+                                    
+                                    s_dev = self.resolve_uuid_to_dev(s_uuid)
+                                    r_dev = self.resolve_uuid_to_dev(r_uuid)
+                                    
+                                    s_info = f"SEARCH={s_uuid:<36} {Colors.OKCYAN}[{s_dev if s_dev else '-' :<10}]{Colors.ENDC}"
+                                    r_info = f"ROOT={r_uuid:<36} {Colors.OKCYAN}[{r_dev if r_dev else '-' :<10}]{Colors.ENDC}"
+                                    
+                                    print(f"{connector} {title:<72}")
+                                    print(f"     {s_info}")
+                                    print(f"     {r_info}")
                         else:
                             print("  (No menu entries found in config)")
                     else:

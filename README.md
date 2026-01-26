@@ -116,7 +116,7 @@ Disk: /dev/nvme0n1 (WD_BLACK SN8100 2000GB) [msdos] [Sector: L512/P512] [Total S
 
 NAME        FSTYPE FSVER LABEL UUID                                 FSAVAIL FSUSE% MOUNTPOINTS
 nvme0n1
-└─nvme0n1p1 ext4   1.0         88f1dad3-95c6-418e-bea8-f5f3e072ea29  771.5G    53% /
+└─nvme0n1p1 ext4   1.0         88f1dad3-95c6-418e-bea8-f5f3e072ea29  771.4G    53% /
 -----------------------------------------------------------------------------------------------------------------------------------------------------------
 
 Disk: /dev/nvme1n1 (WD Blue SN570 1TB) [msdos] [Sector: L512/P512] [Total Sectors: 1953525168]
@@ -155,22 +155,50 @@ Device: /dev/nvme0n1p1 (ext4)
   Result: Found GRUB config at /boot/grub/grub.cfg
 
 Top-level
-  └─ Linux Mint 22.1 Xfce                                                     88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]
+  └─ Linux Mint 22.1 Xfce
+     SEARCH=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1 ]
+     ROOT=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1 ]
 
 Advanced options for Linux Mint 22.1 Xfce
-  ├─ Linux Mint 22.1 Xfce, with Linux 6.17.9-061709-generic                   88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]
-  ├─ Linux Mint 22.1 Xfce, with Linux 6.17.9-061709-generic (recovery mode)   88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]
-  ├─ Linux Mint 22.1 Xfce, with Linux 6.16.12-061612-generic                  88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]
-  ├─ Linux Mint 22.1 Xfce, with Linux 6.16.12-061612-generic (recovery mode)  88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]
-  ├─ Linux Mint 22.1 Xfce, with Linux 6.16.0-061600-generic                   88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]
-  ├─ Linux Mint 22.1 Xfce, with Linux 6.16.0-061600-generic (recovery mode)   88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]
-  ├─ Linux Mint 22.1 Xfce, with Linux 6.8.0-88-generic                        88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]
-  ├─ Linux Mint 22.1 Xfce, with Linux 6.8.0-88-generic (recovery mode)        88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]
-  ├─ Linux Mint 22.1 Xfce, with Linux 6.8.0-85-generic                        88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]
-  ├─ Linux Mint 22.1 Xfce, with Linux 6.8.0-85-generic (recovery mode)        88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]
-  ├─ Linux Mint 22.1 Xfce, with Linux 6.8.0-51-generic                        88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]
-  ├─ Linux Mint 22.1 Xfce, with Linux 6.8.0-51-generic (recovery mode)        88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]
-  └─ UEFI Firmware Settings                                                   (firmware)
+  ├─ Linux Mint 22.1 Xfce, with Linux 6.17.9-061709-generic
+     SEARCH=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1 ]
+     ROOT=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1 ]
+  ├─ Linux Mint 22.1 Xfce, with Linux 6.17.9-061709-generic (recovery mode)
+     SEARCH=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1 ]
+     ROOT=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1 ]
+  ├─ Linux Mint 22.1 Xfce, with Linux 6.16.12-061612-generic
+     SEARCH=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1 ]
+     ROOT=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1 ]
+  ├─ Linux Mint 22.1 Xfce, with Linux 6.16.12-061612-generic (recovery mode)
+     SEARCH=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1 ]
+     ROOT=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1 ]
+  ├─ Linux Mint 22.1 Xfce, with Linux 6.16.0-061600-generic
+     SEARCH=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1 ]
+     ROOT=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1 ]
+  ├─ Linux Mint 22.1 Xfce, with Linux 6.16.0-061600-generic (recovery mode)
+     SEARCH=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1 ]
+     ROOT=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1 ]
+  ├─ Linux Mint 22.1 Xfce, with Linux 6.8.0-88-generic
+     SEARCH=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1 ]
+     ROOT=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1 ]
+  ├─ Linux Mint 22.1 Xfce, with Linux 6.8.0-88-generic (recovery mode)
+     SEARCH=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1 ]
+     ROOT=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1 ]
+  ├─ Linux Mint 22.1 Xfce, with Linux 6.8.0-85-generic
+     SEARCH=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1 ]
+     ROOT=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1 ]
+  ├─ Linux Mint 22.1 Xfce, with Linux 6.8.0-85-generic (recovery mode)
+     SEARCH=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1 ]
+     ROOT=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1 ]
+  ├─ Linux Mint 22.1 Xfce, with Linux 6.8.0-51-generic
+     SEARCH=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1 ]
+     ROOT=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1 ]
+  ├─ Linux Mint 22.1 Xfce, with Linux 6.8.0-51-generic (recovery mode)
+     SEARCH=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1 ]
+     ROOT=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1 ]
+  └─ UEFI Firmware Settings
+     SEARCH=(firmware)                           [-         ]
+     ROOT=(firmware)                           [-         ]
 ------------------------------------------------------------
 
 Device: /dev/nvme1n1p1 (ext4)
