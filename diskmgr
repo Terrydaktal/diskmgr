@@ -591,20 +591,15 @@ class DiskMgrShell(cmd.Cmd):
         print("")
 
     def do_boot(self, arg):
-        '''Display boot entries from the GRUB configuration of all mounted disks.
+        '''Display boot entries from the GRUB configuration of all disks.
         
         UNDER THE HOOD:
-        Scans all mounted filesystems for /boot/grub/grub.cfg and parses them 
-        to extract menu entries and filesystem UUIDs.
+        Scans all block devices. If mounted, it parses /boot/grub/grub.cfg.
+        If unmounted or encrypted, it explains why it cannot yet read the config.
         '''
-        # 1. Get all mounted points
-        try:
-            res = run_command(['findmnt', '-rn', '-o', 'TARGET,SOURCE'], capture_output=True)
-            mounts = [line.split() for line in res.stdout.strip().splitlines()]
-        except Exception as e:
-            log(f"Failed to list mounts: {e}", 'ERROR')
-            return
-
+        all_devs = self.get_disk_info()
+        flat_disks = self.flatten_disks(all_devs)
+        
         awk_script = r"""
   /search[[:space:]].*--fs-uuid/ {g=$NF}
 
@@ -644,34 +639,55 @@ class DiskMgrShell(cmd.Cmd):
     }
   }
 """
-        found_any = False
-        for mnt, src in mounts:
-            # Skip virtual/pseudo filesystems
-            if not src.startswith('/') or src.startswith('/dev/loop'):
-                continue
+        processed_devs = set()
 
-            cfg_path = Path(mnt) / "boot/grub/grub.cfg"
-            try:
-                if cfg_path.exists():
-                    found_any = True
-                    print(f"\n{Colors.HEADER}{Colors.BOLD}Boot Config: {mnt} ({src}){Colors.ENDC}")
-                    cmd = ['sudo', 'awk', '-F', "'", awk_script, str(cfg_path)]
-                    try:
+        print(f"\n{Colors.HEADER}{Colors.BOLD}--- System Boot Configuration Scan ---{Colors.ENDC}")
+
+        for dev in flat_disks:
+            d_name = dev.get('name')
+            d_kname = dev.get('kname', d_name)
+            d_path = f"/dev/{d_kname}"
+            d_type = dev.get('type')
+            fstype = dev.get('fstype')
+            mountpoint = dev.get('mountpoint')
+
+            # Skip loops and full disks that have partitions (we scan partitions instead)
+            if d_type == 'loop' or (d_type == 'disk' and 'children' in dev):
+                continue
+            
+            if d_path in processed_devs:
+                continue
+            processed_devs.add(d_path)
+
+            print(f"\n{Colors.OKBLUE}Device: {d_path} ({fstype or 'unknown FS'}){Colors.ENDC}")
+
+            if fstype == 'crypto_LUKS':
+                print(f"  {Colors.WARNING}Result: LUKS container is LOCKED. Please 'open' this disk to scan for boot entries.{Colors.ENDC}")
+            elif not mountpoint:
+                if fstype and fstype != '-':
+                    print(f"  {Colors.WARNING}Result: Disk is UNMOUNTED. Please 'open' or mount the disk to scan for boot entries.{Colors.ENDC}")
+                else:
+                    print(f"  {Colors.WARNING}Result: No recognizable filesystem found.{Colors.ENDC}")
+            else:
+                # Mounted!
+                cfg_path = Path(mountpoint) / "boot/grub/grub.cfg"
+                try:
+                    if cfg_path.exists():
+                        print(f"  {Colors.OKGREEN}Result: Found GRUB config at {mountpoint}/boot/grub/grub.cfg{Colors.ENDC}")
+                        cmd = ['sudo', 'awk', '-F', "'", awk_script, str(cfg_path)]
                         res = run_command(cmd, capture_output=True)
                         if res.stdout.strip():
                             print(res.stdout.strip())
                         else:
-                            print("  (No menu entries found)")
-                    except Exception as e:
-                        log(f"Failed to read config at {cfg_path}: {e}", 'WARN')
-                    print("-" * 80)
-            except PermissionError:
-                continue
-            except Exception as e:
-                log(f"Error checking {cfg_path}: {e}", 'WARN')
-
-        if not found_any:
-            log("No GRUB configurations (/boot/grub/grub.cfg) found on any mounted disks.", 'WARN')
+                            print("  (No menu entries found in config)")
+                    else:
+                        print(f"  {Colors.OKCYAN}Result: Mounted at {mountpoint}, but no GRUB configuration found.{Colors.ENDC}")
+                except PermissionError:
+                    print(f"  {Colors.FAIL}Result: Permission denied scanning {mountpoint} (System protected path).{Colors.ENDC}")
+                except Exception as e:
+                    print(f"  {Colors.FAIL}Result: Error checking path: {e}{Colors.ENDC}")
+            
+            print("-" * 60)
 
     def do_list(self, arg):
         '''List all configured mappings and available system disks in a single table.

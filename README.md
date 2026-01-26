@@ -131,11 +131,11 @@ nvme1n1
 ## Command Reference: `boot`
 
 ```text
-Display boot entries from the GRUB configuration of all mounted disks.
+Display boot entries from the GRUB configuration of all disks.
 
         UNDER THE HOOD:
-        Scans all mounted filesystems for /boot/grub/grub.cfg and parses them
-        to extract menu entries and filesystem UUIDs.
+        Scans all block devices. If mounted, it parses /boot/grub/grub.cfg.
+        If unmounted or encrypted, it explains why it cannot yet read the config.
 ```
 
 ## Command Reference: `map`
