@@ -592,10 +592,12 @@ class DiskMgrShell(cmd.Cmd):
 
     def resolve_uuid_to_dev(self, uuid):
         '''Resolves a UUID to a short device name like sda1 or nvme0n1p1.'''
+        uuid = uuid.strip()
         if not uuid or uuid == "(firmware)":
             return ""
         try:
-            res = run_command(['blkid', '-U', uuid], sudo=True, capture_output=True)
+            # Use check=False to avoid noisy logs if UUID doesn't resolve
+            res = run_command(['blkid', '-U', uuid], sudo=True, capture_output=True, check=False)
             path = res.stdout.strip()
             if path:
                 return os.path.basename(path)
@@ -674,9 +676,11 @@ class DiskMgrShell(cmd.Cmd):
             else:
                 # Mounted!
                 cfg_path = Path(mountpoint) / "boot/grub/grub.cfg"
+                # Normalize path for display
+                display_path = str(cfg_path).replace("//", "/")
                 try:
                     if cfg_path.exists():
-                        print(f"  {Colors.OKGREEN}Result: Found GRUB config at {mountpoint}/boot/grub/grub.cfg{Colors.ENDC}")
+                        print(f"  {Colors.OKGREEN}Result: Found GRUB config at {display_path}{Colors.ENDC}")
                         cmd = ['sudo', 'awk', '-F', "'", awk_script, str(cfg_path)]
                         res = run_command(cmd, capture_output=True)
                         
@@ -685,7 +689,7 @@ class DiskMgrShell(cmd.Cmd):
                             entries = {}
                             for line in res.stdout.strip().splitlines():
                                 if '\t' in line:
-                                    sub, title, uuid = line.split('\t')
+                                    sub, title, uuid = [x.strip() for x in line.split('\t')]
                                     if sub not in entries: entries[sub] = []
                                     entries[sub].append((title, uuid))
                             
