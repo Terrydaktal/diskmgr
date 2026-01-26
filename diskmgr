@@ -1210,6 +1210,8 @@ class DiskMgrShell(cmd.Cmd):
             - HDD: Uses 'dd' for a full zero-pass overwrite of the physical platters.
         3.  Verification: Executes 'udevadm settle' and 'sync' to ensure all operations are committed.
         
+        Note: This is a DESTRUCTIVE operation. Solving two math problems is MANDATORY to proceed.
+
         WARNING: This operation is IRREVERSIBLE.
         '''
         parser = CmdArgumentParser(prog='erase', add_help=False)
@@ -1267,6 +1269,8 @@ class DiskMgrShell(cmd.Cmd):
         4.  Confirmation: Requires solving two math problems to authorize data destruction.
         5.  Cloning: Executes 'dd' with 16MiB buffers and direct I/O for maximum throughput.
         6.  Sync: Flushes kernel buffers to ensure all data is physically committed to disk.
+
+        Note: This is a DESTRUCTIVE operation. Solving two math problems is MANDATORY to proceed.
 
         SCENARIOS:
         - Drive to Drive: 
@@ -1397,6 +1401,8 @@ class DiskMgrShell(cmd.Cmd):
             - Formats the cleartext device with ext4 or xfs.
             - (ext4 only): Reclaims the 5% reserved space for root using 'tune2fs -m 0'.
         6.  Persistence: Adds the new disk's PDP to luksmap.tsv automatically.
+
+        Note: This is a DESTRUCTIVE operation. Solving two math problems is MANDATORY to proceed.
         '''
         parser = CmdArgumentParser(prog='create', add_help=False)
         parser.add_argument('args', nargs=1, help='<name>')
