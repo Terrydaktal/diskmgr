@@ -248,7 +248,8 @@ Securely erase a disk: erase <name> [options]
               (3) Format Crypto Erase, and (4) Format Block Erase.
             - SSD: Prioritizes (1) PSID Revert, (2) ATA Sanitize, (3) ATA Secure Erase,
               (4) blkdiscard --secure, and (5) blkdiscard.
-            - HDD: Uses 'dd' for a full zero-pass overwrite of the physical platters.
+            - HDD: Prioritizes (1) ATA Sanitize, (2) ATA Secure Erase (Enhanced),
+              (3) ATA Secure Erase (Standard), and (4) Zero Overwrite + Verify.
         3.  Verification: Executes 'udevadm settle' and 'sync' to ensure all operations are committed.
 
         Note: This is a DESTRUCTIVE operation. Solving two math problems is MANDATORY to proceed.

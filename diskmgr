@@ -205,11 +205,53 @@ def secure_erase_disk(dev_path):
                 return False
 
     if disk_is_rotational(dev_path):
-        log(f"Secure erase: HDD detected ({dev_path}) -> full zero overwrite (dd)")
+        log(f"Secure erase: HDD detected ({dev_path})")
+        
+        # 1. ATA Sanitize
+        try:
+            res = run_command(['hdparm', '-I', dev_path], sudo=True, capture_output=True)
+            if "sanitize" in res.stdout.lower():
+                 log(f"HDD Secure Erase: ATA Sanitize supported -> hdparm --sanitize-block-erase {dev_path}")
+                 try:
+                     run_command(['hdparm', '--sanitize-block-erase', dev_path], sudo=True)
+                     return True
+                 except Exception as e:
+                     log(f"ATA Sanitize failed: {e}", 'WARN')
+        except:
+            pass
+
+        # 2. ATA Secure Erase (Enhanced & Standard)
+        try:
+            res = run_command(['hdparm', '-I', dev_path], sudo=True, capture_output=True)
+            if "supported" in res.stdout.lower() and "security:" in res.stdout.lower():
+                if "frozen" in res.stdout.lower():
+                    log("HDD Secure Erase: ATA Secure Erase is supported but FROZEN by BIOS/EFI.", 'WARN')
+                else:
+                    log(f"HDD Secure Erase: ATA Secure Erase supported. Attempting with temporary password...")
+                    try:
+                        pw = "diskmgr"
+                        run_command(['hdparm', '--user-master', 'u', '--security-set-pass', pw, dev_path], sudo=True)
+                        erase_cmd = '--security-erase'
+                        if "enhanced" in res.stdout.lower():
+                            erase_cmd = '--security-erase-enhanced'
+                        run_command(['hdparm', '--user-master', 'u', erase_cmd, pw, dev_path], sudo=True)
+                        return True
+                    except Exception as e:
+                        log(f"ATA Secure Erase failed: {e}", 'WARN')
+        except:
+            pass
+
+        # 3. Full zero overwrite (dd)
+        log(f"HDD Secure Erase: Falling back to full zero overwrite (dd)")
         try:
             # bs=16M status=progress
             run_command(['dd', 'if=/dev/zero', f'of={dev_path}', 'bs=16M', 'status=progress', 'oflag=direct'], sudo=True)
             run_command(['sync'], sudo=True)
+            # Simple verify check - read first 1MB to ensure it is zeros
+            res_v = run_command(['dd', f'if={dev_path}', 'bs=1M', 'count=1'], sudo=True, capture_output=True)
+            if any(b != 0 for b in res_v.stdout.encode('latin1') if isinstance(b, int)): # bytes check
+                 log("Zero overwrite verification failed: Data detected in first 1MB.", 'ERROR')
+                 return False
             return True
         except Exception as e:
             log(f"DD overwrite failed: {e}", 'ERROR')
@@ -1320,7 +1362,8 @@ class DiskMgrShell(cmd.Cmd):
               (3) Format Crypto Erase, and (4) Format Block Erase.
             - SSD: Prioritizes (1) PSID Revert, (2) ATA Sanitize, (3) ATA Secure Erase, 
               (4) blkdiscard --secure, and (5) blkdiscard.
-            - HDD: Uses 'dd' for a full zero-pass overwrite of the physical platters.
+            - HDD: Prioritizes (1) ATA Sanitize, (2) ATA Secure Erase (Enhanced), 
+              (3) ATA Secure Erase (Standard), and (4) Zero Overwrite + Verify.
         3.  Verification: Executes 'udevadm settle' and 'sync' to ensure all operations are committed.
         
         Note: This is a DESTRUCTIVE operation. Solving two math problems is MANDATORY to proceed.
