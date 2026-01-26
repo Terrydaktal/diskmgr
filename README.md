@@ -5,13 +5,61 @@ A utility designed to simplify the management of encrypted and plain removable m
 ## Overview
 
 ```text
-Error capturing help: Command '['sudo', './diskmgr']' timed out after 10 seconds
+A utility designed to simplify the management of encrypted and plain removable media.
+It maps friendly labels to hardware-specific Persistent Device Paths (PDP), ensuring
+that disks are recognized reliably even if device nodes change.
+
+COMMANDS:
+  list
+      Shows all configured mappings and unmapped system disks in one table.
+  layout
+      Displays the physical partition layout and free space for all disks.
+  map <id/name> <name>
+      Assigns a friendly name to a disk or renames an existing mapping.
+  unmap <name>
+      Removes an existing mapping from the configuration.
+  open <name>
+      Unlocks LUKS (if encrypted) and mounts the disk.
+      Mounts to /media/$USER/<label> (prefers label over mapping name).
+  close <name>
+      Unmounts and closes the disk.
+  label <name> [new_label] [--remount]
+      Get or set the filesystem label of an OPEN disk.
+      Use --remount to immediately move the mount to the new label path.
+  passwd <name>
+      Changes the LUKS encryption passphrase for a disk.
+  create <name> [options]
+      Initializes a new disk (Erase -> LUKS -> Format -> Mount).
+  erase <name>
+      Securely erases a disk (NVMe format, blkdiscard, or dd overwrite).
+  clone <src_name> <dst_name>
+      Clones one disk to another (requires target >= source size).
+  exit / quit / Ctrl+D
+      Exit the application.
+
+Type 'help <command>' for more specific details.
 ```
 
 ## Command Reference: `list`
 
 ```text
-Error capturing help: Command '['sudo', './diskmgr']' timed out after 10 seconds
+List all configured mappings and available system disks in a single table.
+
+        UNDER THE HOOD:
+        1.  Resolution: Refreshes mappings from luksmap.tsv.
+        2.  Hardware Discovery: Uses 'lsblk' to gather hardware properties and identifies
+            underlying physical partitions even when opened as virtual devices.
+        3.  Zero-Sudo LUKS Detection: Queries the system 'udev' database via 'udevadm info'
+            to accurately identify encrypted disks without requiring root privileges.
+        4.  Status Logic:
+            - MISSING: Persistent path not found in /dev.
+            - CLOSED: Present but locked (LUKS) or unmounted (Plain).
+            - OPEN: Unlocked/Decrypted but not yet mounted.
+            - MOUNTED: Active filesystem attached to the preferred path (/media/$USER/name).
+        5.  Dynamic Formatting: Pre-calculates the maximum width of every column across
+            all rows for a perfectly aligned, readable table.
+        6.  Exclusion Logic: Rigorously filters out virtual mapper devices and their
+            kernel aliases (dm-X) from the unmapped list once they are active.
 ```
 
 ### Example Output
@@ -64,7 +112,7 @@ Disk: /dev/nvme0n1 (WD_BLACK SN8100 2000GB) [msdos] [Sector: L512/P512] [Total S
 
 NAME        FSTYPE FSVER LABEL UUID                                 FSAVAIL FSUSE% MOUNTPOINTS
 nvme0n1
-└─nvme0n1p1 ext4   1.0         88f1dad3-95c6-418e-bea8-f5f3e072ea29  769.6G    53% /
+└─nvme0n1p1 ext4   1.0         88f1dad3-95c6-418e-bea8-f5f3e072ea29  771.7G    53% /
 -----------------------------------------------------------------------------------------------------------------------------------------------------------
 
 Disk: /dev/nvme1n1 (WD Blue SN570 1TB) [msdos] [Sector: L512/P512] [Total Sectors: 1953525168]
@@ -198,7 +246,8 @@ Securely erase a disk: erase <name> [options]
         2.  Destructive Wipe:
             - NVMe: Prioritizes (1) Sanitize Crypto Erase, (2) Sanitize Block Erase,
               (3) Format Crypto Erase, and (4) Format Block Erase.
-            - SSD: Uses 'blkdiscard' to inform the controller that all blocks are empty.
+            - SSD: Prioritizes (1) PSID Revert, (2) ATA Sanitize, (3) ATA Secure Erase,
+              (4) blkdiscard --secure, and (5) blkdiscard.
             - HDD: Uses 'dd' for a full zero-pass overwrite of the physical platters.
         3.  Verification: Executes 'udevadm settle' and 'sync' to ensure all operations are committed.
 

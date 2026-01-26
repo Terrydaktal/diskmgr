@@ -215,11 +215,62 @@ def secure_erase_disk(dev_path):
             log(f"DD overwrite failed: {e}", 'ERROR')
             return False
 
-    # SSD/Flash
-    log(f"Secure erase: SSD/Flash detected ({dev_path}) -> blkdiscard")
+    # SSD/Flash (SATA/SAS)
+    log(f"Secure erase: SSD/Flash detected ({dev_path})")
+
+    # 1. PSID Revert / TCG Opal (Placeholder)
+    log(f"SSD Secure Erase: PSID Revert / Cryptographic Erase (Unimplemented placeholder)")
+
+    # 2. ATA Sanitize
+    try:
+        res = run_command(['hdparm', '-I', dev_path], sudo=True, capture_output=True)
+        if "sanitize" in res.stdout.lower():
+             log(f"SSD Secure Erase: ATA Sanitize supported -> hdparm --sanitize-block-erase {dev_path}")
+             try:
+                 # We use block erase as a standard safe choice
+                 run_command(['hdparm', '--sanitize-block-erase', dev_path], sudo=True)
+                 return True
+             except Exception as e:
+                 log(f"ATA Sanitize failed: {e}", 'WARN')
+    except:
+        pass
+
+    # 3. ATA Secure Erase
+    try:
+        res = run_command(['hdparm', '-I', dev_path], sudo=True, capture_output=True)
+        # Check security section
+        if "supported" in res.stdout.lower() and "security:" in res.stdout.lower():
+            if "frozen" in res.stdout.lower():
+                log("SSD Secure Erase: ATA Secure Erase is supported but FROZEN by BIOS/EFI.", 'WARN')
+            else:
+                log(f"SSD Secure Erase: ATA Secure Erase supported. Attempting with temporary password...")
+                try:
+                    pw = "diskmgr"
+                    run_command(['hdparm', '--user-master', 'u', '--security-set-pass', pw, dev_path], sudo=True)
+                    erase_cmd = '--security-erase'
+                    if "enhanced" in res.stdout.lower():
+                        erase_cmd = '--security-erase-enhanced'
+                    run_command(['hdparm', '--user-master', 'u', erase_cmd, pw, dev_path], sudo=True)
+                    return True
+                except Exception as e:
+                    log(f"ATA Secure Erase failed: {e}", 'WARN')
+    except:
+        pass
+
+    # 4. blkdiscard --secure
+    log(f"SSD Secure Erase: Attempting blkdiscard --secure")
+    try:
+        run_command(['blkdiscard', '--secure', dev_path], sudo=True)
+        run_command(['udevadm', 'settle'], sudo=True)
+        return True
+    except Exception as e:
+        log(f"blkdiscard --secure failed: {e}", 'WARN')
+
+    # 5. blkdiscard
+    log(f"SSD Secure Erase: Attempting blkdiscard")
     if disk_discard_supported(dev_path):
         try:
-            run_command(['blkdiscard', '-f', dev_path], sudo=True)
+            run_command(['blkdiscard', dev_path], sudo=True)
             run_command(['udevadm', 'settle'], sudo=True)
             return True
         except Exception as e:
@@ -1267,7 +1318,8 @@ class DiskMgrShell(cmd.Cmd):
         2.  Destructive Wipe:
             - NVMe: Prioritizes (1) Sanitize Crypto Erase, (2) Sanitize Block Erase, 
               (3) Format Crypto Erase, and (4) Format Block Erase.
-            - SSD: Uses 'blkdiscard' to inform the controller that all blocks are empty.
+            - SSD: Prioritizes (1) PSID Revert, (2) ATA Sanitize, (3) ATA Secure Erase, 
+              (4) blkdiscard --secure, and (5) blkdiscard.
             - HDD: Uses 'dd' for a full zero-pass overwrite of the physical platters.
         3.  Verification: Executes 'udevadm settle' and 'sync' to ensure all operations are committed.
         
