@@ -5,55 +5,227 @@ A utility designed to simplify the management of encrypted and plain removable m
 ## Overview
 
 ```text
-Error capturing help: Command '['sudo', './diskmgr']' timed out after 10 seconds
+A utility designed to simplify the management of encrypted and plain removable media.
+It maps friendly labels to hardware-specific Persistent Device Paths (PDP), ensuring
+that disks are recognized reliably even if device nodes change.
+
+COMMANDS:
+  list
+      Shows all configured mappings and unmapped system disks in one table.
+  layout
+      Displays the physical partition layout and free space for all disks.
+  boot
+      Displays all boot entries and submenus from GRUB.
+  map <id/name> <name>
+      Assigns a friendly name to a disk or renames an existing mapping.
+  unmap <name>
+      Removes an existing mapping from the configuration.
+  open <name>
+      Unlocks LUKS (if encrypted) and mounts the disk.
+      Mounts to /media/$USER/<label> (prefers label over mapping name).
+  close <name>
+      Unmounts and closes the disk.
+  label <name> [new_label] [--remount]
+      Get or set the filesystem label of an OPEN disk.
+      Use --remount to immediately move the mount to the new label path.
+  luks <passwd|backup|restore>
+      LUKS management: change password, backup/restore headers.
+  create <name> [options]
+      Initializes a new disk (Erase -> LUKS -> Format -> Mount).
+  erase <name>
+      Securely erases a disk (multi-step hardware-aware wipe).
+  clone <src_name> <dst_name>
+      Clones one disk to another (requires target >= source size).
+  sync <sec_name> <pri_name>
+      Syncs two mounted disks (rsync pri -> sec).
+  exit / quit / Ctrl+D
+      Exit the application.
+
+Type 'help <command>' for more specific details.
 ```
 
 ## Command Reference: `list`
 
 ```text
-Error capturing help: Command '['sudo', './diskmgr']' timed out after 10 seconds
+List all configured mappings and available system disks in a single table.
+
+        UNDER THE HOOD:
+        1.  Resolution: Refreshes mappings from diskmap.tsv.
+        2.  Hardware Discovery: Uses 'lsblk' to gather hardware properties and identifies
+            underlying physical partitions even when opened as virtual devices.
+        3.  Zero-Sudo LUKS Detection: Queries the system 'udev' database via 'udevadm info'
+            to accurately identify encrypted disks without requiring root privileges.
+        4.  Status Logic:
+            - MISSING: Persistent path not found in /dev.
+            - CLOSED: Present but locked (LUKS) or unmounted (Plain).
+            - OPEN: Unlocked/Decrypted but not yet mounted.
+            - MOUNTED: Active filesystem attached to the preferred path (/media/$USER/name).
+        5.  Dynamic Formatting: Pre-calculates the maximum width of every column across
+            all rows for a perfectly aligned, readable table.
+        6.  Exclusion Logic: Rigorously filters out virtual mapper devices and their
+            kernel aliases (dm-X) from the unmapped list once they are active.
+```
+
+### Example Output
+
+```text
+--- Disk Management Table (/home/lewis/Dev/diskmgr/diskmap.tsv) ---
+#     NAME  LUKS  STATE      FSTYPE       LABEL  MOUNTPOINT         DEVICE     SIZE    PERSISTENT PATH
+---------------------------------------------------------------------------------------------------------------------------------------------------------
+[1]   1b    -     MISSING    -            -      -                  -          -       /dev/disk/by-id/wwn-0x5000c500e31e6cb2
+[2]   1a    Y     CLOSED     crypto_LUKS  -      -                  sda2       931.4G  /dev/disk/by-id/wwn-0x5000c500a89d6e44-part2
+[3]   data  N     MOUNTED    ext4         data   /media/lewis/data  nvme1n1p1  931.5G  /dev/disk/by-id/nvme-WD_Blue_SN570_1TB_21353X644609-part1
+[U1]  -     N     UNMOUNTED  -            -      -                  sda        931.5G  /dev/disk/by-id/wwn-0x5000c500a89d6e44
+[U2]  -     N     UNMOUNTED  -            -      -                  sda1       128M    /dev/disk/by-id/wwn-0x5000c500a89d6e44-part1
+[U3]  -     N     UNMOUNTED  -            -      -                  nvme0n1    1.8T    /dev/disk/by-id/nvme-eui.e8238fa6bf530001001b448b42d60852
+[U4]  -     N     MOUNTED    ext4         -      /                  nvme0n1p1  1.8T    /dev/disk/by-id/nvme-WD_BLACK_SN8100_2000GB_25334X800147_1-part1
+[U5]  -     N     UNMOUNTED  -            -      -                  nvme1n1    931.5G  /dev/disk/by-id/nvme-eui.e8238fa6bf530001001b444a49598af9
 ```
 
 ## Command Reference: `layout`
 
 ```text
-Error capturing help: Command '['sudo', './diskmgr']' timed out after 10 seconds
+Display the physical partition layout and free space for all plugged-in disks.
+
+        UNDER THE HOOD:
+        1.  Hardware Scan: Identifies all physical 'disk' devices (excluding partitions).
+        2.  Geometry Query: Runs 'sudo parted -m <dev> unit s print free' and 'blockdev --getsz'.
+        3.  Parsing:
+            - Extracts Partition Table type (gpt/mbr) and sector sizes.
+            - Calculates total logical sectors from blockdev output.
+        4.  Formatting:
+            - Adds GPT metadata blocks (Primary/Backup) if applicable.
+            - Identifies 'free' space segments.
+            - Calculates MiB and GiB values from sector counts.
+```
+
+### Example Output
+
+```text
+Disk: /dev/sda (ST1000LM035-1RK172) [gpt] [Sector: L512/P4096] [Total Sectors: 1953525168]
+[ GPT Primary 34s (17408.00B) ] [ free 2014s (1007.00KiB) ] [ sda1 - 262144s (128.00MiB) (msftres, no_automount) ] [ sda2 - 1953259520s (953740.00MiB ≈ 931.4GiB) (msftdata) ] [ free 1423s (711.50KiB) ] [ GPT Backup 33s (16896.00B) ]
+
+NAME   FSTYPE      FSVER LABEL UUID                                 FSAVAIL FSUSE% MOUNTPOINTS
+sda
+├─sda1
+└─sda2 crypto_LUKS 2           e038a8b5-d3a7-4bbb-bbea-5bed8cc07a04
+-----------------------------------------------------------------------------------------------------------------------------------------------------------
+
+Disk: /dev/nvme0n1 (WD_BLACK SN8100 2000GB) [msdos] [Sector: L512/P512] [Total Sectors: 3907029168]
+[ MBR 2s (1024.00B) ] [ free 2046s (1023.00KiB) ] [ nvme0n1p1 ext4 3907026944s (1907728.00MiB ≈ 1863.0GiB) (boot) ] [ free 176s (88.00KiB) ]
+
+NAME        FSTYPE FSVER LABEL UUID                                 FSAVAIL FSUSE% MOUNTPOINTS
+nvme0n1
+└─nvme0n1p1 ext4   1.0         88f1dad3-95c6-418e-bea8-f5f3e072ea29  771.5G    53% /
+-----------------------------------------------------------------------------------------------------------------------------------------------------------
+
+Disk: /dev/nvme1n1 (WD Blue SN570 1TB) [msdos] [Sector: L512/P512] [Total Sectors: 1953525168]
+[ MBR 2s (1024.00B) ] [ free 2046s (1023.00KiB) ] [ nvme1n1p1 ext4 1953523120s (953868.71MiB ≈ 931.5GiB) ]
+
+NAME        FSTYPE FSVER LABEL UUID                                 FSAVAIL FSUSE% MOUNTPOINTS
+nvme1n1
+└─nvme1n1p1 ext4   1.0   data  72c22012-b161-4e2a-a762-94ff7fda47f9  311.3G    61% /media/lewis/data
+-----------------------------------------------------------------------------------------------------------------------------------------------------------
 ```
 
 ## Command Reference: `boot`
 
 ```text
-Error capturing help: Command '['sudo', './diskmgr']' timed out after 10 seconds
+Display boot entries from the GRUB configuration of all mounted disks.
+
+        UNDER THE HOOD:
+        Scans all mounted filesystems for /boot/grub/grub.cfg and parses them
+        to extract menu entries and filesystem UUIDs.
 ```
 
 ## Command Reference: `map`
 
 ```text
-Error capturing help: Command '['sudo', './diskmgr']' timed out after 10 seconds
+Create or modify a persistent mapping: map <name/id> <name>
+
+        Usage:
+          map [U1] backup    Assigns friendly name to discovery ID (e.g., map U1 backup)
+          map 1a backup      Renames an existing mapping (e.g., map 1a backup)
+
+        Note: Raw device paths (e.g., /dev/sdb) are NOT allowed.
+
+        UNDER THE HOOD:
+        1.  Input Resolution:
+            - discovery ID (e.g., [U1]): Resolves the temporary device to its Persistent Device Path (PDP).
+            - mapping name (e.g., 1a): Selects an existing mapping for RENAME operations.
+        2.  PDP Linking: Extracts the /dev/disk/by-id/ path for the target hardware.
+        3.  Conflict Check: Ensures the new friendly name is not already in use.
+        4.  Persistence: Writes the [Name <TAB> PDP] pair to diskmap.tsv.
+
+        This ensures the disk is recognized correctly regardless of USB port or device node changes.
 ```
 
 ## Command Reference: `unmap`
 
 ```text
-Error capturing help: Command '['sudo', './diskmgr']' timed out after 10 seconds
+Remove a persistent mapping: unmap <name>
+
+        UNDER THE HOOD:
+        1.  Resolution: Verifies the mapping exists in diskmap.tsv.
+        2.  Removal: Deletes the [Name <TAB> PDP] pair from the internal dictionary.
+        3.  Persistence: Re-writes diskmap.tsv with the mapping removed.
 ```
 
 ## Command Reference: `open`
 
 ```text
-Error capturing help: Command '['sudo', './diskmgr']' timed out after 10 seconds
+Unlock (if encrypted) and mount a disk: open <name>
+
+        UNDER THE HOOD:
+        1.  Identity Resolution: Looks up the friendly name in diskmap.tsv.
+        2.  Hardware Wait: Polls for up to 10 seconds to allow for hardware spin-up/udev events.
+        3.  Validation:
+            - Runs 'cryptsetup isLuks' to check for encryption.
+            - If NOT encrypted, verifies the existence of a valid filesystem.
+        4.  Decryption (LUKS only):
+            - Executes 'passgen' to retrieve the passphrase.
+            - Pipes the passphrase into 'cryptsetup open' to create a cleartext device in /dev/mapper/.
+        5.  Mounting:
+            - Identifies the preferred mountpoint: /media/$USER/<label> (falls back to mapping name).
+            - Ensures the directory exists and attaches the device.
+        6.  Policy Enforcement: If the disk is already mounted at a non-standard path,
+            it unmounts and remounts it to the preferred path.
 ```
 
 ## Command Reference: `close`
 
 ```text
-Error capturing help: Command '['sudo', './diskmgr']' timed out after 10 seconds
+Unmount and lock (if encrypted) a disk: close <name>
+
+        UNDER THE HOOD:
+        1.  Unmounting (Encrypted & Plain):
+            - Flushes all pending writes to the disk (data integrity).
+            - Terminates active file handles to the device.
+            - Attempts unmount by mapper path (LUKS), source path (Plain), or guessed mountpoint.
+        2.  Locking (LUKS only):
+            - Commands the kernel to wipe encryption keys from RAM.
+            - Removes the virtual cleartext device from /dev/mapper/.
+        3.  Audit: Checks and displays remaining active mappings for security awareness.
 ```
 
 ## Command Reference: `label`
 
 ```text
-Error capturing help: Command '['sudo', './diskmgr']' timed out after 10 seconds
+Get or set the filesystem label of an OPEN disk: label <name> [new_label] [--remount]
+
+        Options:
+          --remount        Unmount and remount the disk to the new label's path.
+
+        UNDER THE HOOD:
+        1.  Validation: Verifies that the disk is currently open/unlocked.
+        2.  Identification: Queries the filesystem type (ext4, xfs, etc.) via 'lsblk'.
+        3.  Labeling:
+            - ext4: Uses 'e2label' on the active device.
+            - xfs: Requires a temporary unmount, then uses 'xfs_admin -L', then remounts.
+        4.  Refresh: Executes 'udevadm trigger' to force tools like 'lsblk' to see the change.
+        5.  Remount (Optional): If --remount is set, moves the mount to /media/$USER/new_label.
+
+        The label is written directly to the disk hardware and persists across different computers.
 ```
 
 ## Command Reference: `luks`
