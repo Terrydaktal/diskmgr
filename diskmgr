@@ -646,20 +646,29 @@ class DiskMgrShell(cmd.Cmd):
 """
         found_any = False
         for mnt, src in mounts:
+            # Skip virtual/pseudo filesystems
+            if not src.startswith('/') or src.startswith('/dev/loop'):
+                continue
+
             cfg_path = Path(mnt) / "boot/grub/grub.cfg"
-            if cfg_path.exists():
-                found_any = True
-                print(f"\n{Colors.HEADER}{Colors.BOLD}Boot Config: {mnt} ({src}){Colors.ENDC}")
-                cmd = ['sudo', 'awk', '-F', "'", awk_script, str(cfg_path)]
-                try:
-                    res = run_command(cmd, capture_output=True)
-                    if res.stdout.strip():
-                        print(res.stdout.strip())
-                    else:
-                        print("  (No menu entries found)")
-                except Exception as e:
-                    log(f"Failed to read config at {cfg_path}: {e}", 'WARN')
-                print("-" * 80)
+            try:
+                if cfg_path.exists():
+                    found_any = True
+                    print(f"\n{Colors.HEADER}{Colors.BOLD}Boot Config: {mnt} ({src}){Colors.ENDC}")
+                    cmd = ['sudo', 'awk', '-F', "'", awk_script, str(cfg_path)]
+                    try:
+                        res = run_command(cmd, capture_output=True)
+                        if res.stdout.strip():
+                            print(res.stdout.strip())
+                        else:
+                            print("  (No menu entries found)")
+                    except Exception as e:
+                        log(f"Failed to read config at {cfg_path}: {e}", 'WARN')
+                    print("-" * 80)
+            except PermissionError:
+                continue
+            except Exception as e:
+                log(f"Error checking {cfg_path}: {e}", 'WARN')
 
         if not found_any:
             log("No GRUB configurations (/boot/grub/grub.cfg) found on any mounted disks.", 'WARN')
