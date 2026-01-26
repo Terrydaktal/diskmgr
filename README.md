@@ -226,7 +226,10 @@ Unlock (if encrypted) and mount a disk: open <name>
             - Executes 'passgen' to retrieve the passphrase.
             - Pipes the passphrase into 'cryptsetup open' to create a cleartext device in /dev/mapper/.
         5.  Mounting:
-            - Identifies the preferred mountpoint: /media/$USER/<label> (falls back to mapping name).
+            - Identifies the preferred mountpoint: /media/$USER/<label>.
+            - If no hardware label is present, falls back to /media/$USER/<mapping_name>.
+            - Note: Prioritizing the label ensures that the disk mounts to the same
+              path used by standard OS automounters for plain removable media.
             - Ensures the directory exists and attaches the device.
         6.  Policy Enforcement: If the disk is already mounted at a non-standard path,
             it unmounts and remounts it to the preferred path.
