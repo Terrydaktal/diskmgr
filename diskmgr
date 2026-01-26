@@ -1284,6 +1284,17 @@ class DiskMgrShell(cmd.Cmd):
         - Drive to Partition (DANGEROUS): 
           Writes the source's boot sectors and partition table into the target partition. 
           This usually results in an unreadable "nested" structure.
+
+        CLONING & ENCRYPTION (CRITICAL):
+        - Source is LOCKED (e.g., clone sda sdb): 
+          Creates a bit-perfect "Encrypted Twin." The destination remains encrypted 
+          and requires the same password. (Recommended for backups).
+        - Source is OPEN (e.g., clone sda sdb): 
+          Copies encrypted data but may capture a "dirty" filesystem state if 
+          files are currently being written. (Close before cloning if possible).
+        - Source is MAPPER (e.g., clone dm-0 sdb): 
+          Performs a "Strip-and-Clone." The destination receives RAW DECRYPTED 
+          DATA. The resulting clone will be completely UNENCRYPTED.
         '''
         args = arg.split()
         if len(args) != 2:
