@@ -445,6 +445,9 @@ class DiskMgrShell(cmd.Cmd):
 
         print(f"  {Colors.OKGREEN}clone <src_name> <dst_name>{Colors.ENDC}")
         print("      Clones one disk to another (requires target >= source size).")
+
+        print(f"  {Colors.OKGREEN}sync <sec_name> <pri_name>{Colors.ENDC}")
+        print("      Syncs two mounted disks (rsync pri -> sec).")
         
         print(f"  {Colors.OKGREEN}exit / quit / Ctrl+D{Colors.ENDC}")
         print("      Exit the application.")
@@ -1559,6 +1562,70 @@ class DiskMgrShell(cmd.Cmd):
             log("Cloning complete.")
         except Exception as e:
             log(f"Cloning failed: {e}", 'ERROR')
+
+    def get_mountpoint(self, name):
+        '''Resolves the current mountpoint for a friendly name.'''
+        self.mappings = read_luks_map()
+        if name not in self.mappings:
+            return None
+        
+        src = self.mappings[name]
+        devnode = os.path.realpath(src)
+        
+        # Check if it's LUKS and open
+        mapper_path = f"/dev/mapper/{name}"
+        target = mapper_path if os.path.exists(mapper_path) else devnode
+        
+        res = run_command(['findmnt', '-rn', '-S', target, '-o', 'TARGET'], check=False)
+        return res.stdout.strip() if res.returncode == 0 else None
+
+    def do_sync(self, arg):
+        '''Synchronize two mounted disks: sync <secondary_name> <primary_name>
+        
+        UNDER THE HOOD:
+        1.  Validation: Verifies both disks are mapped and currently mounted.
+        2.  Confirmation: Requires solving two math problems (DESTRUCTIVE for secondary).
+        3.  Execution: Runs 'rsync -avh --delete --progress <primary_mnt>/ <secondary_mnt>/'.
+        
+        Note: The SECONDARY disk will be modified to match the PRIMARY disk.
+        All files on the secondary that do not exist on the primary will be DELETED.
+        '''
+        args = arg.split()
+        if len(args) != 2:
+            log("Usage: sync <secondary_name> <primary_name>", 'ERROR')
+            return
+
+        secondary, primary = args
+        
+        sec_mnt = self.get_mountpoint(secondary)
+        pri_mnt = self.get_mountpoint(primary)
+        
+        if not sec_mnt:
+            log(f"Secondary disk '{secondary}' is not mounted.", 'ERROR')
+            return
+        if not pri_mnt:
+            log(f"Primary disk '{primary}' is not mounted.", 'ERROR')
+            return
+
+        print(f"Syncing: {Colors.BOLD}{pri_mnt}/{Colors.ENDC} -> {Colors.WARNING}{sec_mnt}/{Colors.ENDC}")
+        
+        if not self.extensive_confirm(secondary):
+            return
+
+        run_command(['sudo', '-v'])
+        log(f"Starting rsync: {primary} -> {secondary}...")
+        
+        try:
+            # Ensure trailing slashes for rsync to sync directory CONTENTS
+            src_path = pri_mnt.rstrip('/') + '/'
+            dst_path = sec_mnt.rstrip('/') + '/'
+            
+            cmd = ['rsync', '-avh', '--delete', '--progress', src_path, dst_path]
+            # Use sudo if mountpoints are owned by root
+            run_command(cmd, sudo=True, capture_output=False)
+            log("Sync complete.")
+        except Exception as e:
+            log(f"Sync failed: {e}", 'ERROR')
 
     def do_create(self, arg):
         '''Initialize a disk: create <name> [options]
