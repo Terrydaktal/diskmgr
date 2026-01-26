@@ -62,14 +62,18 @@ def main():
         if help_text:
             readme_content += f"## Command Reference: `{cmd}`\n\n```text\n" + help_text + "\n```\n\n"
             
-            # Add Example for list and layout
-            if cmd in ['list', 'layout']:
+            # Add Example for list, layout, and boot
+            if cmd in ['list', 'layout', 'boot']:
                 example_raw = get_example(cmd)
                 if example_raw:
                     # Filter example to show only the relevant table/layout data
                     ex_lines = clean_diskmgr_output(example_raw).splitlines()
                     final_ex = []
-                    trigger = "--- Disk Management" if cmd == 'list' else "Disk: /dev/"
+                    
+                    if cmd == 'list': trigger = "--- Disk Management"
+                    elif cmd == 'layout': trigger = "Disk: /dev/"
+                    elif cmd == 'boot': trigger = "--- System Boot"
+                    
                     saving = False
                     for line in ex_lines:
                         if trigger in line: saving = True

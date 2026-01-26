@@ -138,6 +138,46 @@ Display boot entries from the GRUB configuration of all disks.
         If unmounted or encrypted, it explains why it cannot yet read the config.
 ```
 
+### Example Output
+
+```text
+--- System Boot Configuration Scan ---
+
+Device: /dev/sda1 (unknown FS)
+  Result: No recognizable filesystem found.
+------------------------------------------------------------
+
+Device: /dev/sda2 (crypto_LUKS)
+  Result: LUKS container is LOCKED. Please 'open' this disk to scan for boot entries.
+------------------------------------------------------------
+
+Device: /dev/nvme0n1p1 (ext4)
+  Result: Found GRUB config at /boot/grub/grub.cfg
+
+Top-level
+  └─ Linux Mint 22.1 Xfce                                                     88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]
+
+Advanced options for Linux Mint 22.1 Xfce
+  ├─ Linux Mint 22.1 Xfce, with Linux 6.17.9-061709-generic                   88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]
+  ├─ Linux Mint 22.1 Xfce, with Linux 6.17.9-061709-generic (recovery mode)   88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]
+  ├─ Linux Mint 22.1 Xfce, with Linux 6.16.12-061612-generic                  88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]
+  ├─ Linux Mint 22.1 Xfce, with Linux 6.16.12-061612-generic (recovery mode)  88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]
+  ├─ Linux Mint 22.1 Xfce, with Linux 6.16.0-061600-generic                   88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]
+  ├─ Linux Mint 22.1 Xfce, with Linux 6.16.0-061600-generic (recovery mode)   88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]
+  ├─ Linux Mint 22.1 Xfce, with Linux 6.8.0-88-generic                        88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]
+  ├─ Linux Mint 22.1 Xfce, with Linux 6.8.0-88-generic (recovery mode)        88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]
+  ├─ Linux Mint 22.1 Xfce, with Linux 6.8.0-85-generic                        88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]
+  ├─ Linux Mint 22.1 Xfce, with Linux 6.8.0-85-generic (recovery mode)        88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]
+  ├─ Linux Mint 22.1 Xfce, with Linux 6.8.0-51-generic                        88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]
+  ├─ Linux Mint 22.1 Xfce, with Linux 6.8.0-51-generic (recovery mode)        88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]
+  └─ UEFI Firmware Settings                                                   (firmware)
+------------------------------------------------------------
+
+Device: /dev/nvme1n1p1 (ext4)
+  Result: Mounted at /media/lewis/data, but no GRUB configuration found.
+------------------------------------------------------------
+```
+
 ## Command Reference: `map`
 
 ```text
