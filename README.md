@@ -5,7 +5,41 @@ A utility designed to simplify the management of encrypted and plain removable m
 ## Overview
 
 ```text
-Error capturing help: Command '['sudo', './diskmgr']' timed out after 10 seconds
+A utility designed to simplify the management of encrypted and plain removable media.
+It maps friendly labels to hardware-specific Persistent Device Paths (PDP), ensuring
+that disks are recognized reliably even if device nodes change.
+
+COMMANDS:
+  list
+      Shows all configured mappings and unmapped system disks in one table.
+  layout
+      Displays the physical partition layout and free space for all disks.
+  map <id/name> <name>
+      Assigns a friendly name to a disk or renames an existing mapping.
+  unmap <name>
+      Removes an existing mapping from the configuration.
+  open <name>
+      Unlocks LUKS (if encrypted) and mounts the disk.
+      Mounts to /media/$USER/<label> (prefers label over mapping name).
+  close <name>
+      Unmounts and closes the disk.
+  label <name> [new_label] [--remount]
+      Get or set the filesystem label of an OPEN disk.
+      Use --remount to immediately move the mount to the new label path.
+  luks <passwd|backup|restore>
+      LUKS management: change password, backup/restore headers.
+  create <name> [options]
+      Initializes a new disk (Erase -> LUKS -> Format -> Mount).
+  erase <name>
+      Securely erases a disk (multi-step hardware-aware wipe).
+  clone <src_name> <dst_name>
+      Clones one disk to another (requires target >= source size).
+  sync <sec_name> <pri_name>
+      Syncs two mounted disks (rsync pri -> sec).
+  exit / quit / Ctrl+D
+      Exit the application.
+
+Type 'help <command>' for more specific details.
 ```
 
 ## Command Reference: `list`
@@ -182,37 +216,15 @@ Get or set the filesystem label of an OPEN disk: label <name> [new_label] [--rem
         The label is written directly to the disk hardware and persists across different computers.
 ```
 
-## Command Reference: `passwd`
+## Command Reference: `luks`
 
 ```text
-Change the LUKS encryption passphrase: passwd <name>
+LUKS encryption management: luks <passwd|backup|restore> [options]
 
-        UNDER THE HOOD:
-        1.  Resolution: Maps the friendly name to its physical device node.
-        2.  Validation: Verifies the device is a valid LUKS container.
-        3.  Execution: Runs 'cryptsetup luksChangeKey'. This is an interactive
-            process that prompts for the current passphrase and the new one.
-
-        Note: This command communicates directly with the kernel to update the LUKS slot.
-```
-
-## Command Reference: `backup`
-
-```text
-Back up a LUKS header to a file: backup <name> [filename]
-
-        If no filename is provided, it defaults to <name>.header.bak.
-        The header is required to recover access if the disk's on-device header
-        is corrupted or overwritten.
-```
-
-## Command Reference: `restore`
-
-```text
-Restore a LUKS header from a file: restore <name> <filename>
-
-        Note: This is a DESTRUCTIVE operation for the on-disk header.
-        Solving two math problems is MANDATORY to proceed.
+        Subcommands:
+          passwd <name>           Change the LUKS passphrase.
+          backup <name> [file]    Save the LUKS header to a file.
+          restore <name> <file>   Restore the LUKS header from a file (Destructive).
 ```
 
 ## Command Reference: `erase`
