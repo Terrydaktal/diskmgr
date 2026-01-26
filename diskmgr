@@ -614,14 +614,14 @@ class DiskMgrShell(cmd.Cmd):
             print(fmt.format(*[row[k] for k in keys]))
         print("")
 
-    def resolve_target(self, target_str):
+    def resolve_target(self, target_str, allow_id=True):
         '''Resolves a target string to a physical path.
         Only supports Discovery IDs (U1, [U1]) or existing mapping names.
         '''
         clean = target_str.strip('[]')
         
         # 1. Check Discovery ID
-        if clean.startswith('U') and clean[1:].isdigit():
+        if allow_id and clean.startswith('U') and clean[1:].isdigit():
             idx = int(clean[1:]) - 1
             if 0 <= idx < len(self.unmapped_cache):
                 return self.unmapped_cache[idx]['pdp']
@@ -941,7 +941,7 @@ class DiskMgrShell(cmd.Cmd):
         1.  Validation: Verifies that the disk is currently open/unlocked.
         2.  Identification: Queries the filesystem type (ext4, xfs, etc.) via 'lsblk'.
         3.  Labeling:
-            - ext4: Uses 'e2label' on the active mapper device.
+            - ext4: Uses 'e2label' on the active device.
             - xfs: Requires a temporary unmount, then uses 'xfs_admin -L', then remounts.
         
         The label is written directly to the disk hardware and persists across different computers.
@@ -954,20 +954,36 @@ class DiskMgrShell(cmd.Cmd):
         name = args[0]
         new_label = args[1] if len(args) > 1 else None
         
-        # Check mapping
+        # Resolve target device
+        target_dev = None
         mapper_path = f"/dev/mapper/{name}"
-        if not os.path.exists(mapper_path):
-             # check if it is a known mapping
-             self.mappings = read_luks_map()
-             if name in self.mappings:
-                 log(f"Mapping '{name}' is not open. Please 'open {name}' first.", 'ERROR')
-                 return
-             log(f"Device not found: {mapper_path}. Is it an open mapping?", 'ERROR')
-             return
+        
+        if os.path.exists(mapper_path):
+            target_dev = mapper_path
+        else:
+            self.mappings = read_luks_map()
+            if name in self.mappings:
+                src = self.mappings[name]
+                if not os.path.exists(src):
+                    log(f"Device for mapping '{name}' is missing: {src}", 'ERROR')
+                    return
+                
+                devnode = os.path.realpath(src)
+                # Check if it's LUKS
+                try:
+                    run_command(['sudo', 'cryptsetup', 'isLuks', devnode])
+                    log(f"Mapping '{name}' is LUKS but not open. Please 'open {name}' first.", 'ERROR')
+                    return
+                except subprocess.CalledProcessError:
+                    # Plain disk
+                    target_dev = devnode
+            else:
+                log(f"Device not found or unknown mapping: {name}", 'ERROR')
+                return
              
         # Get info
         try:
-            cmd = ['lsblk', '-J', '-o', 'FSTYPE,MOUNTPOINT,LABEL', mapper_path]
+            cmd = ['lsblk', '-J', '-o', 'FSTYPE,MOUNTPOINT,LABEL', target_dev]
             res = run_command(cmd, capture_output=True)
             data = json.loads(res.stdout)
             dev = data.get('blockdevices', [{}])[0]
@@ -990,7 +1006,7 @@ class DiskMgrShell(cmd.Cmd):
         
         if fstype == 'ext4':
             try:
-                run_command(['e2label', mapper_path, new_label], sudo=True)
+                run_command(['e2label', target_dev, new_label], sudo=True)
                 log("Label updated.")
             except:
                 pass # run_command logs error
@@ -1007,7 +1023,7 @@ class DiskMgrShell(cmd.Cmd):
                     return
 
             try:
-                run_command(['xfs_admin', '-L', new_label, mapper_path], sudo=True)
+                run_command(['xfs_admin', '-L', new_label, target_dev], sudo=True)
                 log("Label updated.")
             except:
                 pass
@@ -1015,7 +1031,7 @@ class DiskMgrShell(cmd.Cmd):
                 if remount_needed:
                     log(f"Remounting {mountpoint}...")
                     try:
-                         run_command(['mount', mapper_path, mountpoint], sudo=True)
+                         run_command(['mount', target_dev, mountpoint], sudo=True)
                     except Exception as e:
                         log(f"Failed to remount: {e}. You may need to mount manually.", 'ERROR')
 
