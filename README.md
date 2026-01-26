@@ -244,7 +244,8 @@ Securely erase a disk: erase <name> [options]
         UNDER THE HOOD:
         1.  Target Resolution: Maps friendly name to a raw block device.
         2.  Destructive Wipe:
-            - NVMe: Uses 'nvme format --ses=1' for firmware-level crypto-erase.
+            - NVMe: Prioritizes (1) Sanitize Crypto Erase, (2) Sanitize Block Erase,
+              and (3) Format Crypto Erase based on hardware support.
             - SSD: Uses 'blkdiscard' to inform the controller that all blocks are empty.
             - HDD: Uses 'dd' for a full zero-pass overwrite of the physical platters.
         3.  Verification: Executes 'udevadm settle' and 'sync' to ensure all operations are committed.
