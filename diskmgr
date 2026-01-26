@@ -416,6 +416,9 @@ class DiskMgrShell(cmd.Cmd):
 
         print(f"  {Colors.OKGREEN}layout{Colors.ENDC}")
         print("      Displays the physical partition layout and free space for all disks.")
+
+        print(f"  {Colors.OKGREEN}boot{Colors.ENDC}")
+        print("      Displays all boot entries and submenus from GRUB.")
         
         print(f"  {Colors.OKGREEN}map <id/name> <name>{Colors.ENDC}")
         print("      Assigns a friendly name to a disk or renames an existing mapping.")
@@ -586,6 +589,62 @@ class DiskMgrShell(cmd.Cmd):
                 print(f"\n{Colors.BOLD}Disk: {dev_path} ({model}){Colors.ENDC}")
                 log(f"Could not read layout for {dev_path}: {e}", 'WARN')
         print("")
+
+    def do_boot(self, arg):
+        '''Display boot entries from the GRUB configuration.
+        
+        UNDER THE HOOD:
+        Parses /boot/grub/grub.cfg to extract menu entries, submenus, and 
+        associated filesystem UUIDs.
+        '''
+        awk_script = r"""
+  /search[[:space:]].*--fs-uuid/ {g=$NF}
+
+  /^[[:space:]]*submenu / {
+    submenu_title=$2
+    print "\n" submenu_title
+    next
+  }
+
+  /^[[:space:]]*menuentry / {
+    e=$2; u=""; in_entry=1
+    next
+  }
+
+  in_entry && u=="" && /search[[:space:]].*--fs-uuid/ {u=$NF}
+  in_entry && u=="" && /(linux|linuxefi)[[:space:]].*root=UUID=/ {
+    match($0,/root=UUID=[0-9a-fA-F-]+/)
+    if (RSTART) u=substr($0,RSTART+10,RLENGTH-10)
+  }
+
+  in_entry && /^[[:space:]]*}/ {
+    if (e ~ /UEFI Firmware Settings/) u="(firmware)"
+    if (submenu_title=="") submenu_title="Top-level"
+    rows[submenu_title]=rows[submenu_title] sprintf("  ├─ %-72s %s\n", e, (u!=""?u:g))
+    in_entry=0
+  }
+
+  END {
+    # Print Top-level first if it exists
+    if ("Top-level" in rows) {
+      print "\nTop-level"
+      printf "%s", rows["Top-level"]
+      delete rows["Top-level"]
+    }
+    for (k in rows) {
+      print "\n" k
+      printf "%s", rows[k]
+    }
+  }
+"""
+        cmd = ['sudo', 'awk', '-F', "'", awk_script, '/boot/grub/grub.cfg']
+        try:
+            res = run_command(cmd, capture_output=True)
+            # Use sed-like logic to clean up the last line of each block if possible
+            # or just print the raw output as requested
+            print(res.stdout.strip())
+        except Exception as e:
+            log(f"Failed to read boot configuration: {e}", 'ERROR')
 
     def do_list(self, arg):
         '''List all configured mappings and available system disks in a single table.
