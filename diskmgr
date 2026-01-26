@@ -1701,6 +1701,15 @@ class DiskMgrShell(cmd.Cmd):
                partition #1 spanning the whole drive, and puts LUKS inside that.
            - The Big Picture: You lose everything on the physical drive, and it 
              becomes a single, clean encrypted volume.
+
+        3. Using --plain with --gpt or --mbr
+           The Result: Standard Unencrypted Disk.
+           - Partitioning: Creates a fresh GPT/MBR table and one primary partition.
+           - Encryption: Skipped entirely.
+           - Mapping: The friendly name in luksmap.tsv points directly to the 
+             raw hardware partition (e.g., /dev/disk/by-id/...-part1).
+           - The Big Picture: You get a standard unencrypted partitioned volume 
+             manageable via diskmgr's persistent naming.
         
         Options:
           --fs <ext4|xfs>   Filesystem type (default: ext4)

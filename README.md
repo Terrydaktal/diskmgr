@@ -5,41 +5,7 @@ A utility designed to simplify the management of encrypted and plain removable m
 ## Overview
 
 ```text
-A utility designed to simplify the management of encrypted and plain removable media.
-It maps friendly labels to hardware-specific Persistent Device Paths (PDP), ensuring
-that disks are recognized reliably even if device nodes change.
-
-COMMANDS:
-  list
-      Shows all configured mappings and unmapped system disks in one table.
-  layout
-      Displays the physical partition layout and free space for all disks.
-  map <id/name> <name>
-      Assigns a friendly name to a disk or renames an existing mapping.
-  unmap <name>
-      Removes an existing mapping from the configuration.
-  open <name>
-      Unlocks LUKS (if encrypted) and mounts the disk.
-      Mounts to /media/$USER/<label> (prefers label over mapping name).
-  close <name>
-      Unmounts and closes the disk.
-  label <name> [new_label] [--remount]
-      Get or set the filesystem label of an OPEN disk.
-      Use --remount to immediately move the mount to the new label path.
-  luks <passwd|backup|restore>
-      LUKS management: change password, backup/restore headers.
-  create <name> [options]
-      Initializes a new disk (Erase -> LUKS -> Format -> Mount).
-  erase <name>
-      Securely erases a disk (multi-step hardware-aware wipe).
-  clone <src_name> <dst_name>
-      Clones one disk to another (requires target >= source size).
-  sync <sec_name> <pri_name>
-      Syncs two mounted disks (rsync pri -> sec).
-  exit / quit / Ctrl+D
-      Exit the application.
-
-Type 'help <command>' for more specific details.
+Error capturing help: Command '['sudo', './diskmgr']' timed out after 10 seconds
 ```
 
 ## Command Reference: `list`
@@ -290,6 +256,15 @@ Initialize a disk: create <name> [options]
                partition #1 spanning the whole drive, and puts LUKS inside that.
            - The Big Picture: You lose everything on the physical drive, and it
              becomes a single, clean encrypted volume.
+
+        3. Using --plain with --gpt or --mbr
+           The Result: Standard Unencrypted Disk.
+           - Partitioning: Creates a fresh GPT/MBR table and one primary partition.
+           - Encryption: Skipped entirely.
+           - Mapping: The friendly name in luksmap.tsv points directly to the
+             raw hardware partition (e.g., /dev/disk/by-id/...-part1).
+           - The Big Picture: You get a standard unencrypted partitioned volume
+             manageable via diskmgr's persistent naming.
 
         Options:
           --fs <ext4|xfs>   Filesystem type (default: ext4)
