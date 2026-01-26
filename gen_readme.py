@@ -8,22 +8,20 @@ def strip_ansi(text):
 
 def get_help(cmd_name=None):
     """Run diskmgr help and return the cleaned output."""
-    cmd = ["./diskmgr"]
+    cmd = ["sudo", "./diskmgr"]
     input_str = f"help {cmd_name}\nexit\n" if cmd_name else "help\nexit\n"
     try:
-        res = subprocess.run(cmd, input=input_str, capture_output=True, text=True, timeout=5)
+        res = subprocess.run(cmd, input=input_str, capture_output=True, text=True, timeout=10)
         return strip_ansi(res.stdout)
     except Exception as e:
         return f"Error capturing help: {e}"
 
 def get_example(cmd_name):
     """Run a command and return its output for documentation examples."""
-    cmd = ["./diskmgr"]
+    cmd = ["sudo", "./diskmgr"]
     input_str = f"{cmd_name}\nexit\n"
     try:
-        # Note: some commands like 'list' might need sudo in some environments, 
-        # but here we assume it runs or fails gracefully.
-        res = subprocess.run(cmd, input=input_str, capture_output=True, text=True, timeout=10)
+        res = subprocess.run(cmd, input=input_str, capture_output=True, text=True, timeout=15)
         return strip_ansi(res.stdout)
     except Exception as e:
         return ""
@@ -33,13 +31,15 @@ def clean_diskmgr_output(raw_content):
     lines = raw_content.splitlines()
     content_lines = []
     for line in lines:
-        if "Welcome to diskmgr" in line:
+        if "Welcome to diskmgr" in line or "[sudo] password for" in line:
             continue
         if "(diskmgr)" in line:
             # Strip everything before and including the prompt
             idx = line.find("(diskmgr)")
-            clean_line = line[idx+len("(diskmgr)"):
-].strip()
+            clean_line = line[idx+len("(diskmgr)"):].strip()
+            # If there's still a sudo prompt after the diskmgr prompt on the same line
+            if "[sudo] password for" in clean_line:
+                continue
             if clean_line:
                 content_lines.append(clean_line)
         else:
