@@ -5,61 +5,13 @@ A utility designed to simplify the management of encrypted and plain removable m
 ## Overview
 
 ```text
-A utility designed to simplify the management of encrypted and plain removable media.
-It maps friendly labels to hardware-specific Persistent Device Paths (PDP), ensuring
-that disks are recognized reliably even if device nodes change.
-
-COMMANDS:
-  list
-      Shows all configured mappings and unmapped system disks in one table.
-  layout
-      Displays the physical partition layout and free space for all disks.
-  map <id/name> <name>
-      Assigns a friendly name to a disk or renames an existing mapping.
-  unmap <name>
-      Removes an existing mapping from the configuration.
-  open <name>
-      Unlocks LUKS (if encrypted) and mounts the disk.
-      Mounts to /media/$USER/<label> (prefers label over mapping name).
-  close <name>
-      Unmounts and closes the disk.
-  label <name> [new_label] [--remount]
-      Get or set the filesystem label of an OPEN disk.
-      Use --remount to immediately move the mount to the new label path.
-  passwd <name>
-      Changes the LUKS encryption passphrase for a disk.
-  create <name> [options]
-      Initializes a new disk (Erase -> LUKS -> Format -> Mount).
-  erase <name>
-      Securely erases a disk (NVMe format, blkdiscard, or dd overwrite).
-  clone <src_name> <dst_name>
-      Clones one disk to another (requires target >= source size).
-  exit / quit / Ctrl+D
-      Exit the application.
-
-Type 'help <command>' for more specific details.
+Error capturing help: Command '['sudo', './diskmgr']' timed out after 10 seconds
 ```
 
 ## Command Reference: `list`
 
 ```text
-List all configured mappings and available system disks in a single table.
-
-        UNDER THE HOOD:
-        1.  Resolution: Refreshes mappings from luksmap.tsv.
-        2.  Hardware Discovery: Uses 'lsblk' to gather hardware properties and identifies
-            underlying physical partitions even when opened as virtual devices.
-        3.  Zero-Sudo LUKS Detection: Queries the system 'udev' database via 'udevadm info'
-            to accurately identify encrypted disks without requiring root privileges.
-        4.  Status Logic:
-            - MISSING: Persistent path not found in /dev.
-            - CLOSED: Present but locked (LUKS) or unmounted (Plain).
-            - OPEN: Unlocked/Decrypted but not yet mounted.
-            - MOUNTED: Active filesystem attached to the preferred path (/media/$USER/name).
-        5.  Dynamic Formatting: Pre-calculates the maximum width of every column across
-            all rows for a perfectly aligned, readable table.
-        6.  Exclusion Logic: Rigorously filters out virtual mapper devices and their
-            kernel aliases (dm-X) from the unmapped list once they are active.
+Error capturing help: Command '['sudo', './diskmgr']' timed out after 10 seconds
 ```
 
 ### Example Output
@@ -245,7 +197,7 @@ Securely erase a disk: erase <name> [options]
         1.  Target Resolution: Maps friendly name to a raw block device.
         2.  Destructive Wipe:
             - NVMe: Prioritizes (1) Sanitize Crypto Erase, (2) Sanitize Block Erase,
-              and (3) Format Crypto Erase based on hardware support.
+              (3) Format Crypto Erase, and (4) Format Block Erase.
             - SSD: Uses 'blkdiscard' to inform the controller that all blocks are empty.
             - HDD: Uses 'dd' for a full zero-pass overwrite of the physical platters.
         3.  Verification: Executes 'udevadm settle' and 'sync' to ensure all operations are committed.

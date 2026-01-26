@@ -140,8 +140,11 @@ def secure_erase_disk(dev_path):
             ctrl_data = json.loads(res.stdout)
             oacs = ctrl_data.get('oacs', 0)
             sanicap = ctrl_data.get('sanicap', 0)
+            fna = ctrl_data.get('fna', 0)
             
-            can_format_crypto = bool(oacs & 0x02)
+            can_format = bool(oacs & 0x02)
+            can_format_block = can_format # Baseline if Format is supported
+            can_format_crypto = can_format and bool(fna & 0x04)
             can_sanitize_block = bool(sanicap & 0x02)
             can_sanitize_crypto = bool(sanicap & 0x01)
             
@@ -167,13 +170,23 @@ def secure_erase_disk(dev_path):
 
             # 3. Format Crypto Erase (Priority 3)
             if can_format_crypto:
-                log(f"NVMe Secure Erase: Format Crypto Erase supported -> nvme format {dev_path} --ses=1")
+                log(f"NVMe Secure Erase: Format Crypto Erase supported -> nvme format {dev_path} --ses=2")
+                try:
+                    run_command(['nvme', 'format', dev_path, '--ses=2'], sudo=True)
+                    run_command(['udevadm', 'settle'], sudo=True)
+                    return True
+                except Exception as e:
+                    log(f"Format Crypto Erase failed: {e}", 'WARN')
+
+            # 4. Format Block Erase (Last NVMe Fallback)
+            if can_format_block:
+                log(f"NVMe Secure Erase: Format Block Erase supported -> nvme format {dev_path} --ses=1")
                 try:
                     run_command(['nvme', 'format', dev_path, '--ses=1'], sudo=True)
                     run_command(['udevadm', 'settle'], sudo=True)
                     return True
                 except Exception as e:
-                    log(f"Format Crypto Erase failed: {e}", 'ERROR')
+                    log(f"Format Block Erase failed: {e}", 'ERROR')
                     return False
             
             log("No NVMe secure erase methods (Sanitize/Format) are supported by this controller.", 'ERROR')
@@ -1253,7 +1266,7 @@ class DiskMgrShell(cmd.Cmd):
         1.  Target Resolution: Maps friendly name to a raw block device.
         2.  Destructive Wipe:
             - NVMe: Prioritizes (1) Sanitize Crypto Erase, (2) Sanitize Block Erase, 
-              and (3) Format Crypto Erase based on hardware support.
+              (3) Format Crypto Erase, and (4) Format Block Erase.
             - SSD: Uses 'blkdiscard' to inform the controller that all blocks are empty.
             - HDD: Uses 'dd' for a full zero-pass overwrite of the physical platters.
         3.  Verification: Executes 'udevadm settle' and 'sync' to ensure all operations are committed.
