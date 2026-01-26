@@ -58,7 +58,7 @@ def run_command(command, check=True, input_str=None, capture_output=True, sudo=F
         return e
 
 def get_script_dir():
-    return Path(__file__).parent.resolve()
+    return Path(__file__).resolve().parent
 
 def get_map_file_path():
     return get_script_dir() / MAP_FILENAME
