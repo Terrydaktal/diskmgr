@@ -436,6 +436,12 @@ class DiskMgrShell(cmd.Cmd):
 
         print(f"  {Colors.OKGREEN}passwd <name>{Colors.ENDC}")
         print("      Changes the LUKS encryption passphrase for a disk.")
+
+        print(f"  {Colors.OKGREEN}backup <name> [file]{Colors.ENDC}")
+        print("      Backs up the LUKS header to a file.")
+
+        print(f"  {Colors.OKGREEN}restore <name> <file>{Colors.ENDC}")
+        print("      Restores a LUKS header from a file (Destructive).")
         
         print(f"  {Colors.OKGREEN}create <name> [options]{Colors.ENDC}")
         print("      Initializes a new disk (Erase -> LUKS -> Format -> Mount).")
@@ -1378,9 +1384,11 @@ class DiskMgrShell(cmd.Cmd):
         
         # Check LUKS
         try:
-            run_command(['sudo', 'cryptsetup', 'isLuks', devnode])
-        except subprocess.CalledProcessError:
-            log(f"Device {name} ({devnode}) is not a LUKS encrypted device.", 'ERROR')
+            res = run_command(['cryptsetup', 'isLuks', devnode], sudo=True, check=False)
+            if res.returncode != 0:
+                log(f"Device {name} ({devnode}) is not a LUKS encrypted device.", 'ERROR')
+                return
+        except:
             return
 
         log(f"Starting passphrase change for {name} ({devnode})...")
@@ -1390,6 +1398,77 @@ class DiskMgrShell(cmd.Cmd):
             log("Passphrase updated successfully.")
         except Exception as e:
             log(f"Failed to change passphrase: {e}", 'ERROR')
+
+    def do_backup(self, arg):
+        '''Back up a LUKS header to a file: backup <name> [filename]
+        
+        If no filename is provided, it defaults to <name>.header.bak.
+        The header is required to recover access if the disk's on-device header 
+        is corrupted or overwritten.
+        '''
+        args = arg.split()
+        if not args:
+            log("Usage: backup <name> [filename]", 'ERROR')
+            return
+        
+        name = args[0]
+        filename = args[1] if len(args) > 1 else f"{name}.header.bak"
+        
+        src = self.resolve_target(name)
+        if not src:
+            log(f"Unknown target: '{name}'", 'ERROR')
+            return
+        
+        devnode = os.path.realpath(src)
+        
+        # Check LUKS
+        res = run_command(['cryptsetup', 'isLuks', devnode], sudo=True, check=False)
+        if res.returncode != 0:
+            log(f"Device {devnode} is not a valid LUKS device.", 'ERROR')
+            return
+            
+        log(f"Backing up LUKS header from {name} ({devnode}) to {filename}...")
+        try:
+            run_command(['cryptsetup', 'luksHeaderBackup', devnode, '--header-backup-file', filename], sudo=True)
+            log(f"Header backup successful: {filename}")
+        except Exception as e:
+            log(f"Backup failed: {e}", 'ERROR')
+
+    def do_restore(self, arg):
+        '''Restore a LUKS header from a file: restore <name> <filename>
+        
+        Note: This is a DESTRUCTIVE operation for the on-disk header. 
+        Solving two math problems is MANDATORY to proceed.
+        '''
+        args = arg.split()
+        if len(args) != 2:
+            log("Usage: restore <name> <filename>", 'ERROR')
+            return
+            
+        name, filename = args
+        
+        if not os.path.exists(filename):
+            log(f"Backup file not found: {filename}", 'ERROR')
+            return
+            
+        src = self.resolve_target(name)
+        if not src:
+            log(f"Unknown target: '{name}'", 'ERROR')
+            return
+            
+        devnode = os.path.realpath(src)
+        
+        log(f"RESTORE WARNING: About to overwrite LUKS header on {name} ({devnode}) using {filename}")
+        
+        if not self.extensive_confirm(name):
+            return
+            
+        run_command(['sudo', '-v'])
+        try:
+            run_command(['cryptsetup', 'luksHeaderRestore', devnode, '--header-backup-file', filename], sudo=True)
+            log("Header restore completed successfully.")
+        except Exception as e:
+            log(f"Restore failed: {e}", 'ERROR')
 
     def do_erase(self, arg):
         '''Securely erase a disk: erase <name> [options]

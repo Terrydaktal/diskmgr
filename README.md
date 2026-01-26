@@ -5,41 +5,7 @@ A utility designed to simplify the management of encrypted and plain removable m
 ## Overview
 
 ```text
-A utility designed to simplify the management of encrypted and plain removable media.
-It maps friendly labels to hardware-specific Persistent Device Paths (PDP), ensuring
-that disks are recognized reliably even if device nodes change.
-
-COMMANDS:
-  list
-      Shows all configured mappings and unmapped system disks in one table.
-  layout
-      Displays the physical partition layout and free space for all disks.
-  map <id/name> <name>
-      Assigns a friendly name to a disk or renames an existing mapping.
-  unmap <name>
-      Removes an existing mapping from the configuration.
-  open <name>
-      Unlocks LUKS (if encrypted) and mounts the disk.
-      Mounts to /media/$USER/<label> (prefers label over mapping name).
-  close <name>
-      Unmounts and closes the disk.
-  label <name> [new_label] [--remount]
-      Get or set the filesystem label of an OPEN disk.
-      Use --remount to immediately move the mount to the new label path.
-  passwd <name>
-      Changes the LUKS encryption passphrase for a disk.
-  create <name> [options]
-      Initializes a new disk (Erase -> LUKS -> Format -> Mount).
-  erase <name>
-      Securely erases a disk (multi-step hardware-aware wipe).
-  clone <src_name> <dst_name>
-      Clones one disk to another (requires target >= source size).
-  sync <sec_name> <pri_name>
-      Syncs two mounted disks (rsync pri -> sec).
-  exit / quit / Ctrl+D
-      Exit the application.
-
-Type 'help <command>' for more specific details.
+Error capturing help: Command '['sudo', './diskmgr']' timed out after 10 seconds
 ```
 
 ## Command Reference: `list`
@@ -74,7 +40,7 @@ List all configured mappings and available system disks in a single table.
 [2]   1a    Y     CLOSED     crypto_LUKS  -      -                  sda2       931.4G  /dev/disk/by-id/wwn-0x5000c500a89d6e44-part2
 [3]   data  N     MOUNTED    ext4         data   /media/lewis/data  nvme1n1p1  931.5G  /dev/disk/by-id/nvme-WD_Blue_SN570_1TB_21353X644609-part1
 [U1]  -     N     UNMOUNTED  -            -      -                  sda        931.5G  /dev/disk/by-id/wwn-0x5000c500a89d6e44
-[U2]  -     N     UNMOUNTED  -            -      -                  sda1       128M    /dev/disk/by-id/wwn-0x5000c500a89d6e44-part1
+[U2]  -     N     UNMOUNTED  -            -      -                  sda1       128M    /dev/disk/by-id/usb-SABRENT_SABRENT_DD5641988396B-0:0-part1
 [U3]  -     N     UNMOUNTED  -            -      -                  nvme0n1    1.8T    /dev/disk/by-id/nvme-eui.e8238fa6bf530001001b448b42d60852
 [U4]  -     N     MOUNTED    ext4         -      /                  nvme0n1p1  1.8T    /dev/disk/by-id/nvme-WD_BLACK_SN8100_2000GB_25334X800147_1-part1
 [U5]  -     N     UNMOUNTED  -            -      -                  nvme1n1    931.5G  /dev/disk/by-id/nvme-eui.e8238fa6bf530001001b444a49598af9
@@ -228,6 +194,25 @@ Change the LUKS encryption passphrase: passwd <name>
             process that prompts for the current passphrase and the new one.
 
         Note: This command communicates directly with the kernel to update the LUKS slot.
+```
+
+## Command Reference: `backup`
+
+```text
+Back up a LUKS header to a file: backup <name> [filename]
+
+        If no filename is provided, it defaults to <name>.header.bak.
+        The header is required to recover access if the disk's on-device header
+        is corrupted or overwritten.
+```
+
+## Command Reference: `restore`
+
+```text
+Restore a LUKS header from a file: restore <name> <filename>
+
+        Note: This is a DESTRUCTIVE operation for the on-disk header.
+        Solving two math problems is MANDATORY to proceed.
 ```
 
 ## Command Reference: `erase`
