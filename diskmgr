@@ -590,6 +590,19 @@ class DiskMgrShell(cmd.Cmd):
                 log(f"Could not read layout for {dev_path}: {e}", 'WARN')
         print("")
 
+    def resolve_uuid_to_dev(self, uuid):
+        '''Resolves a UUID to a short device name like sda1 or nvme0n1p1.'''
+        if not uuid or uuid == "(firmware)":
+            return ""
+        try:
+            res = run_command(['blkid', '-U', uuid], sudo=True, capture_output=True)
+            path = res.stdout.strip()
+            if path:
+                return os.path.basename(path)
+        except:
+            pass
+        return ""
+
     def do_boot(self, arg):
         '''Display boot entries from the GRUB configuration of all disks.
         
@@ -600,12 +613,12 @@ class DiskMgrShell(cmd.Cmd):
         all_devs = self.get_disk_info()
         flat_disks = self.flatten_disks(all_devs)
         
+        # AWK script parses GRUB config and returns Title <TAB> Entry <TAB> UUID
         awk_script = r"""
   /search[[:space:]].*--fs-uuid/ {g=$NF}
 
   /^[[:space:]]*submenu / {
     submenu_title=$2
-    print "\n" submenu_title
     next
   }
 
@@ -623,20 +636,10 @@ class DiskMgrShell(cmd.Cmd):
   in_entry && /^[[:space:]]*}/ {
     if (e ~ /UEFI Firmware Settings/) u="(firmware)"
     if (submenu_title=="") submenu_title="Top-level"
-    rows[submenu_title]=rows[submenu_title] sprintf("  ├─ %-72s %s\n", e, (u!=""?u:g))
+    
+    # Format: Submenu <TAB> Entry <TAB> UUID (or global uuid)
+    print submenu_title "\t" e "\t" (u!=""?u:g)
     in_entry=0
-  }
-
-  END {
-    if ("Top-level" in rows) {
-      print "\nTop-level"
-      printf "%s", rows["Top-level"]
-      delete rows["Top-level"]
-    }
-    for (k in rows) {
-      print "\n" k
-      printf "%s", rows[k]
-    }
   }
 """
         processed_devs = set()
@@ -651,7 +654,7 @@ class DiskMgrShell(cmd.Cmd):
             fstype = dev.get('fstype')
             mountpoint = dev.get('mountpoint')
 
-            # Skip loops and full disks that have partitions (we scan partitions instead)
+            # Skip loops and disks with children (partitions only)
             if d_type == 'loop' or (d_type == 'disk' and 'children' in dev):
                 continue
             
@@ -676,8 +679,24 @@ class DiskMgrShell(cmd.Cmd):
                         print(f"  {Colors.OKGREEN}Result: Found GRUB config at {mountpoint}/boot/grub/grub.cfg{Colors.ENDC}")
                         cmd = ['sudo', 'awk', '-F', "'", awk_script, str(cfg_path)]
                         res = run_command(cmd, capture_output=True)
+                        
                         if res.stdout.strip():
-                            print(res.stdout.strip())
+                            # Group entries by submenu
+                            entries = {}
+                            for line in res.stdout.strip().splitlines():
+                                if '\t' in line:
+                                    sub, title, uuid = line.split('\t')
+                                    if sub not in entries: entries[sub] = []
+                                    entries[sub].append((title, uuid))
+                            
+                            # Print groups
+                            for sub, items in entries.items():
+                                print(f"\n{sub}")
+                                for i, (title, uuid) in enumerate(items):
+                                    connector = "  └─" if i == len(items) - 1 else "  ├─"
+                                    dev_name = self.resolve_uuid_to_dev(uuid)
+                                    dev_info = f"[{dev_name}]" if dev_name else ""
+                                    print(f"{connector} {title:<72} {uuid} {Colors.OKCYAN}{dev_info}{Colors.ENDC}")
                         else:
                             print("  (No menu entries found in config)")
                     else:
