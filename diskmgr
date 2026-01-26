@@ -1092,6 +1092,17 @@ class DiskMgrShell(cmd.Cmd):
 
         # Mount
         mountpoint = f"/media/{os.environ.get('USER', 'root')}/{mount_name}"
+        
+        # Safety Check: Is this mountpoint already in use by another device?
+        res_check = run_command(['findmnt', '-rn', '-M', mountpoint], check=False)
+        if res_check.returncode == 0:
+            # Check if it's a DIFFERENT device
+            res_src = run_command(['findmnt', '-rn', '-M', mountpoint, '-o', 'SOURCE'], capture_output=True)
+            current_src = os.path.realpath(res_src.stdout.strip())
+            if current_src != os.path.realpath(target_to_mount):
+                log(f"MOUNT BLOCKED: Path {mountpoint} is already in use by {current_src}.", 'ERROR')
+                return
+
         if not os.path.exists(mountpoint):
             run_command(['mkdir', '-p', mountpoint], sudo=True)
             
@@ -1714,6 +1725,17 @@ class DiskMgrShell(cmd.Cmd):
 
         # Mount
         mountpoint = f"/media/{os.environ.get('USER', 'root')}/{label}"
+        
+        # Safety Check: Is this mountpoint already in use by another device?
+        res_check = run_command(['findmnt', '-rn', '-M', mountpoint], check=False)
+        if res_check.returncode == 0:
+            res_src = run_command(['findmnt', '-rn', '-M', mountpoint, '-o', 'SOURCE'], capture_output=True)
+            current_src = os.path.realpath(res_src.stdout.strip())
+            if current_src != os.path.realpath(fs_target):
+                log(f"MOUNT BLOCKED: Path {mountpoint} is already in use by {current_src}.", 'ERROR')
+                log("Disk was initialized successfully, but could not be mounted at the preferred path.", 'WARN')
+                return
+
         run_command(['mkdir', '-p', mountpoint], sudo=True)
         run_command(['mount', fs_target, mountpoint], sudo=True)
 
