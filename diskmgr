@@ -700,12 +700,10 @@ class DiskMgrShell(cmd.Cmd):
                                     s_dev = self.resolve_uuid_to_dev(s_uuid)
                                     r_dev = self.resolve_uuid_to_dev(r_uuid)
                                     
-                                    s_info = f"SEARCH={s_uuid:<36} {Colors.OKCYAN}[{s_dev if s_dev else '-' :<10}]{Colors.ENDC}"
-                                    r_info = f"ROOT={r_uuid:<36} {Colors.OKCYAN}[{r_dev if r_dev else '-' :<10}]{Colors.ENDC}"
+                                    s_info = f"SEARCH={s_uuid:<36} [{s_dev if s_dev else '-'}]"
+                                    r_info = f"ROOT={r_uuid:<36} [{r_dev if r_dev else '-'}]"
                                     
-                                    print(f"{connector} {title:<72}")
-                                    print(f"     {s_info}")
-                                    print(f"     {r_info}")
+                                    print(f"{connector} {title:<72}  {Colors.OKCYAN}{s_info}  {r_info}{Colors.ENDC}")
                         else:
                             print("  (No menu entries found in config)")
                     else:
