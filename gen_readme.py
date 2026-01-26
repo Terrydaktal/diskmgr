@@ -78,7 +78,7 @@ def main():
                     if final_ex:
                         readme_content += "### Example Output\n\n```text\n" + "\n".join(final_ex).strip() + "\n```\n\n"
 
-    readme_content += "## Configuration\n\nMappings are stored in `luksmap.tsv` in the same directory as the script. The file uses a simple Tab-Separated Values format:\n\n```text\n<friendly_name>\t<persistent_device_path>\n```\n"
+    readme_content += "## Configuration\n\nMappings are stored in `diskmap.tsv` in the same directory as the script. The file uses a simple Tab-Separated Values format:\n\n```text\n<friendly_name>\t<persistent_device_path>\n```\n"
     readme_content += "\n## Author\n\nTerrydaktal <9lewis9@gmail.com>\n"
 
     with open('README.md', 'w', encoding='utf-8') as f:

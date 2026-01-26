@@ -12,7 +12,7 @@ import random
 from pathlib import Path
 
 # Configuration
-MAP_FILENAME = 'luksmap.tsv'
+MAP_FILENAME = 'diskmap.tsv'
 PASSGEN_BIN = 'passgen'
 
 # ANSI Colors
@@ -591,7 +591,7 @@ class DiskMgrShell(cmd.Cmd):
         '''List all configured mappings and available system disks in a single table.
         
         UNDER THE HOOD:
-        1.  Resolution: Refreshes mappings from luksmap.tsv.
+        1.  Resolution: Refreshes mappings from diskmap.tsv.
         2.  Hardware Discovery: Uses 'lsblk' to gather hardware properties and identifies 
             underlying physical partitions even when opened as virtual devices.
         3.  Zero-Sudo LUKS Detection: Queries the system 'udev' database via 'udevadm info' 
@@ -937,7 +937,7 @@ class DiskMgrShell(cmd.Cmd):
             - mapping name (e.g., 1a): Selects an existing mapping for RENAME operations.
         2.  PDP Linking: Extracts the /dev/disk/by-id/ path for the target hardware.
         3.  Conflict Check: Ensures the new friendly name is not already in use.
-        4.  Persistence: Writes the [Name <TAB> PDP] pair to luksmap.tsv.
+        4.  Persistence: Writes the [Name <TAB> PDP] pair to diskmap.tsv.
         
         This ensures the disk is recognized correctly regardless of USB port or device node changes.
         '''
@@ -980,9 +980,9 @@ class DiskMgrShell(cmd.Cmd):
         '''Remove a persistent mapping: unmap <name>
         
         UNDER THE HOOD:
-        1.  Resolution: Verifies the mapping exists in luksmap.tsv.
+        1.  Resolution: Verifies the mapping exists in diskmap.tsv.
         2.  Removal: Deletes the [Name <TAB> PDP] pair from the internal dictionary.
-        3.  Persistence: Re-writes luksmap.tsv with the mapping removed.
+        3.  Persistence: Re-writes diskmap.tsv with the mapping removed.
         '''
         name = arg.strip()
         if not name:
@@ -1002,7 +1002,7 @@ class DiskMgrShell(cmd.Cmd):
         '''Unlock (if encrypted) and mount a disk: open <name>
         
         UNDER THE HOOD:
-        1.  Identity Resolution: Looks up the friendly name in luksmap.tsv.
+        1.  Identity Resolution: Looks up the friendly name in diskmap.tsv.
         2.  Hardware Wait: Polls for up to 10 seconds to allow for hardware spin-up/udev events.
         3.  Validation: 
             - Runs 'cryptsetup isLuks' to check for encryption.
@@ -1706,7 +1706,7 @@ class DiskMgrShell(cmd.Cmd):
            The Result: Standard Unencrypted Disk.
            - Partitioning: Creates a fresh GPT/MBR table and one primary partition.
            - Encryption: Skipped entirely.
-           - Mapping: The friendly name in luksmap.tsv points directly to the 
+           - Mapping: The friendly name in diskmap.tsv points directly to the 
              raw hardware partition (e.g., /dev/disk/by-id/...-part1).
            - The Big Picture: You get a standard unencrypted partitioned volume 
              manageable via diskmgr's persistent naming.
@@ -1728,7 +1728,7 @@ class DiskMgrShell(cmd.Cmd):
         5.  Filesystem: 
             - Formats the cleartext device with ext4 or xfs.
             - (ext4 only): Reclaims the 5% reserved space for root using 'tune2fs -m 0'.
-        6.  Persistence: Adds the new disk's PDP to luksmap.tsv automatically.
+        6.  Persistence: Adds the new disk's PDP to diskmap.tsv automatically.
 
         Note: This is a DESTRUCTIVE operation. Solving two math problems is MANDATORY to proceed.
         '''

@@ -5,7 +5,41 @@ A utility designed to simplify the management of encrypted and plain removable m
 ## Overview
 
 ```text
-Error capturing help: Command '['sudo', './diskmgr']' timed out after 10 seconds
+A utility designed to simplify the management of encrypted and plain removable media.
+It maps friendly labels to hardware-specific Persistent Device Paths (PDP), ensuring
+that disks are recognized reliably even if device nodes change.
+
+COMMANDS:
+  list
+      Shows all configured mappings and unmapped system disks in one table.
+  layout
+      Displays the physical partition layout and free space for all disks.
+  map <id/name> <name>
+      Assigns a friendly name to a disk or renames an existing mapping.
+  unmap <name>
+      Removes an existing mapping from the configuration.
+  open <name>
+      Unlocks LUKS (if encrypted) and mounts the disk.
+      Mounts to /media/$USER/<label> (prefers label over mapping name).
+  close <name>
+      Unmounts and closes the disk.
+  label <name> [new_label] [--remount]
+      Get or set the filesystem label of an OPEN disk.
+      Use --remount to immediately move the mount to the new label path.
+  luks <passwd|backup|restore>
+      LUKS management: change password, backup/restore headers.
+  create <name> [options]
+      Initializes a new disk (Erase -> LUKS -> Format -> Mount).
+  erase <name>
+      Securely erases a disk (multi-step hardware-aware wipe).
+  clone <src_name> <dst_name>
+      Clones one disk to another (requires target >= source size).
+  sync <sec_name> <pri_name>
+      Syncs two mounted disks (rsync pri -> sec).
+  exit / quit / Ctrl+D
+      Exit the application.
+
+Type 'help <command>' for more specific details.
 ```
 
 ## Command Reference: `list`
@@ -14,7 +48,7 @@ Error capturing help: Command '['sudo', './diskmgr']' timed out after 10 seconds
 List all configured mappings and available system disks in a single table.
 
         UNDER THE HOOD:
-        1.  Resolution: Refreshes mappings from luksmap.tsv.
+        1.  Resolution: Refreshes mappings from diskmap.tsv.
         2.  Hardware Discovery: Uses 'lsblk' to gather hardware properties and identifies
             underlying physical partitions even when opened as virtual devices.
         3.  Zero-Sudo LUKS Detection: Queries the system 'udev' database via 'udevadm info'
@@ -33,7 +67,7 @@ List all configured mappings and available system disks in a single table.
 ### Example Output
 
 ```text
---- Disk Management Table (/home/lewis/Dev/diskmgr/luksmap.tsv) ---
+--- Disk Management Table (/home/lewis/Dev/diskmgr/diskmap.tsv) ---
 #     NAME  LUKS  STATE      FSTYPE       LABEL  MOUNTPOINT         DEVICE     SIZE    PERSISTENT PATH
 ---------------------------------------------------------------------------------------------------------------------------------------------------------
 [1]   1b    -     MISSING    -            -      -                  -          -       /dev/disk/by-id/wwn-0x5000c500e31e6cb2
@@ -109,7 +143,7 @@ Create or modify a persistent mapping: map <name/id> <name>
             - mapping name (e.g., 1a): Selects an existing mapping for RENAME operations.
         2.  PDP Linking: Extracts the /dev/disk/by-id/ path for the target hardware.
         3.  Conflict Check: Ensures the new friendly name is not already in use.
-        4.  Persistence: Writes the [Name <TAB> PDP] pair to luksmap.tsv.
+        4.  Persistence: Writes the [Name <TAB> PDP] pair to diskmap.tsv.
 
         This ensures the disk is recognized correctly regardless of USB port or device node changes.
 ```
@@ -120,9 +154,9 @@ Create or modify a persistent mapping: map <name/id> <name>
 Remove a persistent mapping: unmap <name>
 
         UNDER THE HOOD:
-        1.  Resolution: Verifies the mapping exists in luksmap.tsv.
+        1.  Resolution: Verifies the mapping exists in diskmap.tsv.
         2.  Removal: Deletes the [Name <TAB> PDP] pair from the internal dictionary.
-        3.  Persistence: Re-writes luksmap.tsv with the mapping removed.
+        3.  Persistence: Re-writes diskmap.tsv with the mapping removed.
 ```
 
 ## Command Reference: `open`
@@ -131,7 +165,7 @@ Remove a persistent mapping: unmap <name>
 Unlock (if encrypted) and mount a disk: open <name>
 
         UNDER THE HOOD:
-        1.  Identity Resolution: Looks up the friendly name in luksmap.tsv.
+        1.  Identity Resolution: Looks up the friendly name in diskmap.tsv.
         2.  Hardware Wait: Polls for up to 10 seconds to allow for hardware spin-up/udev events.
         3.  Validation:
             - Runs 'cryptsetup isLuks' to check for encryption.
@@ -261,7 +295,7 @@ Initialize a disk: create <name> [options]
            The Result: Standard Unencrypted Disk.
            - Partitioning: Creates a fresh GPT/MBR table and one primary partition.
            - Encryption: Skipped entirely.
-           - Mapping: The friendly name in luksmap.tsv points directly to the
+           - Mapping: The friendly name in diskmap.tsv points directly to the
              raw hardware partition (e.g., /dev/disk/by-id/...-part1).
            - The Big Picture: You get a standard unencrypted partitioned volume
              manageable via diskmgr's persistent naming.
@@ -283,7 +317,7 @@ Initialize a disk: create <name> [options]
         5.  Filesystem:
             - Formats the cleartext device with ext4 or xfs.
             - (ext4 only): Reclaims the 5% reserved space for root using 'tune2fs -m 0'.
-        6.  Persistence: Adds the new disk's PDP to luksmap.tsv automatically.
+        6.  Persistence: Adds the new disk's PDP to diskmap.tsv automatically.
 
         Note: This is a DESTRUCTIVE operation. Solving two math problems is MANDATORY to proceed.
 ```
@@ -350,7 +384,7 @@ Synchronize two mounted disks: sync <secondary_name> <primary_name>
 
 ## Configuration
 
-Mappings are stored in `luksmap.tsv` in the same directory as the script. The file uses a simple Tab-Separated Values format:
+Mappings are stored in `diskmap.tsv` in the same directory as the script. The file uses a simple Tab-Separated Values format:
 
 ```text
 <friendly_name>	<persistent_device_path>
