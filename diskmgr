@@ -1134,7 +1134,10 @@ class DiskMgrShell(cmd.Cmd):
         2.  Hardware Wait: Polls for up to 10 seconds to allow for hardware spin-up/udev events.
         3.  Validation: 
             - Runs 'cryptsetup isLuks' to check for encryption.
-            - If NOT encrypted, verifies the existence of a valid filesystem.
+            - If NOT encrypted (Plain Disk): 
+              * Skips decryption step.
+              * Verifies the existence of a valid filesystem.
+              * Proceeds to label detection and mounting.
         4.  Decryption (LUKS only):
             - Executes 'passgen' to retrieve the passphrase.
             - Pipes the passphrase into 'cryptsetup open' to create a cleartext device in /dev/mapper/.

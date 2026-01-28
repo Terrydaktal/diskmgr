@@ -116,7 +116,7 @@ Disk: /dev/nvme0n1 (WD_BLACK SN8100 2000GB) [msdos] [Sector: L512/P512] [Total S
 
 NAME        FSTYPE FSVER LABEL UUID                                 FSAVAIL FSUSE% MOUNTPOINTS
 nvme0n1
-└─nvme0n1p1 ext4   1.0         88f1dad3-95c6-418e-bea8-f5f3e072ea29  771.4G    53% /
+└─nvme0n1p1 ext4   1.0         88f1dad3-95c6-418e-bea8-f5f3e072ea29  766.3G    53% /
 -----------------------------------------------------------------------------------------------------------------------------------------------------------
 
 Disk: /dev/nvme1n1 (WD Blue SN570 1TB) [msdos] [Sector: L512/P512] [Total Sectors: 1953525168]
@@ -221,7 +221,10 @@ Unlock (if encrypted) and mount a disk: open <name>
         2.  Hardware Wait: Polls for up to 10 seconds to allow for hardware spin-up/udev events.
         3.  Validation:
             - Runs 'cryptsetup isLuks' to check for encryption.
-            - If NOT encrypted, verifies the existence of a valid filesystem.
+            - If NOT encrypted (Plain Disk):
+              * Skips decryption step.
+              * Verifies the existence of a valid filesystem.
+              * Proceeds to label detection and mounting.
         4.  Decryption (LUKS only):
             - Executes 'passgen' to retrieve the passphrase.
             - Pipes the passphrase into 'cryptsetup open' to create a cleartext device in /dev/mapper/.
