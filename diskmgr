@@ -579,16 +579,49 @@ class DiskMgrShell(cmd.Cmd):
                 # 4. Print lsblk hierarchy at the bottom
                 print("")
                 try:
-                    ls_res = run_command(['lsblk', '-f', dev_path], sudo=True, check=False)
+                    # Use JSON output for absolute reliability in data capture
+                    ls_res = run_command(['lsblk', '-J', '-f', dev_path], sudo=True, check=False)
                     if ls_res.stdout.strip():
-                        print(ls_res.stdout.strip())
-                except:
-                    pass
+                        data = json.loads(ls_res.stdout)
+                        if 'blockdevices' in data:
+                            print(f"{Colors.BOLD}{'NAME':<25} {'FSTYPE':<12} {'FSVER':<6} {'LABEL':<12} {'UUID':<38} {'FSAVAIL':<10} {'FSUSE%':<8} {'MOUNTPOINTS'}{Colors.ENDC}")
+                            self.render_lsblk_json(data['blockdevices'])
+                except Exception as e:
+                    log(f"Could not render lsblk tree: {e}", 'DEBUG')
                 print("-" * 155)
             except Exception as e:
                 print(f"\n{Colors.BOLD}Disk: {dev_path} ({model}){Colors.ENDC}")
                 log(f"Could not read layout for {dev_path}: {e}", 'WARN')
         print("")
+
+    def render_lsblk_json(self, devices, indent="", is_root=True):
+        for i, dev in enumerate(devices):
+            is_last = (i == len(devices) - 1)
+            
+            name = dev.get('name', '')
+            fstype = dev.get('fstype') or ""
+            fsver = dev.get('fsver') or ""
+            label = dev.get('label') or ""
+            uuid = dev.get('uuid') or ""
+            fsavail = dev.get('fsavail') or ""
+            fsuse = dev.get('fsuse%') or ""
+            mounts = ", ".join([m for m in dev.get('mountpoints', []) if m])
+
+            # Tree characters
+            if is_root:
+                tree_part = name
+                next_indent = ""
+            else:
+                char = "└─" if is_last else "├─"
+                tree_part = indent + char + name
+                next_indent = indent + ("    " if is_last else "│   ")
+
+            # Print row
+            # NAME(25) FSTYPE(12) FSVER(6) LABEL(12) UUID(38) FSAVAIL(10) FSUSE(8) MOUNTPOINTS
+            print(f"{tree_part:<25} {fstype:<12} {fsver:<6} {label:<12} {uuid:<38} {fsavail:<10} {fsuse:<8} {mounts}".rstrip())
+            
+            if 'children' in dev:
+                self.render_lsblk_json(dev['children'], next_indent, is_root=False)
 
     def resolve_uuid_to_dev(self, uuid):
         '''Resolves a UUID to a short device name like sda1 or nvme0n1p1.'''
