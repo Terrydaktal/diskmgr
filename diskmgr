@@ -57,6 +57,32 @@ def run_command(command, check=True, input_str=None, capture_output=True, sudo=F
             raise
         return e
 
+def _split_nonempty_lines(s):
+    if not s:
+        return []
+    out = []
+    for line in str(s).splitlines():
+        line = line.strip()
+        if line and line not in out:
+            out.append(line)
+    return out
+
+def find_mount_targets(source):
+    """
+    Return a list of mount TARGETs for a given SOURCE.
+
+    Notes:
+    - A single filesystem can be mounted at multiple targets; findmnt will then
+      return multiple lines. Callers must not treat stdout as a single path.
+    - We resolve the source to a real path so /dev/mapper/<name> and /dev/dm-X
+      match the same mount.
+    """
+    src_real = os.path.realpath(source)
+    res = run_command(['findmnt', '-rn', '-S', src_real, '-o', 'TARGET'], check=False)
+    if getattr(res, 'returncode', 1) != 0:
+        return []
+    return _split_nonempty_lines(getattr(res, 'stdout', ''))
+
 def get_script_dir():
     return Path(__file__).resolve().parent
 
@@ -877,14 +903,14 @@ class DiskMgrShell(cmd.Cmd):
                 except:
                     pass
                 
-                res = run_command(['findmnt', '-rn', '-S', mapper_path, '-o', 'TARGET'], check=False)
-                if res.returncode == 0 and res.stdout.strip():
-                    mountpoint = res.stdout.strip()
+                targets = find_mount_targets(mapper_path)
+                if targets:
+                    mountpoint = ", ".join(targets)
                     state = "MOUNTED"
             elif is_luks == "N" and state != "MISSING":
-                 res = run_command(['findmnt', '-rn', '-S', os.path.realpath(path), '-o', 'TARGET'], check=False)
-                 if res.returncode == 0 and res.stdout.strip():
-                     mountpoint = res.stdout.strip()
+                 targets = find_mount_targets(path)
+                 if targets:
+                     mountpoint = ", ".join(targets)
                      state = "MOUNTED"
 
             # Only show mountpoint if actually MOUNTED
@@ -1276,24 +1302,32 @@ class DiskMgrShell(cmd.Cmd):
         if not os.path.exists(mountpoint):
             run_command(['mkdir', '-p', mountpoint], sudo=True)
             
-        # Check if mounted
-        res = run_command(['findmnt', '-rn', '-S', target_to_mount, '-o', 'TARGET'], check=False)
-        current_mnt = res.stdout.strip()
+        # Check if mounted (may have multiple mount targets)
+        current_targets = find_mount_targets(target_to_mount)
 
-        if not current_mnt:
+        if not current_targets:
             log(f"Mounting {target_to_mount} to {mountpoint}...")
             run_command(['mount', target_to_mount, mountpoint], sudo=True)
             log("Mounted.")
-        elif current_mnt != mountpoint:
-            log(f"Disk is mounted at {current_mnt} (system default). Overriding...")
+        elif mountpoint in current_targets:
+            extra = [t for t in current_targets if t != mountpoint]
+            if extra:
+                log(f"Disk is also mounted at {', '.join(extra)}. Unmounting extra mount(s)...")
+                for mp in extra:
+                    try:
+                        run_command(['umount', mp], sudo=True)
+                    except Exception as e:
+                        log(f"Failed to unmount {mp}: {e}. It may be in use.", 'WARN')
+            log(f"Already mounted at {mountpoint}.")
+        else:
+            log(f"Disk is mounted at {', '.join(current_targets)} (system default). Overriding...")
             try:
-                run_command(['umount', current_mnt], sudo=True)
+                for mp in current_targets:
+                    run_command(['umount', mp], sudo=True)
                 run_command(['mount', target_to_mount, mountpoint], sudo=True)
                 log(f"Successfully moved mount to {mountpoint}")
             except Exception as e:
                 log(f"Failed to override mount: {e}. It may be in use.", 'WARN')
-        else:
-            log(f"Already mounted at {mountpoint}.")
 
     def do_close(self, arg):
         '''Unmount and lock (if encrypted) a disk: close <name>
@@ -1321,11 +1355,11 @@ class DiskMgrShell(cmd.Cmd):
         # Unmount
         unmounted = False
         # 1. Try by mapper
-        res = run_command(['findmnt', '-rn', '-S', mapper_path, '-o', 'TARGET'], check=False)
-        if res.returncode == 0 and res.stdout.strip():
-            mp = res.stdout.strip()
-            log(f"Unmounting {mp}...")
-            run_command(['umount', mp], sudo=True)
+        targets = find_mount_targets(mapper_path)
+        if targets:
+            for mp in targets:
+                log(f"Unmounting {mp}...")
+                run_command(['umount', mp], sudo=True)
             unmounted = True
         
         # 2. Try by source path (for non-LUKS)
@@ -1333,11 +1367,11 @@ class DiskMgrShell(cmd.Cmd):
             self.mappings = read_luks_map()
             if name in self.mappings:
                 src = self.mappings[name]
-                res = run_command(['findmnt', '-rn', '-S', src, '-o', 'TARGET'], check=False)
-                if res.returncode == 0 and res.stdout.strip():
-                    mp = res.stdout.strip()
-                    log(f"Unmounting {mp}...")
-                    run_command(['umount', mp], sudo=True)
+                targets = find_mount_targets(src)
+                if targets:
+                    for mp in targets:
+                        log(f"Unmounting {mp}...")
+                        run_command(['umount', mp], sudo=True)
                     unmounted = True
 
         # 3. Try by guess
@@ -1453,11 +1487,15 @@ class DiskMgrShell(cmd.Cmd):
             elif fstype == 'xfs':
                 # XFS requires unmount
                 remount_needed = False
-                if mountpoint:
-                    log(f"XFS requires unmounting to label. Unmounting {mountpoint}...")
+                targets = find_mount_targets(target_dev)
+                if targets:
+                    log(f"XFS requires unmounting to label. Unmounting {', '.join(targets)}...")
                     try:
-                        run_command(['umount', mountpoint], sudo=True)
+                        for mp in targets:
+                            run_command(['umount', mp], sudo=True)
                         remount_needed = True
+                        # Best effort: restore the "primary" mount after relabel.
+                        mountpoint = mountpoint or targets[0]
                     except Exception as e:
                         log(f"Failed to unmount: {e}", 'ERROR')
                         return
@@ -1475,7 +1513,8 @@ class DiskMgrShell(cmd.Cmd):
                         try:
                              run_command(['mount', target_dev, mountpoint], sudo=True)
                              # Update mountpoint variable for the --remount logic below
-                             mountpoint = run_command(['findmnt', '-rn', '-S', target_dev, '-o', 'TARGET'], check=False).stdout.strip()
+                             targets = find_mount_targets(target_dev)
+                             mountpoint = targets[0] if targets else None
                         except Exception as e:
                             log(f"Failed to remount: {e}. You may need to mount manually.", 'ERROR')
 
@@ -1497,19 +1536,28 @@ class DiskMgrShell(cmd.Cmd):
                     return
 
             # Get latest mountpoint after label changes (especially for XFS which we might have remounted)
-            res = run_command(['findmnt', '-rn', '-S', target_dev, '-o', 'TARGET'], check=False)
-            current_mp = res.stdout.strip()
-            
-            if current_mp == new_mountpoint:
-                log(f"Already mounted at {new_mountpoint}.")
+            current_targets = find_mount_targets(target_dev)
+
+            if new_mountpoint in current_targets:
+                extra = [t for t in current_targets if t != new_mountpoint]
+                if extra:
+                    log(f"Already mounted at {new_mountpoint}; unmounting extra mount(s): {', '.join(extra)}")
+                    try:
+                        for mp in extra:
+                            run_command(['umount', mp], sudo=True)
+                    except Exception as e:
+                        log(f"Failed to unmount extra mount(s): {e}", 'ERROR')
+                else:
+                    log(f"Already mounted at {new_mountpoint}.")
                 return
 
-            if current_mp:
-                log(f"Unmounting {current_mp} for remount...")
+            if current_targets:
+                log(f"Unmounting {', '.join(current_targets)} for remount...")
                 try:
-                    run_command(['umount', current_mp], sudo=True)
+                    for mp in current_targets:
+                        run_command(['umount', mp], sudo=True)
                 except Exception as e:
-                    log(f"Failed to unmount {current_mp}: {e}", 'ERROR')
+                    log(f"Failed to unmount existing mount(s): {e}", 'ERROR')
                     return
 
             log(f"Mounting {target_dev} to {new_mountpoint}...")
@@ -1790,8 +1838,12 @@ class DiskMgrShell(cmd.Cmd):
         mapper_path = f"/dev/mapper/{name}"
         target = mapper_path if os.path.exists(mapper_path) else devnode
         
-        res = run_command(['findmnt', '-rn', '-S', target, '-o', 'TARGET'], check=False)
-        return res.stdout.strip() if res.returncode == 0 else None
+        targets = find_mount_targets(target)
+        if not targets:
+            return None
+
+        preferred = f"/media/{os.environ.get('USER', 'root')}/{name}"
+        return preferred if preferred in targets else targets[0]
 
     def do_sync(self, arg):
         '''Synchronize two mounted disks: sync <secondary_name> <primary_name>
