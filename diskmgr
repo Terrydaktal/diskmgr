@@ -283,6 +283,52 @@ def _parse_smart_error_log_count(out):
             return cnt
     return None
 
+def _smartctl_looks_seagate(out):
+    if not out:
+        return False
+    # Common smartctl identifiers for Seagate HDDs.
+    if re.search(r"(?im)^Model Family:.*Seagate", out):
+        return True
+    if re.search(r"(?im)^(Device Model|Product):\s*Seagate", out):
+        return True
+    # Most Seagate HDDs report model starting with "ST".
+    if re.search(r"(?im)^Device Model:\s*ST[0-9A-Z]", out):
+        return True
+    return False
+
+def _decode_seagate_command_timeout(raw_val):
+    """
+    Seagate often packs SMART 188 into 6 bytes (3x 16-bit counters).
+
+    smartctl prints the entire 48-bit value as a decimal integer, which can look huge.
+    Decode it as:
+      hi word:  >7.5s bucket (included in >5s)
+      mid word: >5s bucket
+      lo word:  total command timeouts
+    """
+    if raw_val is None:
+        return None
+    s = str(raw_val).strip().replace(",", "")
+    if not s or not re.fullmatch(r"[0-9]+", s):
+        return None
+    try:
+        v = int(s, 10)
+    except ValueError:
+        return None
+    if v < 0 or v >= (1 << 48):
+        return None
+    hx = f"{v:012x}"  # 6 bytes
+    hi = int(hx[0:4], 16)
+    mid = int(hx[4:8], 16)
+    lo = int(hx[8:12], 16)
+    return {
+        "raw_int": v,
+        "hex": "0x" + hx,
+        "timeouts": lo,
+        "gt_5s": mid,
+        "gt_7_5s": hi,
+    }
+
 def _parse_smart_long_selftest_failures(out):
     """
     Count non-success statuses in the SMART Self-test log for extended/long tests.
@@ -2402,12 +2448,21 @@ class DiskMgrShell(cmd.Cmd):
                 return f"{Colors.OKGREEN}{t}{Colors.ENDC}"
             return f"{Colors.FAIL}{t}{Colors.ENDC}"
 
+        # Fix Seagate SMART 188 formatting: decode packed 48-bit value into real counters.
+        cmd188_disp = cmd188
+        cmd188_for_color = cmd188
+        if _smartctl_looks_seagate(out):
+            d188 = _decode_seagate_command_timeout(cmd188)
+            if d188 and d188["raw_int"] > 0xFFFF:
+                cmd188_for_color = d188["timeouts"]
+                cmd188_disp = f'{d188["timeouts"]} (packed: >5s={d188["gt_5s"]}, >7.5s={d188["gt_7_5s"]}; raw={d188["raw_int"]} {d188["hex"]})'
+
         # Compact, colored summary block first.
         print(f"\n{Colors.BOLD}Key SMART signals (earliest -> most severe):{Colors.ENDC}")
         print(f"1. 199 UDMA_CRC_Error_Count: {_color_val('crc', crc199)}")
         print("   - Earliest sign of trouble, usually cable/USB bridge/port/noise, not the platter.")
         print("   - Severity depends on whether it's increasing.")
-        print(f"2. 188 Command_Timeout: {_color_val('timeout', cmd188)}")
+        print(f"2. 188 Command_Timeout: {_color_val('timeout', cmd188_for_color)} ({_v(cmd188_disp)})")
         print("   - Commands timing out can be flaky power, cabling/bridge issues, or a struggling drive.")
         print("   - Increasing is concerning.")
         print(f"3. SMART error log entries / recent I/O errors: {_color_val('errlog', errlog)}")
