@@ -2600,6 +2600,17 @@ class DiskMgrShell(cmd.Cmd):
         else:
             print(f"{Colors.BOLD}SMART queried on:{Colors.ENDC} {disk_dev}")
 
+        # NVMe drives don't expose ATA SMART attributes/logs in the same format. For NVMe, just show smartctl output.
+        is_nvme = os.path.basename(disk_dev).startswith('nvme') or ('SMART/Health Information (NVMe Log' in out) or ('NVMe Version' in out)
+        if is_nvme:
+            if out.strip():
+                print(out.rstrip())
+            if err.strip():
+                print(err.rstrip(), file=sys.stderr)
+            if getattr(res, 'returncode', 0) != 0:
+                log(f"smartctl exit status: {res.returncode} (non-zero may indicate SMART warnings).", 'WARN')
+            return
+
         def _print_smartctl_info_block():
             """
             Print the smartctl prolog + information section, but not the full attribute tables/logs.
