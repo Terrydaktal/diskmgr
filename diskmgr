@@ -304,6 +304,34 @@ def _decode_seagate_command_timeout(raw_val):
         "gt_7_5s": hi,
     }
 
+def _decode_seagate_hi16_lo32(raw_val):
+    """
+    Common Seagate packing for some SMART RAW fields:
+      RAW = (hi16_error_count << 32) | lo32_operation_count
+
+    This is often seen for attribute 1 (Raw_Read_Error_Rate) and 7 (Seek_Error_Rate),
+    where RAW is not "number of errors" in the intuitive sense.
+
+    Returns dict with raw_int, hex, errors, ops; or None if not parseable.
+    """
+    if raw_val is None:
+        return None
+    s = str(raw_val).strip().replace(",", "")
+    if not s or not re.fullmatch(r"[0-9]+", s):
+        return None
+    try:
+        v = int(s, 10)
+    except ValueError:
+        return None
+    if v < 0 or v >= (1 << 48):
+        return None
+    return {
+        "raw_int": v,
+        "hex": f"0x{v:012x}",
+        "errors": (v >> 32) & 0xFFFF,
+        "ops": v & 0xFFFFFFFF,
+    }
+
 def _parse_smart_long_selftest_failures(out):
     """
     Count non-success statuses in the SMART Self-test log for extended/long tests.
@@ -2711,6 +2739,14 @@ class DiskMgrShell(cmd.Cmd):
                 return "-"
 
             raw = row.get("raw", "-")
+            if aid in (1, 7) and _smartctl_looks_seagate(out):
+                # Common Seagate packing: hi16=error_count, lo32=op_count.
+                d = _decode_seagate_hi16_lo32(raw)
+                if d:
+                    if aid == 1:
+                        return f"read_ops={d['ops']:,}, read_errors={d['errors']} (raw={d['hex']}; VALUE {row.get('value', '-')}, THRESH {row.get('thresh', '-')})"
+                    return f"seek_ops={d['ops']:,}, seek_errors={d['errors']} (raw={d['hex']}; VALUE {row.get('value', '-')}, THRESH {row.get('thresh', '-')})"
+
             if aid in (5, 1, 7, 10):
                 return f"{raw} (VALUE {row.get('value', '-')}, THRESH {row.get('thresh', '-')})"
             if aid == 187:
@@ -2739,8 +2775,8 @@ class DiskMgrShell(cmd.Cmd):
             (4, 197, "Current_Pending_Sector", "Unstable sectors awaiting re-read/rewrite; data at risk until resolved."),
             (5, 184, "End-to-End_Error", "Internal data-path corruption (cache/buffer <-> media); logic/RAM path issues."),
             (6, 10, "Spin_Retry_Count", "Spin-up retries; motor/bearing/power trouble can trap data permanently."),
-            (7, 1, "Raw_Read_Error_Rate", "Vendor-specific; watch normalized VALUE trend for rapid decline (RAW is noisy)."),
-            (8, 7, "Seek_Error_Rate", "Vendor-specific; watch normalized VALUE trend for rapid decline (RAW is noisy)."),
+            (7, 1, "Raw_Read_Error_Rate", "Seagate RAW is often packed; treat normalized VALUE trend as primary. diskmgr shows decoded ops+errors when possible."),
+            (8, 7, "Seek_Error_Rate", "Seagate RAW is often packed; treat normalized VALUE trend as primary. diskmgr shows decoded ops+errors when possible."),
             (9, 3, "Spin_Up_Time", "Drive taking longer to become ready; can indicate wear (trend matters)."),
             (10, 188, "Command_Timeout", "Drive commands timing out/hanging; often link/power/bridge issues (trend matters)."),
             (11, 199, "UDMA_CRC_Error_Count", "Interface CRC errors; usually cable/port/bridge noise, not platter damage."),
