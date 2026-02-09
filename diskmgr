@@ -2086,7 +2086,7 @@ class DiskMgrShell(cmd.Cmd):
         '''Clone one disk or partition to another: clone <src_name> <dst_name>
         
         WARNING (DATA DESTRUCTION):
-        - This command writes directly to the destination block device (like running dd).
+        - This command writes directly to the destination block device (like running ddrescue/dd).
         - The destination is overwritten starting at byte 0. Any existing partition table,
           filesystems, and files on the destination WILL BE DESTROYED.
         - If the destination is larger than the source, bytes beyond the source size are
@@ -2103,7 +2103,7 @@ class DiskMgrShell(cmd.Cmd):
         2.  Size Validation: Queries 'blockdev --getsize64' for both. Aborts if dst < src.
         3.  Safety Audit: Verifies that the target is NOT the system root drive.
         4.  Confirmation: Requires solving two math problems to authorize data destruction.
-        5.  Cloning: Executes 'dd' with 16MiB buffers and direct I/O for maximum throughput.
+        5.  Cloning: Executes 'ddrescue --force <src> <dst> <mapfile>' to clone and record progress.
         6.  Sync: Flushes kernel buffers to ensure all data is physically committed to disk.
 
         Note: This is a DESTRUCTIVE operation. Solving two math problems is MANDATORY to proceed.
@@ -2175,6 +2175,26 @@ class DiskMgrShell(cmd.Cmd):
             log(f"Failed to verify disk sizes: {e}", 'ERROR')
             return
 
+        ddrescue_bin = _find_tool_or_common_paths('ddrescue', [
+            '/usr/bin/ddrescue',
+            '/bin/ddrescue',
+            '/usr/local/bin/ddrescue',
+        ])
+        if ddrescue_bin is None:
+            log("ddrescue not found. Install 'gddrescue' and retry.", 'ERROR')
+            return
+
+        # Refuse to run if anything on the destination device tree is mounted.
+        # (Whole-disk clone should not proceed if any target partitions are mounted.)
+        try:
+            res_m = run_command(['lsblk', '-nr', '-o', 'MOUNTPOINT', dst_real], check=False)
+            mounts = [ln.strip() for ln in (getattr(res_m, 'stdout', '') or '').splitlines() if ln.strip()]
+            if mounts:
+                log(f"Target has mounted filesystems ({', '.join(mounts)}). Unmount/close {dst_name} first.", 'ERROR')
+                return
+        except Exception:
+            pass
+
         # Confirmation
         if not self.extensive_confirm(f"{dst_name} ({dst_real})"):
             return
@@ -2184,10 +2204,22 @@ class DiskMgrShell(cmd.Cmd):
         
         # Perform clone
         try:
-            # dd if=src of=dst bs=16M status=progress oflag=direct conv=fsync
-            cmd = ['dd', f'if={src_real}', f'of={dst_real}', 'bs=16M', 'status=progress', 'oflag=direct', 'conv=fsync']
-            run_command(cmd, sudo=True)
-            log("Cloning complete.")
+            safe_src = re.sub(r'[^A-Za-z0-9_.-]+', '_', src_name)
+            safe_dst = re.sub(r'[^A-Za-z0-9_.-]+', '_', dst_name)
+            mapdir = Path('/tmp/diskmgr_clone_maps')
+            os.makedirs(mapdir, exist_ok=True)
+            mapfile = str(mapdir / f"{safe_src}_to_{safe_dst}.map")
+
+            log(f"ddrescue mapfile: {mapfile}")
+            cmd = [ddrescue_bin, '--force', src_real, dst_real, mapfile]
+            res = run_command(cmd, sudo=True, capture_output=False, check=False)
+            run_command(['sync'], sudo=True, check=False)
+
+            rc = getattr(res, 'returncode', 0)
+            if rc == 0:
+                log("Cloning complete.")
+            else:
+                log(f"Cloning completed with ddrescue exit status {rc}. Check the mapfile for unreadable areas: {mapfile}", 'WARN')
         except Exception as e:
             log(f"Cloning failed: {e}", 'ERROR')
 
