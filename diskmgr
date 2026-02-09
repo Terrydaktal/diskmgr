@@ -1980,14 +1980,14 @@ class DiskMgrShell(cmd.Cmd):
             log("smartctl not found. Install 'smartmontools' and retry.", 'ERROR')
             return
 
-        dev = os.path.realpath(src)
+        mapped_dev = os.path.realpath(src)
 
         # If the mapping points at a partition, operate on the parent disk (/dev/sdX, /dev/nvme0n1).
-        disk_dev = dev
+        disk_dev = mapped_dev
         try:
-            typ = run_command(['lsblk', '-no', 'TYPE', dev], check=False).stdout.strip()
+            typ = run_command(['lsblk', '-no', 'TYPE', mapped_dev], check=False).stdout.strip()
             if typ != 'disk':
-                pk = run_command(['lsblk', '-no', 'PKNAME', dev], check=False).stdout.strip()
+                pk = run_command(['lsblk', '-no', 'PKNAME', mapped_dev], check=False).stdout.strip()
                 if pk:
                     disk_dev = os.path.realpath(f"/dev/{pk}")
         except Exception:
@@ -2045,7 +2045,12 @@ class DiskMgrShell(cmd.Cmd):
 
         mode = "-d sat" if ('-d' in cmd) else "-a"
         extra = f"{tran}" if tran else "unknown transport"
-        print(f"\n{Colors.HEADER}--- SMART health: {name} -> {disk_dev} ({extra}, smartctl {mode}) ---{Colors.ENDC}")
+        print(f"\n{Colors.HEADER}--- SMART health: {name} ({extra}, smartctl {mode}) ---{Colors.ENDC}")
+        print(f"{Colors.BOLD}Mapped device:{Colors.ENDC} {mapped_dev}")
+        if mapped_dev != disk_dev:
+            print(f"{Colors.BOLD}SMART queried on:{Colors.ENDC} {disk_dev} (SMART is disk-level, not partition-level)")
+        else:
+            print(f"{Colors.BOLD}SMART queried on:{Colors.ENDC} {disk_dev}")
 
         if overall or temp or poh or realloc or pending or offline_unc:
             if overall:
