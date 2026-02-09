@@ -71,16 +71,16 @@ List all configured mappings and available system disks in a single table.
 
 ```text
 --- Disk Management Table (/home/lewis/Dev/diskmgr/diskmap.tsv) ---
-#     NAME  LUKS  STATE      FSTYPE       LABEL  MOUNTPOINT         DEVICE     SIZE    PERSISTENT PATH
----------------------------------------------------------------------------------------------------------------------------------------------------------
-[1]   1b    -     MISSING    -            -      -                  -          -       /dev/disk/by-id/wwn-0x5000c500e31e6cb2
-[2]   1a    Y     CLOSED     crypto_LUKS  -      -                  sda2       931.4G  /dev/disk/by-id/wwn-0x5000c500a89d6e44-part2
-[3]   data  N     MOUNTED    ext4         data   /media/lewis/data  nvme1n1p1  931.5G  /dev/disk/by-id/nvme-WD_Blue_SN570_1TB_21353X644609-part1
-[U1]  -     N     UNMOUNTED  -            -      -                  sda        931.5G  /dev/disk/by-id/wwn-0x5000c500a89d6e44
-[U2]  -     N     UNMOUNTED  -            -      -                  sda1       128M    /dev/disk/by-id/wwn-0x5000c500a89d6e44-part1
-[U3]  -     N     UNMOUNTED  -            -      -                  nvme0n1    1.8T    /dev/disk/by-id/nvme-eui.e8238fa6bf530001001b448b42d60852
-[U4]  -     N     MOUNTED    ext4         -      /                  nvme0n1p1  1.8T    /dev/disk/by-id/nvme-WD_BLACK_SN8100_2000GB_25334X800147_1-part1
-[U5]  -     N     UNMOUNTED  -            -      -                  nvme1n1    931.5G  /dev/disk/by-id/nvme-eui.e8238fa6bf530001001b444a49598af9
+#     NAME  LUKS  STATE      FSTYPE  LABEL  MOUNTPOINT          DEVICE      SIZE    PERSISTENT PATH
+------------------------------------------------------------------------------------------------------------------------------------------------------
+[1]   1b    Y     MOUNTED    ext4    1b     /media/lewis/1b     sdb(dm-1)   1.8T    /dev/disk/by-id/wwn-0x5000c500e31e6cb2
+[2]   1a    Y     MOUNTED    ext4    1a     /media/lewis/1a     sda2(dm-0)  931.4G  /dev/disk/by-id/wwn-0x5000c500a89d6e44-part2
+[3]   data  N     MOUNTED    ext4    data   /media/lewis/data1  nvme1n1p1   931.5G  /dev/disk/by-id/nvme-WD_Blue_SN570_1TB_21353X644609-part1
+[U1]  -     N     UNMOUNTED  -       -      -                   sda         931.5G  /dev/disk/by-id/wwn-0x5000c500a89d6e44
+[U2]  -     N     UNMOUNTED  -       -      -                   sda1        128M    /dev/disk/by-id/ata-ST1000LM035-1RK172_WDE63N22-part1
+[U3]  -     N     UNMOUNTED  -       -      -                   nvme0n1     1.8T    /dev/disk/by-id/nvme-eui.e8238fa6bf530001001b448b42d60852
+[U4]  -     N     MOUNTED    ext4    -      /                   nvme0n1p1   1.8T    /dev/disk/by-id/nvme-WD_BLACK_SN8100_2000GB_25334X800147_1-part1
+[U5]  -     N     UNMOUNTED  -       -      -                   nvme1n1     931.5G  /dev/disk/by-id/nvme-eui.e8238fa6bf530001001b444a49598af9
 ```
 
 ## Command Reference: `layout`
@@ -103,30 +103,13 @@ Display the physical partition layout and free space for all plugged-in disks.
 ### Example Output
 
 ```text
-Disk: /dev/sda (ST1000LM035-1RK172) [gpt] [Sector: L512/P4096] [Total Sectors: 1953525168]
-[ GPT Primary 34s (17408.00B) ] [ free 2014s (1007.00KiB) ] [ sda1 - 262144s (128.00MiB) (msftres, no_automount) ] [ sda2 - 1953259520s (953740.00MiB ≈ 931.4GiB) (msftdata) ] [ free 1423s (711.50KiB) ] [ GPT Backup 33s (16896.00B) ]
+Disk: /dev/sda (ST1000LM035-1RK172)
 
-NAME   FSTYPE      FSVER LABEL UUID                                 FSAVAIL FSUSE% MOUNTPOINTS
-sda
-├─sda1
-└─sda2 crypto_LUKS 2           e038a8b5-d3a7-4bbb-bbea-5bed8cc07a04
------------------------------------------------------------------------------------------------------------------------------------------------------------
+Disk: /dev/sdb (ST2000DM008-2FR102)
 
-Disk: /dev/nvme0n1 (WD_BLACK SN8100 2000GB) [msdos] [Sector: L512/P512] [Total Sectors: 3907029168]
-[ MBR 2s (1024.00B) ] [ free 2046s (1023.00KiB) ] [ nvme0n1p1 ext4 3907026944s (1907728.00MiB ≈ 1863.0GiB) (boot) ] [ free 176s (88.00KiB) ]
+Disk: /dev/nvme0n1 (WD_BLACK SN8100 2000GB)
 
-NAME        FSTYPE FSVER LABEL UUID                                 FSAVAIL FSUSE% MOUNTPOINTS
-nvme0n1
-└─nvme0n1p1 ext4   1.0         88f1dad3-95c6-418e-bea8-f5f3e072ea29  766.3G    53% /
------------------------------------------------------------------------------------------------------------------------------------------------------------
-
-Disk: /dev/nvme1n1 (WD Blue SN570 1TB) [msdos] [Sector: L512/P512] [Total Sectors: 1953525168]
-[ MBR 2s (1024.00B) ] [ free 2046s (1023.00KiB) ] [ nvme1n1p1 ext4 1953523120s (953868.71MiB ≈ 931.5GiB) ]
-
-NAME        FSTYPE FSVER LABEL UUID                                 FSAVAIL FSUSE% MOUNTPOINTS
-nvme1n1
-└─nvme1n1p1 ext4   1.0   data  72c22012-b161-4e2a-a762-94ff7fda47f9  311.3G    61% /media/lewis/data
------------------------------------------------------------------------------------------------------------------------------------------------------------
+Disk: /dev/nvme1n1 (WD Blue SN570 1TB)
 ```
 
 ## Command Reference: `boot`
@@ -152,30 +135,21 @@ Device: /dev/sda2 (crypto_LUKS)
   Result: LUKS container is LOCKED. Please 'open' this disk to scan for boot entries.
 ------------------------------------------------------------
 
+Device: /dev/dm-0 (ext4)
+  Result: Mounted at /media/lewis/1a, but no GRUB configuration found.
+------------------------------------------------------------
+
+Device: /dev/dm-1 (ext4)
+  Result: Mounted at /media/lewis/1b, but no GRUB configuration found.
+------------------------------------------------------------
+
 Device: /dev/nvme0n1p1 (ext4)
   Result: Found GRUB config at /boot/grub/grub.cfg
-
-Top-level
-  └─ Linux Mint 22.1 Xfce                                                      SEARCH=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]  ROOT=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]
-
-Advanced options for Linux Mint 22.1 Xfce
-  ├─ Linux Mint 22.1 Xfce, with Linux 6.17.9-061709-generic                    SEARCH=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]  ROOT=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]
-  ├─ Linux Mint 22.1 Xfce, with Linux 6.17.9-061709-generic (recovery mode)    SEARCH=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]  ROOT=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]
-  ├─ Linux Mint 22.1 Xfce, with Linux 6.16.12-061612-generic                   SEARCH=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]  ROOT=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]
-  ├─ Linux Mint 22.1 Xfce, with Linux 6.16.12-061612-generic (recovery mode)   SEARCH=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]  ROOT=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]
-  ├─ Linux Mint 22.1 Xfce, with Linux 6.16.0-061600-generic                    SEARCH=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]  ROOT=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]
-  ├─ Linux Mint 22.1 Xfce, with Linux 6.16.0-061600-generic (recovery mode)    SEARCH=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]  ROOT=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]
-  ├─ Linux Mint 22.1 Xfce, with Linux 6.8.0-88-generic                         SEARCH=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]  ROOT=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]
-  ├─ Linux Mint 22.1 Xfce, with Linux 6.8.0-88-generic (recovery mode)         SEARCH=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]  ROOT=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]
-  ├─ Linux Mint 22.1 Xfce, with Linux 6.8.0-85-generic                         SEARCH=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]  ROOT=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]
-  ├─ Linux Mint 22.1 Xfce, with Linux 6.8.0-85-generic (recovery mode)         SEARCH=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]  ROOT=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]
-  ├─ Linux Mint 22.1 Xfce, with Linux 6.8.0-51-generic                         SEARCH=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]  ROOT=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]
-  ├─ Linux Mint 22.1 Xfce, with Linux 6.8.0-51-generic (recovery mode)         SEARCH=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]  ROOT=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]
-  └─ UEFI Firmware Settings                                                    SEARCH=(firmware)                           [-]  ROOT=(firmware)                           [-]
+  Result: Error checking path: Command '['sudo', 'awk', '-F', "'", '\n  /search[[:space:]].*--fs-uuid/ {g_search=$NF}\n\n  /^[[:space:]]*submenu / {\n    submenu_title=$2\n    next\n  }\n\n  /^[[:space:]]*menuentry / {\n    e=$2; search_u=""; root_u=""; in_entry=1\n    next\n  }\n\n  in_entry && search_u=="" && /search[[:space:]].*--fs-uuid/ {search_u=$NF}\n  in_entry && root_u=="" && /(linux|linuxefi)[[:space:]].*root=UUID=/ {\n    match($0,/root=UUID=[0-9a-fA-F-]+/)\n    if (RSTART) root_u=substr($0,RSTART+10,RLENGTH-10)\n  }\n\n  in_entry && /^[[:space:]]*}/ {\n    if (submenu_title=="") submenu_title="Top-level"\n    s = (search_u!="" ? search_u : g_search)\n    r = (root_u!=""   ? root_u   : "-")\n    if (e ~ /UEFI Firmware Settings/) { s="(firmware)"; r="(firmware)" }\n    \n    print submenu_title "\\t" e "\\t" s "\\t" r\n    in_entry=0\n  }\n', '/boot/grub/grub.cfg']' returned non-zero exit status 1.
 ------------------------------------------------------------
 
 Device: /dev/nvme1n1p1 (ext4)
-  Result: Mounted at /media/lewis/data, but no GRUB configuration found.
+  Result: Mounted at /media/lewis/data1, but no GRUB configuration found.
 ------------------------------------------------------------
 ```
 
@@ -274,15 +248,24 @@ Get or set the filesystem label of an OPEN disk: label <name> [new_label]
 ## Command Reference: `remount`
 
 ```text
-Remount an OPEN disk to its label path: remount <name>
+Remount an OPEN disk to its label mountpoint: remount <name>
 
-        Moves the current mount (which may be at /media/$USER/<uuid> or another path)
-        to /media/$USER/<label>. Cleans up old mountpoint directories under /media/$USER
-        if they become empty after unmount.
+        This fixes "mounted twice" and "data1/data2 suffix" issues by moving the mount
+        to the canonical path: /media/$USER/<label>.
 
-        Safety:
-        - Refuses if /media/$USER/<label> is already mounted by a different device.
+        SAFETY RULES:
+        - Refuses if the target mountpoint is already mounted by a different device.
         - Refuses if the target directory exists, is not a mountpoint, and is non-empty.
+        - Refuses if the filesystem has no LABEL (set one with: label <name> <new_label>).
+
+        UNDER THE HOOD:
+        1.  Resolve Device: Uses /dev/mapper/<name> if present, otherwise the mapped source path.
+            If the mapping is LUKS and not OPEN, it refuses.
+        2.  Identify Label: Reads the filesystem LABEL via blkid.
+        3.  Preflight: Validates /media/$USER/<label> is safe to use.
+        4.  Unmount: Unmounts all current mount targets for the device (if any).
+        5.  Cleanup: Removes empty old mountpoint directories under /media/$USER (best-effort rmdir).
+        6.  Mount: Mounts the device at /media/$USER/<label>.
 ```
 
 ## Command Reference: `luks`

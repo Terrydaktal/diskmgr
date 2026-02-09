@@ -1551,15 +1551,24 @@ class DiskMgrShell(cmd.Cmd):
                 return
 
     def do_remount(self, arg):
-        '''Remount an OPEN disk to its label path: remount <name>
+        '''Remount an OPEN disk to its label mountpoint: remount <name>
 
-        Moves the current mount (which may be at /media/$USER/<uuid> or another path)
-        to /media/$USER/<label>. Cleans up old mountpoint directories under /media/$USER
-        if they become empty after unmount.
+        This fixes "mounted twice" and "data1/data2 suffix" issues by moving the mount
+        to the canonical path: /media/$USER/<label>.
 
-        Safety:
-        - Refuses if /media/$USER/<label> is already mounted by a different device.
+        SAFETY RULES:
+        - Refuses if the target mountpoint is already mounted by a different device.
         - Refuses if the target directory exists, is not a mountpoint, and is non-empty.
+        - Refuses if the filesystem has no LABEL (set one with: label <name> <new_label>).
+
+        UNDER THE HOOD:
+        1.  Resolve Device: Uses /dev/mapper/<name> if present, otherwise the mapped source path.
+            If the mapping is LUKS and not OPEN, it refuses.
+        2.  Identify Label: Reads the filesystem LABEL via blkid.
+        3.  Preflight: Validates /media/$USER/<label> is safe to use.
+        4.  Unmount: Unmounts all current mount targets for the device (if any).
+        5.  Cleanup: Removes empty old mountpoint directories under /media/$USER (best-effort rmdir).
+        6.  Mount: Mounts the device at /media/$USER/<label>.
         '''
         parser = CmdArgumentParser(prog='remount', add_help=False)
         parser.add_argument('name')

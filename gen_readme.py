@@ -8,7 +8,7 @@ def strip_ansi(text):
 
 def get_help(cmd_name=None):
     """Run diskmgr help and return the cleaned output."""
-    cmd = ["sudo", "./diskmgr"]
+    cmd = ["./diskmgr"]
     input_str = f"help {cmd_name}\nexit\n" if cmd_name else "help\nexit\n"
     try:
         res = subprocess.run(cmd, input=input_str, capture_output=True, text=True, timeout=10)
@@ -18,7 +18,7 @@ def get_help(cmd_name=None):
 
 def get_example(cmd_name):
     """Run a command and return its output for documentation examples."""
-    cmd = ["sudo", "./diskmgr"]
+    cmd = ["./diskmgr"]
     input_str = f"{cmd_name}\nexit\n"
     try:
         res = subprocess.run(cmd, input=input_str, capture_output=True, text=True, timeout=15)
