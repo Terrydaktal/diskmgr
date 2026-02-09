@@ -9,6 +9,8 @@ import json
 import time
 import argparse
 import random
+import re
+import shutil
 from pathlib import Path
 
 # Configuration
@@ -504,6 +506,9 @@ class DiskMgrShell(cmd.Cmd):
 
         print(f"  {Colors.OKGREEN}sync <sec_name> <pri_name>{Colors.ENDC}")
         print("      Syncs two mounted disks (rsync pri -> sec).")
+
+        print(f"  {Colors.OKGREEN}health <name>{Colors.ENDC}")
+        print("      Shows SMART health (smartctl -a) for the underlying disk (USB uses -d sat).")
         
         print(f"  {Colors.OKGREEN}exit / quit / Ctrl+D{Colors.ENDC}")
         print("      Exit the application.")
@@ -1950,6 +1955,121 @@ class DiskMgrShell(cmd.Cmd):
             log("Cloning complete.")
         except Exception as e:
             log(f"Cloning failed: {e}", 'ERROR')
+
+    def do_health(self, arg):
+        '''Display SMART health for a mapped disk: health <name>
+
+        Runs smartctl against the underlying DISK device for the mapping.
+        - If the mapping points to a partition, diskmgr automatically targets the parent disk.
+        - If the disk transport is USB and the device is /dev/sdX, diskmgr uses:
+              smartctl -d sat -a /dev/sdX
+          (common for USB-SATA bridges).
+        '''
+        args = arg.split()
+        if len(args) != 1:
+            log("Usage: health <name>", 'ERROR')
+            return
+
+        name = args[0]
+        src = self.resolve_target(name, allow_id=False)
+        if not src:
+            log(f"Unknown mapping: '{name}'", 'ERROR')
+            return
+
+        if shutil.which('smartctl') is None:
+            log("smartctl not found. Install 'smartmontools' and retry.", 'ERROR')
+            return
+
+        dev = os.path.realpath(src)
+
+        # If the mapping points at a partition, operate on the parent disk (/dev/sdX, /dev/nvme0n1).
+        disk_dev = dev
+        try:
+            typ = run_command(['lsblk', '-no', 'TYPE', dev], check=False).stdout.strip()
+            if typ != 'disk':
+                pk = run_command(['lsblk', '-no', 'PKNAME', dev], check=False).stdout.strip()
+                if pk:
+                    disk_dev = os.path.realpath(f"/dev/{pk}")
+        except Exception:
+            pass
+
+        tran = ""
+        try:
+            tran = run_command(['lsblk', '-no', 'TRAN', disk_dev], check=False).stdout.strip().lower()
+        except Exception:
+            tran = ""
+
+        use_sat = (tran == 'usb' and os.path.basename(disk_dev).startswith('sd'))
+        cmd = ['smartctl', '-a', disk_dev]
+        if use_sat:
+            cmd = ['smartctl', '-d', 'sat', '-a', disk_dev]
+
+        run_command(['sudo', '-v'])
+
+        res = run_command(cmd, sudo=True, capture_output=True, check=False)
+        out = (res.stdout or "")
+        err = (res.stderr or "")
+
+        # If SAT probing fails on a USB bridge, retry without -d sat as a best-effort fallback.
+        if use_sat and res.returncode != 0 and ("Unknown USB bridge" in (out + err) or "Please specify device type" in (out + err)):
+            log("smartctl -d sat failed on this USB bridge; retrying without '-d sat'...", 'WARN')
+            cmd = ['smartctl', '-a', disk_dev]
+            res = run_command(cmd, sudo=True, capture_output=True, check=False)
+            out = (res.stdout or "")
+            err = (res.stderr or "")
+
+        def _find_first(patterns):
+            for p in patterns:
+                m = re.search(p, out, re.MULTILINE)
+                if m:
+                    return m.group(1).strip()
+            return None
+
+        overall = _find_first([
+            r"^SMART overall-health self-assessment test result:\s*(.+)$",
+            r"^SMART Health Status:\s*(.+)$",
+        ])
+        temp = _find_first([
+            r"^Current Temperature:\s*([0-9]+)\s*C",
+            r"^Temperature:\s*([0-9]+)\s*C",
+            r"^\s*194\s+Temperature_Celsius\s+.*\s([0-9]+)\s*$",
+            r"^\s*190\s+Airflow_Temperature_Cel\s+.*\s([0-9]+)\s*$",
+        ])
+        poh = _find_first([
+            r"^Power On Hours:\s*([0-9,]+)",
+            r"^\s*9\s+Power_On_Hours\s+.*\s([0-9]+)\s*$",
+        ])
+        realloc = _find_first([r"^\s*5\s+Reallocated_Sector_Ct\s+.*\s([0-9]+)\s*$"])
+        pending = _find_first([r"^\s*197\s+Current_Pending_Sector\s+.*\s([0-9]+)\s*$"])
+        offline_unc = _find_first([r"^\s*198\s+Offline_Uncorrectable\s+.*\s([0-9]+)\s*$"])
+
+        mode = "-d sat" if ('-d' in cmd) else "-a"
+        extra = f"{tran}" if tran else "unknown transport"
+        print(f"\n{Colors.HEADER}--- SMART health: {name} -> {disk_dev} ({extra}, smartctl {mode}) ---{Colors.ENDC}")
+
+        if overall or temp or poh or realloc or pending or offline_unc:
+            if overall:
+                print(f"{Colors.BOLD}Overall:{Colors.ENDC} {overall}")
+            if temp:
+                print(f"{Colors.BOLD}Temp:{Colors.ENDC} {temp} C")
+            if poh:
+                print(f"{Colors.BOLD}Power-on hours:{Colors.ENDC} {poh}")
+            if realloc:
+                print(f"{Colors.BOLD}Reallocated sectors:{Colors.ENDC} {realloc}")
+            if pending:
+                print(f"{Colors.BOLD}Pending sectors:{Colors.ENDC} {pending}")
+            if offline_unc:
+                print(f"{Colors.BOLD}Offline uncorrectable:{Colors.ENDC} {offline_unc}")
+            print("")
+
+        if out.strip():
+            print(out.rstrip())
+        if err.strip():
+            print(err.rstrip(), file=sys.stderr)
+
+        # smartctl uses a bitmask exit code; non-zero can mean "drive has issues" and is still useful output.
+        if getattr(res, 'returncode', 0) != 0:
+            log(f"smartctl exit status: {res.returncode} (non-zero may indicate SMART warnings).", 'WARN')
 
     def get_mountpoint(self, name):
         '''Resolves the current mountpoint for a friendly name.'''

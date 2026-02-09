@@ -65,6 +65,8 @@ COMMANDS:
       Clones one disk to another (requires target >= source size).
   sync <sec_name> <pri_name>
       Syncs two mounted disks (rsync pri -> sec).
+  health <name>
+      Shows SMART health (smartctl -a) for the underlying disk (USB uses -d sat).
   exit / quit / Ctrl+D
       Exit the application.
 
@@ -506,6 +508,18 @@ Synchronize two mounted disks: sync <secondary_name> <primary_name>
 
         Note: The SECONDARY disk will be modified to match the PRIMARY disk.
         All files on the secondary that do not exist on the primary will be DELETED.
+```
+
+## Command Reference: `health`
+
+```text
+Display SMART health for a mapped disk: health <name>
+
+        Runs smartctl against the underlying DISK device for the mapping.
+        - If the mapping points to a partition, diskmgr automatically targets the parent disk.
+        - If the disk transport is USB and the device is /dev/sdX, diskmgr uses:
+              smartctl -d sat -a /dev/sdX
+          (common for USB-SATA bridges).
 ```
 
 ## Configuration
