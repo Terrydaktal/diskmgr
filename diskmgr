@@ -880,6 +880,9 @@ class DiskMgrShell(cmd.Cmd):
         print(f"  {Colors.OKGREEN}defrag <name>{Colors.ENDC}")
         print("      Defragments a mounted filesystem and records the timestamp in xattrs (user.last_defrag).")
 
+        print(f"  {Colors.OKGREEN}fsdiag <name>{Colors.ENDC}")
+        print("      Shows filesystem diagnostics, last_defrag xattr, and (ext4 only) a fragmentation score.")
+
         print(f"  {Colors.OKGREEN}health <name>{Colors.ENDC}")
         print("      Shows SMART health (smartctl -a) for the underlying disk (USB uses -d sat).")
 
@@ -3184,6 +3187,164 @@ class DiskMgrShell(cmd.Cmd):
             log(f"Recorded xattr: user.last_defrag={ds} on {mnt}")
         except Exception as e:
             log(f"Defrag failed: {e}", 'ERROR')
+
+    def do_fsdiag(self, arg):
+        '''Filesystem diagnostics: fsdiag <name>
+
+        Shows filesystem-specific diagnostic output and local "maintenance" timestamps.
+
+        - ext4:  sudo tune2fs -l <device>
+                sudo e4defrag -c <mountpoint>   (fragmentation score)
+        - btrfs: sudo btrfs filesystem usage <mountpoint>
+        - xfs:   xfs_info <mountpoint>
+
+        Also reads xattrs from the mountpoint root:
+          user.last_defrag, user.last_scrub
+        '''
+        args = arg.split()
+        if len(args) != 1:
+            log("Usage: fsdiag <name>", 'ERROR')
+            return
+
+        name = args[0]
+        mnt = self.get_mountpoint(name)
+        if not mnt:
+            log(f"Disk '{name}' is not mounted. Run 'open {name}' first.", 'ERROR')
+            return
+
+        fstype = ""
+        src = ""
+        try:
+            res = run_command(['findmnt', '-rn', '-M', mnt, '-o', 'FSTYPE,SOURCE'], check=False)
+            parts = (getattr(res, 'stdout', '') or '').strip().split()
+            if len(parts) >= 2:
+                fstype = parts[0].strip().lower()
+                src = parts[1].strip()
+            else:
+                # Fallback to separate calls.
+                res_fs = run_command(['findmnt', '-rn', '-M', mnt, '-o', 'FSTYPE'], check=False)
+                fstype = (getattr(res_fs, 'stdout', '') or '').strip().lower()
+                res_src = run_command(['findmnt', '-rn', '-M', mnt, '-o', 'SOURCE'], check=False)
+                src = (getattr(res_src, 'stdout', '') or '').strip()
+        except Exception:
+            pass
+
+        src_real = os.path.realpath(src) if src else ""
+
+        def _read_xattr_text(path, key):
+            try:
+                v = os.getxattr(path, key)
+            except OSError:
+                return None
+            try:
+                if isinstance(v, (bytes, bytearray)):
+                    return v.decode('utf-8', errors='replace')
+            except Exception:
+                return str(v)
+            return str(v)
+
+        last_defrag = _read_xattr_text(mnt, 'user.last_defrag')
+        last_scrub = _read_xattr_text(mnt, 'user.last_scrub')
+
+        print(f"\n{Colors.HEADER}{Colors.BOLD}=== Filesystem diagnostics: {name} ==={Colors.ENDC}")
+        print(f"{Colors.BOLD}Mountpoint:{Colors.ENDC} {mnt}")
+        if src_real:
+            print(f"{Colors.BOLD}Source:{Colors.ENDC} {src_real}")
+        if fstype:
+            print(f"{Colors.BOLD}FSType:{Colors.ENDC} {fstype}")
+        print(f"{Colors.BOLD}Last defrag:{Colors.ENDC} {last_defrag or '-'}")
+        print(f"{Colors.BOLD}Last scrub:{Colors.ENDC} {last_scrub or '-'}")
+
+        run_command(['sudo', '-v'])
+
+        # Compute/print "defragmentation state" (ext4 only, best-effort).
+        if fstype == 'ext4':
+            e4defrag_bin = _find_tool_or_common_paths('e4defrag', [
+                '/usr/sbin/e4defrag',
+                '/sbin/e4defrag',
+                '/usr/local/sbin/e4defrag',
+                '/usr/bin/e4defrag',
+                '/bin/e4defrag',
+            ])
+            if e4defrag_bin:
+                res_f = run_command([e4defrag_bin, '-c', mnt], sudo=True, capture_output=True, check=False)
+                frag_out = (getattr(res_f, 'stdout', '') or '') + (getattr(res_f, 'stderr', '') or '')
+                m = re.search(r"(?im)Fragmentation score(?: is)?\s*([0-9]+)\b", frag_out)
+                if m:
+                    try:
+                        score = int(m.group(1), 10)
+                    except ValueError:
+                        score = None
+                    if score is not None:
+                        # e4defrag convention: 0-30: no problem, 31-55: a little, 56+: should defrag.
+                        if score <= 30:
+                            state = f"{Colors.OKGREEN}GOOD{Colors.ENDC}"
+                        elif score <= 55:
+                            state = f"{Colors.WARNING}MEDIUM{Colors.ENDC}"
+                        else:
+                            state = f"{Colors.FAIL}BAD{Colors.ENDC}"
+                        print(f"{Colors.BOLD}Defragmentation state:{Colors.ENDC} {state} (ext4 fragmentation score {score})")
+                else:
+                    print(f"{Colors.BOLD}Defragmentation state:{Colors.ENDC} - (could not parse e4defrag score)")
+            else:
+                print(f"{Colors.BOLD}Defragmentation state:{Colors.ENDC} - (e4defrag not found)")
+        else:
+            print(f"{Colors.BOLD}Defragmentation state:{Colors.ENDC} - (no global defrag metric for {fstype or 'unknown'})")
+
+        # Filesystem diagnostics output (read-only).
+        if fstype == 'ext4':
+            tune2fs_bin = _find_tool_or_common_paths('tune2fs', [
+                '/usr/sbin/tune2fs',
+                '/sbin/tune2fs',
+                '/usr/local/sbin/tune2fs',
+                '/usr/bin/tune2fs',
+                '/bin/tune2fs',
+            ])
+            if tune2fs_bin is None:
+                log("tune2fs not found. Install 'e2fsprogs' to view ext4 diagnostics.", 'WARN')
+                return
+            if not src_real:
+                log("Could not determine source device for this mount (findmnt SOURCE).", 'ERROR')
+                return
+            print(f"\n{Colors.HEADER}{Colors.BOLD}--- tune2fs -l {src_real} ---{Colors.ENDC}")
+            res = run_command([tune2fs_bin, '-l', src_real], sudo=True, capture_output=True, check=False)
+            if (res.stdout or "").strip():
+                print(res.stdout.rstrip())
+            if (res.stderr or "").strip():
+                print(res.stderr.rstrip(), file=sys.stderr)
+        elif fstype == 'btrfs':
+            btrfs_bin = _find_tool_or_common_paths('btrfs', [
+                '/usr/sbin/btrfs',
+                '/sbin/btrfs',
+                '/usr/local/sbin/btrfs',
+                '/usr/bin/btrfs',
+                '/bin/btrfs',
+            ])
+            if btrfs_bin is None:
+                log("btrfs not found. Install 'btrfs-progs' to view btrfs diagnostics.", 'WARN')
+                return
+            print(f"\n{Colors.HEADER}{Colors.BOLD}--- btrfs filesystem usage {mnt} ---{Colors.ENDC}")
+            res = run_command([btrfs_bin, 'filesystem', 'usage', mnt], sudo=True, capture_output=True, check=False)
+            if (res.stdout or "").strip():
+                print(res.stdout.rstrip())
+            if (res.stderr or "").strip():
+                print(res.stderr.rstrip(), file=sys.stderr)
+        elif fstype == 'xfs':
+            xfs_info_bin = _find_tool_or_common_paths('xfs_info', [
+                '/usr/sbin/xfs_info',
+                '/sbin/xfs_info',
+                '/usr/local/sbin/xfs_info',
+                '/usr/bin/xfs_info',
+                '/bin/xfs_info',
+            ]) or 'xfs_info'
+            print(f"\n{Colors.HEADER}{Colors.BOLD}--- xfs_info {mnt} ---{Colors.ENDC}")
+            res = run_command([xfs_info_bin, mnt], sudo=False, capture_output=True, check=False)
+            if (res.stdout or "").strip():
+                print(res.stdout.rstrip())
+            if (res.stderr or "").strip():
+                print(res.stderr.rstrip(), file=sys.stderr)
+        else:
+            log(f"Unsupported or unknown filesystem type '{fstype or 'unknown'}'.", 'ERROR')
 
     def do_scrub(self, arg):
         '''Scrub a mounted btrfs filesystem: scrub <name>
