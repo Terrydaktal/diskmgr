@@ -67,6 +67,8 @@ COMMANDS:
       Syncs two mounted disks (rsync pri -> sec).
   health <name>
       Shows SMART health (smartctl -a) for the underlying disk (USB uses -d sat).
+  refresh <name>
+      Two-pass ddrescue refresh to detect bit rot and force remap of bad sectors (destructive).
   exit / quit / Ctrl+D
       Exit the application.
 
@@ -520,6 +522,30 @@ Display SMART health for a mapped disk: health <name>
         - If the disk transport is USB and the device is /dev/sdX, diskmgr uses:
               smartctl -d sat -a /dev/sdX
           (common for USB-SATA bridges).
+```
+
+## Command Reference: `refresh`
+
+```text
+Refresh a disk to combat bit rot: refresh <name>
+
+        This is a DESTRUCTIVE operation. It performs a chronological process of elimination:
+
+        1) Pre-Write Log (Baseline, read-only):
+           ddrescue --readonly <dev> /dev/null baseline.map
+           Any '-' blocks in baseline.map are classified as "natural" (pre-existing) bad sectors / bit rot.
+
+        2) Refresh Pass (write):
+           ddrescue --force <dev> <dev> refresh.map
+           If refresh.map shows new '-' blocks not present in baseline.map, they are classified as
+           "interruption" corruption (often power-loss / crash during the refresh).
+
+        3) After ddrescue completes:
+           Zero-fill the "natural" bad ranges to force the drive to remap sectors (best-effort).
+
+        FILE MAPPING (ext* only):
+        If debugfs is available and the target is an ext filesystem, diskmgr will attempt to map bad
+        blocks to filenames using debugfs icheck/ncheck output.
 ```
 
 ## Configuration
