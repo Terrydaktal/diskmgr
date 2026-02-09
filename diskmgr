@@ -2569,30 +2569,22 @@ class DiskMgrShell(cmd.Cmd):
                 cmd188_for_color = d188["timeouts"]
                 cmd188_disp = f'{d188["timeouts"]} (packed: >5s={d188["gt_5s"]}, >7.5s={d188["gt_7_5s"]}; raw={d188["raw_int"]} {d188["hex"]})'
 
-        # Compact, colored summary block first.
-        print(f"\n{Colors.BOLD}Key SMART signals (earliest -> most severe):{Colors.ENDC}")
-        print(f"1. 199 UDMA_CRC_Error_Count: {_color_val('crc', crc199)}")
-        print("   - Earliest sign of trouble, usually cable/USB bridge/port/noise, not the platter.")
-        print("   - Severity depends on whether it's increasing.")
-        print(f"2. 188 Command_Timeout: {_color_val('timeout', cmd188_for_color)} ({_v(cmd188_disp)})")
-        print("   - Commands timing out can be flaky power, cabling/bridge issues, or a struggling drive.")
-        print("   - Increasing is concerning.")
-        print(f"3. SMART error log entries / recent I/O errors: {_color_val('errlog', errlog)}")
-        print("   - If the drive logged read/write errors recently, treat it as an early-but-real warning.")
-        print(f"4. 197 Current_Pending_Sector: {_color_val('pending', pend197)}")
-        print("   - Sectors the drive can't read reliably right now.")
-        print("   - Any non-zero is a red flag; increasing is worse.")
-        print(f"5. 198 Offline_Uncorrectable: {_color_val('unc', off198)}")
-        print("   - Unrecoverable sectors found during offline scan.")
-        print("   - Any non-zero is bad.")
-        print(f"6. 187 Reported_Uncorrect: {_color_val('reported', rep187)}")
-        print("   - The drive had to tell the host \"I can't read this.\"")
-        print("   - Any non-zero is serious.")
-        print(f"7. 5 Reallocated_Sector_Ct: {_color_val('realloc', realloc5)}   196 Reallocation_Event_Count: {_color_val('realloc', relocev196)}")
-        print("   - The drive has started swapping bad sectors for spares.")
-        print("   - A small stable number can happen; a number that keeps growing is a strong \"drive is degrading\" signal.")
-        print(f"8. SMART long/extended self-test failures: {_color_val('selftest', long_fail)}")
-        print("   - One of the strongest \"this drive is not trustworthy\" indicators, because it's an end-to-end read test that actually failed.")
+        # Compact, colored summary block first (user-defined hierarchy).
+        print(f"\n{Colors.BOLD}The Revised \"Death Spiral\" Hierarchy:{Colors.ENDC}")
+        print(f"1. 199 UDMA CRC ({Colors.BOLD}The \"Lobby\"{Colors.ENDC}): {_color_val('crc', crc199)}")
+        print("   - It's just a bad cable. Your score is shown above.")
+        print(f"2. 188 Command Timeout ({Colors.BOLD}The \"Stutter\"{Colors.ENDC}): {_color_val('timeout', cmd188_for_color)} ({_v(cmd188_disp)})")
+        print("   - The drive is \"choking\" on something. Your score is shown above.")
+        print(f"3. 197 Current Pending ({Colors.BOLD}The \"Purgatory\"{Colors.ENDC}): {_color_val('pending', pend197)}")
+        print("   - The drive is unsure. Your score is shown above.")
+        print(f"4. 5 Reallocated Sector ({Colors.BOLD}The \"Scar Tissue\"{Colors.ENDC}): {_color_val('realloc', realloc5)}")
+        print("   - The drive fixed a spot using a spare. Your score is shown above.")
+        print(f"5. 187 Reported Uncorrect ({Colors.BOLD}The \"Calamity\"{Colors.ENDC}): {_color_val('reported', rep187)}")
+        print("   - The drive tried to read and failed to provide data to the OS. Your score is shown above.")
+        print(f"6. 198 Offline Uncorrect ({Colors.BOLD}The \"Permanent Scar\"{Colors.ENDC}): {_color_val('unc', off198)}")
+        print("   - Errors found during a self-scan that cannot be mapped out. Your score is shown above.")
+        print(f"7. Self-Test Failure ({Colors.BOLD}The \"Death Certificate\"{Colors.ENDC}): {_color_val('selftest', long_fail)}")
+        print("   - If the internal long test fails, the drive is officially \"End of Life.\" Your score is shown above.")
 
         if overall or temp or poh or realloc or pending or offline_unc:
             if overall:
