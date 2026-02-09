@@ -242,6 +242,95 @@ def _device_is_mounted(dev_path):
             return True
     return False
 
+def _parse_smart_attr_raw(out, attr_id):
+    """
+    Parse a smartctl -a attribute table RAW_VALUE for a given attribute ID.
+    Returns a string (raw value) or None.
+    """
+    if not out:
+        return None
+    for line in str(out).splitlines():
+        s = line.strip()
+        if not s:
+            continue
+        # Attribute table rows typically start with the numeric ID.
+        if not s.startswith(str(attr_id) + " "):
+            continue
+        parts = s.split()
+        if len(parts) < 2:
+            continue
+        if parts[0] != str(attr_id):
+            continue
+        # RAW_VALUE is conventionally the last column.
+        return parts[-1]
+    return None
+
+def _parse_smart_error_log_count(out):
+    if not out:
+        return None
+    lines = str(out).splitlines()
+    for i, line in enumerate(lines):
+        if "SMART Error Log" in line:
+            # Fast-path: "No Errors Logged"
+            for j in range(i, min(i + 40, len(lines))):
+                if lines[j].strip() == "No Errors Logged":
+                    return 0
+            # Otherwise count "Error N occurred at" lines in the next chunk.
+            cnt = 0
+            for j in range(i, min(i + 300, len(lines))):
+                if re.search(r"^\s*Error\s+[0-9]+\s+occurred\s+at\b", lines[j]):
+                    cnt += 1
+            return cnt
+    return None
+
+def _parse_smart_long_selftest_failures(out):
+    """
+    Count non-success statuses in the SMART Self-test log for extended/long tests.
+    Returns an int or None if the section isn't present.
+    """
+    if not out:
+        return None
+    lines = str(out).splitlines()
+    start = None
+    for i, line in enumerate(lines):
+        if "SMART Self-test log" in line:
+            start = i
+            break
+    if start is None:
+        return None
+
+    # Find the table header line with "#"
+    header = None
+    for i in range(start, min(start + 60, len(lines))):
+        if lines[i].lstrip().startswith("#"):
+            header = i
+            break
+        if "No self-tests have been logged" in lines[i]:
+            return 0
+    if header is None:
+        # Section exists but we couldn't find the table.
+        return None
+
+    fail = 0
+    for i in range(header + 1, min(header + 200, len(lines))):
+        line = lines[i].strip()
+        if not line:
+            break
+        if not line.startswith("#"):
+            continue
+        # Common format: "# 1  Extended offline  Completed without error  00%  1234  -"
+        cols = line.split()
+        if len(cols) < 4:
+            continue
+        desc = " ".join(cols[2:4])  # "Extended offline" or "Short offline"
+        if "Extended offline" not in desc and "Long offline" not in desc:
+            continue
+        # Status begins after description; search the raw line for "Completed without error"
+        if "Completed without error" in line:
+            continue
+        fail += 1
+    return fail
+
 def get_script_dir():
     return Path(__file__).resolve().parent
 
@@ -2224,6 +2313,44 @@ class DiskMgrShell(cmd.Cmd):
             print(f"{Colors.BOLD}SMART queried on:{Colors.ENDC} {disk_dev} (SMART is disk-level, not partition-level)")
         else:
             print(f"{Colors.BOLD}SMART queried on:{Colors.ENDC} {disk_dev}")
+
+        # Key HDD indicators (earliest -> most severe), with current values if present.
+        crc199 = _parse_smart_attr_raw(out, 199)
+        cmd188 = _parse_smart_attr_raw(out, 188)
+        errlog = _parse_smart_error_log_count(out)
+        pend197 = _parse_smart_attr_raw(out, 197)
+        off198 = _parse_smart_attr_raw(out, 198)
+        rep187 = _parse_smart_attr_raw(out, 187)
+        realloc5 = _parse_smart_attr_raw(out, 5)
+        relocev196 = _parse_smart_attr_raw(out, 196)
+        long_fail = _parse_smart_long_selftest_failures(out)
+
+        def _v(x):
+            return x if x is not None else "-"
+
+        print(f"\n{Colors.BOLD}Key SMART signals (earliest -> most severe):{Colors.ENDC}")
+        print(f"1. 199 UDMA_CRC_Error_Count: {_v(crc199)}")
+        print("   - Earliest sign of trouble, usually cable/USB bridge/port/noise, not the platter.")
+        print("   - Severity depends on whether it's increasing.")
+        print(f"2. 188 Command_Timeout: {_v(cmd188)}")
+        print("   - Commands timing out can be flaky power, cabling/bridge issues, or a struggling drive.")
+        print("   - Increasing is concerning.")
+        print(f"3. SMART error log entries / recent I/O errors: {_v(errlog)}")
+        print("   - If the drive logged read/write errors recently, treat it as an early-but-real warning.")
+        print(f"4. 197 Current_Pending_Sector: {_v(pend197)}")
+        print("   - Sectors the drive can't read reliably right now.")
+        print("   - Any non-zero is a red flag; increasing is worse.")
+        print(f"5. 198 Offline_Uncorrectable: {_v(off198)}")
+        print("   - Unrecoverable sectors found during offline scan.")
+        print("   - Any non-zero is bad.")
+        print(f"6. 187 Reported_Uncorrect: {_v(rep187)}")
+        print("   - The drive had to tell the host \"I can't read this.\"")
+        print("   - Any non-zero is serious.")
+        print(f"7. 5 Reallocated_Sector_Ct: {_v(realloc5)}   196 Reallocation_Event_Count: {_v(relocev196)}")
+        print("   - The drive has started swapping bad sectors for spares.")
+        print("   - A small stable number can happen; a number that keeps growing is a strong \"drive is degrading\" signal.")
+        print(f"8. SMART long/extended self-test failures: {_v(long_fail)}")
+        print("   - One of the strongest \"this drive is not trustworthy\" indicators, because it's an end-to-end read test that actually failed.")
 
         if overall or temp or poh or realloc or pending or offline_unc:
             if overall:
