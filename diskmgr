@@ -110,6 +110,48 @@ def cleanup_mountpoint_dir(mountpoint):
     if getattr(res, 'returncode', 1) == 0:
         log(f"Removed mountpoint directory {mountpoint}")
 
+def _sysfs_block_name(dev_path):
+    """Return kernel block name (e.g. sda2, nvme0n1p1, dm-0) for a /dev path."""
+    return os.path.basename(os.path.realpath(dev_path))
+
+def _sysfs_to_parent_disk_name(block_name, max_hops=16):
+    """
+    Best-effort: resolve a block device name to its underlying whole-disk name.
+
+    - Partitions: sda2 -> sda, nvme0n1p1 -> nvme0n1
+    - dm devices: dm-0 -> first slave (often sda2), then keep resolving
+    """
+    cur = block_name
+    for _ in range(max_hops):
+        sys_path = f"/sys/class/block/{cur}"
+        if not os.path.exists(sys_path):
+            break
+
+        # If it's a device-mapper node, walk down to its first slave.
+        if cur.startswith("dm-"):
+            slaves_dir = os.path.join(sys_path, "slaves")
+            try:
+                slaves = sorted(os.listdir(slaves_dir)) if os.path.isdir(slaves_dir) else []
+            except Exception:
+                slaves = []
+            if slaves:
+                cur = slaves[0]
+                continue
+            break
+
+        # If it's a partition, its parent is the directory above in sysfs.
+        if os.path.exists(os.path.join(sys_path, "partition")):
+            parent = os.path.basename(os.path.realpath(os.path.join(sys_path, "..")))
+            if parent and parent != cur:
+                cur = parent
+                continue
+            break
+
+        # Already a whole-disk node (or at least not a partition we can detect).
+        break
+
+    return cur
+
 def get_script_dir():
     return Path(__file__).resolve().parent
 
@@ -2018,20 +2060,22 @@ class DiskMgrShell(cmd.Cmd):
 
         mapped_dev = os.path.realpath(src)
 
-        # If the mapping points at a partition, operate on the parent disk (/dev/sdX, /dev/nvme0n1).
+        # Always query SMART on the underlying whole-disk device (SMART is not partition-scoped).
         disk_dev = mapped_dev
         try:
-            typ = run_command(['lsblk', '-no', 'TYPE', mapped_dev], check=False).stdout.strip()
-            if typ != 'disk':
-                pk = run_command(['lsblk', '-no', 'PKNAME', mapped_dev], check=False).stdout.strip()
-                if pk:
-                    disk_dev = os.path.realpath(f"/dev/{pk}")
+            mapped_name = _sysfs_block_name(mapped_dev)
+            disk_name = _sysfs_to_parent_disk_name(mapped_name)
+            candidate = os.path.realpath(f"/dev/{disk_name}")
+            if os.path.exists(candidate):
+                disk_dev = candidate
         except Exception:
-            pass
+            # Fall back to the mapped device (best-effort) if sysfs probing fails.
+            disk_dev = mapped_dev
 
         tran = ""
         try:
-            tran = run_command(['lsblk', '-no', 'TRAN', disk_dev], check=False).stdout.strip().lower()
+            res_tran = run_command(['lsblk', '-no', 'TRAN', disk_dev], check=False)
+            tran = (getattr(res_tran, 'stdout', '') or '').strip().lower()
         except Exception:
             tran = ""
 
