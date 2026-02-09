@@ -331,6 +331,24 @@ def _parse_smart_long_selftest_failures(out):
         fail += 1
     return fail
 
+def _find_tool_or_common_paths(tool_name, common_paths):
+    """
+    Find an executable by PATH, or fall back to common sbin locations.
+
+    This avoids failures when running as a normal user with /usr/sbin not in PATH.
+    Returns an absolute path or None.
+    """
+    p = shutil.which(tool_name)
+    if p:
+        return p
+    for cp in common_paths:
+        try:
+            if cp and os.path.exists(cp) and os.access(cp, os.X_OK):
+                return cp
+        except Exception:
+            continue
+    return None
+
 def get_script_dir():
     return Path(__file__).resolve().parent
 
@@ -2236,7 +2254,12 @@ class DiskMgrShell(cmd.Cmd):
             log(f"Unknown mapping: '{name}'", 'ERROR')
             return
 
-        if shutil.which('smartctl') is None:
+        smartctl_bin = _find_tool_or_common_paths('smartctl', [
+            '/usr/sbin/smartctl',
+            '/sbin/smartctl',
+            '/usr/local/sbin/smartctl',
+        ])
+        if smartctl_bin is None:
             log("smartctl not found. Install 'smartmontools' and retry.", 'ERROR')
             return
 
@@ -2262,9 +2285,9 @@ class DiskMgrShell(cmd.Cmd):
             tran = ""
 
         use_sat = (tran == 'usb' and os.path.basename(disk_dev).startswith('sd'))
-        cmd = ['smartctl', '-a', disk_dev]
+        cmd = [smartctl_bin, '-a', disk_dev]
         if use_sat:
-            cmd = ['smartctl', '-d', 'sat', '-a', disk_dev]
+            cmd = [smartctl_bin, '-d', 'sat', '-a', disk_dev]
 
         run_command(['sudo', '-v'])
 
@@ -2275,7 +2298,7 @@ class DiskMgrShell(cmd.Cmd):
         # If SAT probing fails on a USB bridge, retry without -d sat as a best-effort fallback.
         if use_sat and res.returncode != 0 and ("Unknown USB bridge" in (out + err) or "Please specify device type" in (out + err)):
             log("smartctl -d sat failed on this USB bridge; retrying without '-d sat'...", 'WARN')
-            cmd = ['smartctl', '-a', disk_dev]
+            cmd = [smartctl_bin, '-a', disk_dev]
             res = run_command(cmd, sudo=True, capture_output=True, check=False)
             out = (res.stdout or "")
             err = (res.stderr or "")
@@ -2408,7 +2431,12 @@ class DiskMgrShell(cmd.Cmd):
             log(f"Unknown mapping: '{name}'", 'ERROR')
             return
 
-        if shutil.which('ddrescue') is None:
+        ddrescue_bin = _find_tool_or_common_paths('ddrescue', [
+            '/usr/bin/ddrescue',
+            '/bin/ddrescue',
+            '/usr/local/bin/ddrescue',
+        ])
+        if ddrescue_bin is None:
             log("ddrescue not found. Install 'gddrescue' and retry.", 'ERROR')
             return
 
@@ -2457,17 +2485,17 @@ class DiskMgrShell(cmd.Cmd):
         log("Step A: Baseline read-only pass (pre-write log)...")
 
         # ddrescue option name differs by build; try --readonly then --ro-mode as fallback.
-        baseline_cmd = ['ddrescue', '--readonly', work_dev, '/dev/null', baseline_map]
+        baseline_cmd = [ddrescue_bin, '--readonly', work_dev, '/dev/null', baseline_map]
         res_b = run_command(baseline_cmd, sudo=True, capture_output=False, check=False)
         if getattr(res_b, 'returncode', 1) != 0:
-            baseline_cmd = ['ddrescue', '--ro-mode', work_dev, '/dev/null', baseline_map]
+            baseline_cmd = [ddrescue_bin, '--ro-mode', work_dev, '/dev/null', baseline_map]
             res_b = run_command(baseline_cmd, sudo=True, capture_output=False, check=False)
             if getattr(res_b, 'returncode', 1) != 0:
                 log(f"Baseline ddrescue failed (map: {baseline_map}).", 'ERROR')
                 return
 
         log("Step B: Refresh pass (in-place write)...")
-        refresh_cmd = ['ddrescue', '--force', work_dev, work_dev, refresh_map]
+        refresh_cmd = [ddrescue_bin, '--force', work_dev, work_dev, refresh_map]
         res_r = run_command(refresh_cmd, sudo=True, capture_output=False, check=False)
         if getattr(res_r, 'returncode', 1) != 0:
             log(f"Refresh ddrescue failed (map: {refresh_map}).", 'ERROR')
@@ -2482,7 +2510,11 @@ class DiskMgrShell(cmd.Cmd):
 
         # Best-effort file mapping (ext* only)
         debug_lines = []
-        debugfs_bin = shutil.which('debugfs')
+        debugfs_bin = _find_tool_or_common_paths('debugfs', [
+            '/usr/sbin/debugfs',
+            '/sbin/debugfs',
+            '/usr/local/sbin/debugfs',
+        ])
         fs_dev = work_dev
         fstype = ""
         try:
