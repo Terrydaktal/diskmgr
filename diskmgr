@@ -877,6 +877,9 @@ class DiskMgrShell(cmd.Cmd):
         print(f"  {Colors.OKGREEN}sync <sec_name> <pri_name>{Colors.ENDC}")
         print("      Syncs two mounted disks (rsync pri -> sec).")
 
+        print(f"  {Colors.OKGREEN}defrag <name>{Colors.ENDC}")
+        print("      Defragments a mounted filesystem and records the timestamp in xattrs (user.last_defrag).")
+
         print(f"  {Colors.OKGREEN}health <name>{Colors.ENDC}")
         print("      Shows SMART health (smartctl -a) for the underlying disk (USB uses -d sat).")
 
@@ -1489,9 +1492,12 @@ class DiskMgrShell(cmd.Cmd):
             
         return None
 
-    def extensive_confirm(self, target_name):
+    def extensive_confirm(self, target_name, destructive=True):
         print(f"\n{Colors.FAIL}{Colors.BOLD}!!! EXTENSIVE CONFIRMATION REQUIRED !!!{Colors.ENDC}")
-        print(f"You are about to perform a DESTRUCTIVE operation on: {Colors.WARNING}{target_name}{Colors.ENDC}")
+        if destructive:
+            print(f"You are about to perform a DESTRUCTIVE operation on: {Colors.WARNING}{target_name}{Colors.ENDC}")
+        else:
+            print(f"You are about to perform a HIGH-IMPACT operation on: {Colors.WARNING}{target_name}{Colors.ENDC}")
         print("To proceed, you must answer two math questions correctly.")
         
         for i in range(2):
@@ -2996,6 +3002,104 @@ class DiskMgrShell(cmd.Cmd):
             log("Sync complete.")
         except Exception as e:
             log(f"Sync failed: {e}", 'ERROR')
+
+    def do_defrag(self, arg):
+        '''Defragment a mounted filesystem: defrag <name>
+
+        UNDER THE HOOD:
+        1.  Validation: Verifies the disk is mapped and currently mounted.
+        2.  Confirmation: Requires solving two math problems.
+        3.  Execution:
+            - ext4:  runs 'sudo e4defrag <mountpoint>'
+            - btrfs: runs 'sudo btrfs filesystem defragment -r <mountpoint>'
+        4.  Recording: Stores a timestamp on the mountpoint root via:
+              sudo setfattr -n user.last_defrag -v "<date>" <mountpoint>
+        '''
+        args = arg.split()
+        if len(args) != 1:
+            log("Usage: defrag <name>", 'ERROR')
+            return
+
+        name = args[0]
+        mnt = self.get_mountpoint(name)
+        if not mnt:
+            log(f"Disk '{name}' is not mounted. Run 'open {name}' first.", 'ERROR')
+            return
+
+        # Determine filesystem type.
+        fstype = ""
+        try:
+            res_fs = run_command(['findmnt', '-rn', '-M', mnt, '-o', 'FSTYPE'], check=False)
+            fstype = (getattr(res_fs, 'stdout', '') or '').strip().lower()
+        except Exception:
+            fstype = ""
+
+        if fstype not in ("ext4", "btrfs"):
+            log(f"Defrag not supported for filesystem type '{fstype or 'unknown'}' at {mnt}.", 'ERROR')
+            log("Supported: ext4 (e4defrag), btrfs (btrfs filesystem defragment).", 'ERROR')
+            return
+
+        # Confirmation (not strictly destructive, but high-impact: rewrites lots of blocks/metadata).
+        print(f"Defragmenting: {Colors.BOLD}{mnt}{Colors.ENDC} (fstype={fstype})")
+        if not self.extensive_confirm(f"defrag {name} ({mnt})", destructive=False):
+            return
+
+        run_command(['sudo', '-v'])
+
+        # Find tools (PATH may not include sbin).
+        e4defrag_bin = _find_tool_or_common_paths('e4defrag', [
+            '/usr/sbin/e4defrag',
+            '/sbin/e4defrag',
+            '/usr/local/sbin/e4defrag',
+            '/usr/bin/e4defrag',
+            '/bin/e4defrag',
+        ])
+        btrfs_bin = _find_tool_or_common_paths('btrfs', [
+            '/usr/sbin/btrfs',
+            '/sbin/btrfs',
+            '/usr/local/sbin/btrfs',
+            '/usr/bin/btrfs',
+            '/bin/btrfs',
+        ])
+        setfattr_bin = _find_tool_or_common_paths('setfattr', [
+            '/usr/bin/setfattr',
+            '/bin/setfattr',
+            '/usr/sbin/setfattr',
+            '/sbin/setfattr',
+        ])
+
+        try:
+            if fstype == "ext4":
+                if e4defrag_bin is None:
+                    log("e4defrag not found. Install 'e2fsprogs' and retry.", 'ERROR')
+                    return
+                log(f"Running: {e4defrag_bin} {mnt}")
+                run_command([e4defrag_bin, mnt], sudo=True, capture_output=False, check=False)
+            else:
+                if btrfs_bin is None:
+                    log("btrfs not found. Install 'btrfs-progs' and retry.", 'ERROR')
+                    return
+                log(f"Running: {btrfs_bin} filesystem defragment -r {mnt}")
+                run_command([btrfs_bin, 'filesystem', 'defragment', '-r', mnt], sudo=True, capture_output=False, check=False)
+
+            # Record timestamp in xattr on mountpoint root.
+            if setfattr_bin is None:
+                log("setfattr not found. Install 'attr' and retry to record last_defrag.", 'WARN')
+                return
+
+            ds = ""
+            try:
+                res_date = run_command(['date'], capture_output=True, check=False)
+                ds = (getattr(res_date, 'stdout', '') or '').strip()
+            except Exception:
+                ds = ""
+            if not ds:
+                ds = datetime.datetime.now().isoformat(sep=' ', timespec='seconds')
+
+            run_command([setfattr_bin, '-n', 'user.last_defrag', '-v', ds, mnt], sudo=True, check=False)
+            log(f"Recorded xattr: user.last_defrag={ds} on {mnt}")
+        except Exception as e:
+            log(f"Defrag failed: {e}", 'ERROR')
 
     def do_create(self, arg):
         '''Initialize a disk: create <name> [options]
