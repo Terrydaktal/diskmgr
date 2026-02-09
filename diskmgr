@@ -883,6 +883,9 @@ class DiskMgrShell(cmd.Cmd):
         print(f"  {Colors.OKGREEN}health <name>{Colors.ENDC}")
         print("      Shows SMART health (smartctl -a) for the underlying disk (USB uses -d sat).")
 
+        print(f"  {Colors.OKGREEN}selftest <name>{Colors.ENDC}")
+        print("      Starts a SMART long self-test (smartctl -t long) for the underlying disk (USB uses -d sat).")
+
         print(f"  {Colors.OKGREEN}exit / quit / Ctrl+D{Colors.ENDC}")
         print("      Exit the application.")
 
@@ -2934,6 +2937,83 @@ class DiskMgrShell(cmd.Cmd):
         # smartctl uses a bitmask exit code; non-zero can mean "drive has issues" and is still useful output.
         if getattr(res, 'returncode', 0) != 0:
             log(f"smartctl exit status: {res.returncode} (non-zero may indicate SMART warnings).", 'WARN')
+
+    def do_selftest(self, arg):
+        '''Start a SMART long self-test: selftest <name>
+
+        Runs smartctl long test against the underlying DISK device for the mapping.
+        - If the mapping points to a partition, diskmgr targets the parent disk.
+        - If the disk transport is USB and the device is /dev/sdX, diskmgr uses:
+              smartctl -d sat -t long /dev/sdX
+          (common for USB-SATA bridges).
+        '''
+        args = arg.split()
+        if len(args) != 1:
+            log("Usage: selftest <name>", 'ERROR')
+            return
+
+        name = args[0]
+        src = self.resolve_target(name, allow_id=False)
+        if not src:
+            log(f"Unknown mapping: '{name}'", 'ERROR')
+            return
+
+        smartctl_bin = _find_tool_or_common_paths('smartctl', [
+            '/usr/sbin/smartctl',
+            '/sbin/smartctl',
+            '/usr/local/sbin/smartctl',
+        ])
+        if smartctl_bin is None:
+            log("smartctl not found. Install 'smartmontools' and retry.", 'ERROR')
+            return
+
+        mapped_dev = os.path.realpath(src)
+
+        # Always run SMART commands on the underlying whole-disk device (SMART is not partition-scoped).
+        disk_dev = mapped_dev
+        try:
+            mapped_name = _sysfs_block_name(mapped_dev)
+            disk_name = _sysfs_to_parent_disk_name(mapped_name)
+            candidate = os.path.realpath(f"/dev/{disk_name}")
+            if os.path.exists(candidate):
+                disk_dev = candidate
+        except Exception:
+            disk_dev = mapped_dev
+
+        tran = ""
+        try:
+            res_tran = run_command(['lsblk', '-no', 'TRAN', disk_dev], check=False)
+            tran = (getattr(res_tran, 'stdout', '') or '').strip().lower()
+        except Exception:
+            tran = ""
+
+        use_sat = (tran == 'usb' and os.path.basename(disk_dev).startswith('sd'))
+        cmd = [smartctl_bin, '-t', 'long', disk_dev]
+        if use_sat:
+            cmd = [smartctl_bin, '-d', 'sat', '-t', 'long', disk_dev]
+
+        mode = "-d sat" if ('-d' in cmd) else ""
+        print(f"Starting SMART long self-test: {Colors.BOLD}{name}{Colors.ENDC} -> {disk_dev} {mode}".strip())
+
+        # Confirmation (high-impact; not directly destructive but stresses the drive).
+        if not self.extensive_confirm(f"selftest {name} ({disk_dev})", destructive=False):
+            return
+
+        run_command(['sudo', '-v'])
+
+        res = run_command(cmd, sudo=True, capture_output=True, check=False)
+        out = (res.stdout or "").rstrip()
+        err = (res.stderr or "").rstrip()
+
+        if out:
+            print(out)
+        if err:
+            print(err, file=sys.stderr)
+
+        if getattr(res, 'returncode', 0) != 0:
+            log(f"smartctl exit status: {res.returncode} (non-zero may indicate it could not start the test).", 'WARN')
+        else:
+            print(f"\nTo check progress/results: run {Colors.BOLD}health {name}{Colors.ENDC} and look at the SMART Self-test log.")
 
     def get_mountpoint(self, name):
         '''Resolves the current mountpoint for a friendly name.'''
