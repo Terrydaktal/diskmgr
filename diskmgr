@@ -238,21 +238,25 @@ def _parse_smart_last_error_poh(out):
     Parse the most recent ATA SMART Error Log entry's power-on lifetime (hours).
 
     smartctl typically formats the most recent entry as:
-      "Error 1 occurred at disk power-on lifetime: 21239 hours (885 days + 23 hours)"
-    Returns int hours, or None if not found / not an ATA SMART error log.
+      "Error 667 occurred at disk power-on lifetime: 20140 hours (839 days + 4 hours)"
+    Note: The error number is not necessarily "1" (it can be a running counter).
+
+    Returns (error_number, power_on_hours) or (None, None) if not found / not an ATA SMART error log.
     """
     if not out:
-        return None
+        return (None, None)
     m = re.search(
-        r"(?m)^\s*Error\s+1\s+occurred\s+at\s+disk\s+power-on\s+lifetime:\s*([0-9,]+)\s*(?:hours|h)\b",
+        r"(?m)^\s*Error\s+([0-9]+)\s+occurred\s+at\s+disk\s+power-on\s+lifetime:\s*([0-9,]+)\s*(?:hours|h)\b",
         str(out),
     )
     if not m:
-        return None
+        return (None, None)
     try:
-        return int(m.group(1).replace(",", ""), 10)
+        n = int(m.group(1), 10)
+        h = int(m.group(2).replace(",", ""), 10)
+        return (n, h)
     except ValueError:
-        return None
+        return (None, None)
 
 def _smartctl_looks_seagate(out):
     if not out:
@@ -2553,8 +2557,9 @@ class DiskMgrShell(cmd.Cmd):
             print(f"{Colors.BOLD}SMART queried on:{Colors.ENDC} {disk_dev}")
 
         # Time since last SMART error (if the drive has an ATA SMART Error Log).
-        cur_poh_h = _first_int_from_text(poh)
-        last_err_poh_h = _parse_smart_last_error_poh(out)
+        poh_row = _parse_smart_attr_row(out, 9)
+        cur_poh_h = _first_int_from_text((poh_row or {}).get("raw")) or _first_int_from_text(poh)
+        last_err_no, last_err_poh_h = _parse_smart_last_error_poh(out)
         errlog_cnt = _parse_smart_error_log_count(out)
         if last_err_poh_h is not None:
             delta_h = cur_poh_h - last_err_poh_h if (cur_poh_h is not None) else None
@@ -2565,9 +2570,11 @@ class DiskMgrShell(cmd.Cmd):
                     delta_disp = f"{Colors.WARNING}{delta_h}h{Colors.ENDC} (~{delta_days:.1f} days)"
                 else:
                     delta_disp = f"{Colors.OKGREEN}{delta_h}h{Colors.ENDC} (~{delta_days:.1f} days)"
-                print(f"{Colors.BOLD}Time since last SMART error:{Colors.ENDC} {delta_disp} (last at POH {last_err_poh_h}h)")
+                eno = f"Error {last_err_no}" if last_err_no is not None else "Last error"
+                print(f"{Colors.BOLD}Time since last SMART error:{Colors.ENDC} {delta_disp} ({eno} at POH {last_err_poh_h}h)")
             else:
-                print(f"{Colors.BOLD}Last SMART error logged at:{Colors.ENDC} POH {last_err_poh_h}h")
+                eno = f"Error {last_err_no}" if last_err_no is not None else "Last error"
+                print(f"{Colors.BOLD}Last SMART error logged at:{Colors.ENDC} {eno} at POH {last_err_poh_h}h")
         elif errlog_cnt == 0:
             print(f"{Colors.BOLD}SMART Error Log:{Colors.ENDC} {Colors.OKGREEN}No Errors Logged{Colors.ENDC}")
 
