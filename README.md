@@ -442,6 +442,17 @@ Initialize a disk: create <name> [options]
 ```text
 Clone one disk or partition to another: clone <src_name> <dst_name>
 
+        WARNING (DATA DESTRUCTION):
+        - This command writes directly to the destination block device (like running dd).
+        - The destination is overwritten starting at byte 0. Any existing partition table,
+          filesystems, and files on the destination WILL BE DESTROYED.
+        - If the destination is larger than the source, bytes beyond the source size are
+          not overwritten. Old data may still physically exist there, but it will not be
+          referenced by the cloned partition table.
+        - diskmgr does NOT unmount the destination for you. Unmount/close it first to
+          avoid live corruption.
+        - If you need to sanitize the destination, run: erase <dst_name>
+
         Note: The target disk MUST be the same size or larger than the source.
 
         STEP-BY-STEP PROCESS:
