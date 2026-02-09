@@ -2608,6 +2608,32 @@ class DiskMgrShell(cmd.Cmd):
             for line in lines[:end]:
                 print(line)
 
+        def _print_smartctl_remaining_block():
+            """
+            Print the remainder of the smartctl output (everything after the information section),
+            so the user can still see the attribute tables and logs without duplicating the header/info.
+            """
+            if not out:
+                return
+            lines = str(out).splitlines()
+            if not lines:
+                return
+            read_idx = None
+            for i, line in enumerate(lines):
+                if line.strip() == "=== START OF READ SMART DATA SECTION ===":
+                    read_idx = i
+                    break
+            if read_idx is None:
+                # Fall back to the entire output if we can't locate the split point.
+                print(out.rstrip())
+                return
+            tail = lines[read_idx:]
+            if not tail:
+                return
+            print(f"{Colors.HEADER}{Colors.BOLD}--- smartctl details ---{Colors.ENDC}")
+            for line in tail:
+                print(line)
+
         _print_smartctl_info_block()
 
         # Time since last SMART error (if the drive has an ATA SMART Error Log).
@@ -2894,6 +2920,10 @@ class DiskMgrShell(cmd.Cmd):
             if offline_unc:
                 print(f"{Colors.BOLD}Offline uncorrectable:{Colors.ENDC} {_color_val('unc', offline_unc)}")
             print("")
+
+        _print_smartctl_remaining_block()
+        if err.strip():
+            print(err.rstrip(), file=sys.stderr)
 
         # smartctl uses a bitmask exit code; non-zero can mean "drive has issues" and is still useful output.
         if getattr(res, 'returncode', 0) != 0:
