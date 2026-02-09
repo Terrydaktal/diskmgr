@@ -556,7 +556,43 @@ class DiskMgrShell(cmd.Cmd):
             
             try:
                 # 1. Get Geometry from parted
-                res = run_command(['parted', '-m', '-s', dev_path, 'unit', 's', 'print', 'free'], sudo=True)
+                res = run_command(['parted', '-m', '-s', dev_path, 'unit', 's', 'print', 'free'], sudo=True, check=False)
+                if getattr(res, 'returncode', 1) != 0:
+                    # Common case: blank disk or missing/corrupt partition table.
+                    # Avoid noisy "Command failed" logs and present a human-readable reason.
+                    stderr = (getattr(res, 'stderr', '') or '').strip()
+
+                    # Fall back to blockdev sector sizes for a useful header.
+                    ls = run_command(['blockdev', '--getss', dev_path], sudo=True, check=False).stdout.strip()
+                    ps = run_command(['blockdev', '--getpbsz', dev_path], sudo=True, check=False).stdout.strip()
+                    logical_sector = int(ls) if ls.isdigit() else 512
+                    physical_sector = int(ps) if ps.isdigit() else logical_sector
+
+                    res_sz = run_command(['blockdev', '--getsz', dev_path], sudo=True, check=False)
+                    total_512_sectors = int(res_sz.stdout.strip()) if (res_sz.stdout or "").strip().isdigit() else 0
+                    total_logical_sectors = (total_512_sectors * 512) // logical_sector if logical_sector else 0
+
+                    print(f"\n{Colors.BOLD}Disk: {dev_path} ({model}) [none] [Sector: L{logical_sector}/P{physical_sector}] [Total Sectors: {total_logical_sectors}]{Colors.ENDC}")
+                    if stderr:
+                        if "unrecognised disk label" in stderr.lower():
+                            log(f"{dev_path}: no partition table (unrecognized disk label).", 'WARN')
+                        else:
+                            log(f"{dev_path}: could not read partition layout: {stderr}", 'WARN')
+
+                    # Still show lsblk hierarchy so the user can see what's on the disk.
+                    print("")
+                    try:
+                        ls_res = run_command(['lsblk', '-J', '-f', dev_path], sudo=True, check=False)
+                        if ls_res.stdout.strip():
+                            data = json.loads(ls_res.stdout)
+                            if 'blockdevices' in data:
+                                print(f"{Colors.BOLD}{'NAME':<25} {'FSTYPE':<12} {'FSVER':<6} {'LABEL':<12} {'UUID':<38} {'FSAVAIL':<10} {'FSUSE%':<8} {'MOUNTPOINTS'}{Colors.ENDC}")
+                                self.render_lsblk_json(data['blockdevices'])
+                    except Exception as e:
+                        log(f"Could not render lsblk tree: {e}", 'DEBUG')
+                    print("-" * 155)
+                    continue
+
                 lines = res.stdout.strip().splitlines()
                 
                 header_parts = lines[1].strip(';').split(':')
