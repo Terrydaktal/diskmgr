@@ -2606,7 +2606,7 @@ class DiskMgrShell(cmd.Cmd):
                 cmd188_for_color = d188["timeouts"]
                 cmd188_disp = f'{d188["timeouts"]} (packed: >5s={d188["gt_5s"]}, >7.5s={d188["gt_7_5s"]}; raw={d188["raw_int"]} {d188["hex"]})'
 
-        # SMART pretext block (sorted by severity of the *current* issue).
+        # SMART pretext block (fixed ranking 1=most critical -> 24=least critical).
         rows = {
             1: _parse_smart_attr_row(out, 1),
             3: _parse_smart_attr_row(out, 3),
@@ -2631,225 +2631,11 @@ class DiskMgrShell(cmd.Cmd):
             241: _parse_smart_attr_row(out, 241),
             242: _parse_smart_attr_row(out, 242),
             254: _parse_smart_attr_row(out, 254),
-            196: _parse_smart_attr_row(out, 196),
             194: _parse_smart_attr_row(out, 194),
         }
 
-        def _norm_severity(row):
-            if not row:
-                return (0, 0)
-            v = row.get("value", 100)
-            t = row.get("thresh", 0)
-            if v <= t:
-                return (2, 1000000)
-            if v <= t + 10:
-                return (1, 1000000 - (v - t))
-            return (0, v - t)
-
-        def _raw_severity(row, kind):
-            # kind: ok0/watch/bad0/scaled
-            if not row:
-                return (0, 0)
-            raw_i = _first_int_from_text(row.get("raw"))
-            if raw_i is None:
-                return (0, 0)
-            if kind == "bad0":
-                return (2, raw_i) if raw_i > 0 else (0, 0)
-            if kind == "watch":
-                return (1, raw_i) if raw_i > 0 else (0, 0)
-            if kind == "scaled_lcc":
-                if raw_i > 600000:
-                    return (1, raw_i)
-                if raw_i > 300000:
-                    return (1, raw_i)
-                return (0, raw_i)
-            if kind == "temp":
-                if raw_i >= 60:
-                    return (2, raw_i)
-                if raw_i >= 50:
-                    return (1, raw_i)
-                return (0, raw_i)
-            return (0, raw_i)
-
-        # Use decoded 188 timeouts for severity when Seagate packed format is detected.
+        # Seagate packed SMART 188 decode already applied to cmd188_disp/cmd188_for_color above.
         cmd188_timeouts = _first_int_from_text(cmd188_for_color)
-
-        # Key hierarchy summary (attention order). Values are current snapshot only; "increasing" requires comparing over time.
-        try:
-            _t199 = _first_int_from_text((rows.get(199) or {}).get("raw"))
-            _t188 = cmd188_timeouts
-            _t197 = _first_int_from_text((rows.get(197) or {}).get("raw"))
-            _t5 = _first_int_from_text((rows.get(5) or {}).get("raw"))
-            _t187 = _first_int_from_text((rows.get(187) or {}).get("raw"))
-            _t198 = _first_int_from_text((rows.get(198) or {}).get("raw"))
-            _tself = long_fail
-
-            print(f"\n{Colors.BOLD}The Revised \"Death Spiral\" Hierarchy (attention order):{Colors.ENDC}")
-            print(f"  1) 199 UDMA_CRC_Error_Count (interface path): {_color_val('crc', _t199)}")
-            print(f"  2) 188 Command_Timeout (responsiveness): {_color_val('timeout', _t188)}")
-            print(f"  3) 197 Current_Pending_Sector (data at risk now): {_color_val('pending', _t197)}")
-            print(f"  4) 5 Reallocated_Sector_Ct (confirmed remaps): {_color_val('realloc', _t5)}")
-            print(f"  5) 187 Reported_Uncorrect (uncorrectables seen by OS): {_color_val('reported', _t187)}")
-            print(f"  6) 198 Offline_Uncorrectable (unrecoverable during scan): {_color_val('unc', _t198)}")
-            print(f"  7) SMART self-test failures (long/extended): {_color_val('selftest', _tself)}")
-        except Exception:
-            pass
-
-        # Ascending issue severity ordering: OK -> WATCH -> BAD.
-        # Within a severity level, use a fixed semantic order (your template ordering),
-        # not the raw counter magnitudes (which are not comparable across attributes).
-        SEM_ORDER = {
-            5: 1,
-            197: 2,
-            198: 3,
-            187: 4,
-            188: 5,
-            184: 6,
-            199: 7,
-            1: 8,
-            7: 9,
-            10: 10,
-            3: 11,
-            9: 12,
-            4: 13,
-            12: 14,
-            193: 15,
-            192: 16,
-            191: 17,
-            190: 18,
-            194: 19,
-            189: 20,
-            240: 21,
-            241: 22,
-            242: 23,
-            254: 24,
-            196: 25,
-            "SELFTEST": 99,
-        }
-
-        def _issue_level(attr_id):
-            row = rows.get(attr_id)
-            raw_i = _first_int_from_text((row or {}).get("raw"))
-
-            # Bad-if-nonzero indicators.
-            if attr_id in (197, 198, 187, 184, 10):
-                return 2 if (raw_i or 0) > 0 else 0
-
-            # Watch-if-nonzero indicators.
-            if attr_id in (199, 188, 192, 191, 189, 196, 254):
-                if attr_id == 188:
-                    return 1 if (cmd188_timeouts or 0) > 0 else 0
-                return 1 if (raw_i or 0) > 0 else 0
-
-            # Reallocated sectors: serious, but interpret as "watch unless rising".
-            if attr_id == 5:
-                return 1 if (raw_i or 0) > 0 else 0
-
-            # Load cycle count: wear indicator (watch when very high).
-            if attr_id == 193:
-                if raw_i is None:
-                    return 0
-                return 1 if raw_i > 300000 else 0
-
-            # Temperature: watch/high based on thresholds.
-            if attr_id in (190, 194):
-                if raw_i is None:
-                    return 0
-                if raw_i >= 60:
-                    return 2
-                if raw_i >= 50:
-                    return 1
-                return 0
-
-            # Vendor-specific normalized attributes: compare VALUE to THRESH.
-            if attr_id in (1, 7, 3):
-                if not row:
-                    return 0
-                v = row.get("value", 100)
-                t = row.get("thresh", 0)
-                if v <= t:
-                    return 2
-                if v <= t + 10:
-                    return 1
-                return 0
-
-            # Informational by default.
-            return 0
-
-        items = []
-        def _add(attr_id, label):
-            sev = (_issue_level(attr_id), SEM_ORDER.get(attr_id, 999))
-            items.append({"id": attr_id, "label": label, "row": rows.get(attr_id), "sev": sev})
-
-        # Your template attribute list + a few useful extras.
-        _add(5, "Reallocated_Sector_Ct")
-        _add(197, "Current_Pending_Sector")
-        _add(198, "Offline_Uncorrectable")
-        _add(187, "Reported_Uncorrect")
-        _add(188, "Command_Timeout")
-        _add(184, "End-to-End_Error")
-        _add(199, "UDMA_CRC_Error_Count")
-        _add(1, "Raw_Read_Error_Rate")
-        _add(7, "Seek_Error_Rate")
-        _add(10, "Spin_Retry_Count")
-        _add(3, "Spin_Up_Time")
-        _add(9, "Power_On_Hours")
-        _add(4, "Start_Stop_Count")
-        _add(12, "Power_Cycle_Count")
-        _add(193, "Load_Cycle_Count")
-        _add(192, "Power-Off_Retract_Count")
-        _add(191, "G-Sense_Error_Rate")
-        _add(190, "Airflow_Temperature_Cel")
-        _add(194, "Temperature_Celsius")
-        _add(189, "High_Fly_Writes")
-        _add(240, "Head_Flying_Hours")
-        _add(241, "Total_LBAs_Written")
-        _add(242, "Total_LBAs_Read")
-        _add(254, "Free_Fall_Sensor")
-        _add(196, "Reallocation_Event_Count")
-
-        # Long self-test failures already parsed separately.
-        items.append({
-            "id": "SELFTEST",
-            "label": "SMART long/extended self-test failures",
-            "row": None,
-            "sev": (2 if (long_fail or 0) > 0 else 0, SEM_ORDER.get("SELFTEST", 99)),
-        })
-
-        items.sort(key=lambda x: (x["sev"][0], x["sev"][1], int(x["id"]) if str(x["id"]).isdigit() else 9999))
-
-        def _sev_tag(level):
-            if level >= 2:
-                return f"{Colors.FAIL}[BAD]{Colors.ENDC}"
-            if level == 1:
-                return f"{Colors.WARNING}[WATCH]{Colors.ENDC}"
-            return f"{Colors.OKGREEN}[OK]{Colors.ENDC}"
-
-        def _color_raw(level, raw):
-            if raw is None:
-                return "-"
-            s = str(raw)
-            if level >= 2:
-                return f"{Colors.FAIL}{s}{Colors.ENDC}"
-            if level == 1:
-                return f"{Colors.WARNING}{s}{Colors.ENDC}"
-            return f"{Colors.OKGREEN}{s}{Colors.ENDC}"
-
-        def _fmt_fields(row, aid):
-            if not row:
-                return ""
-
-            if aid in (5, 1, 7, 10):
-                return f" (VALUE {row.get('value', '-')}, THRESH {row.get('thresh', '-')})"
-            if aid == 187:
-                return f" (VALUE {row.get('value', '-')})"
-            if aid == 188:
-                return f" (VALUE {row.get('value', '-')}, WORST {row.get('worst', '-')})"
-            if aid == 3:
-                return f" (VALUE {row.get('value', '-')})"
-            if aid == 193:
-                return f" (VALUE {row.get('value', '-')})"
-            return ""
 
         def _tb_from_lbas(lbas):
             try:
@@ -2859,178 +2645,89 @@ class DiskMgrShell(cmd.Cmd):
             # 512-byte LBAs
             return (n * 512) / (1024 ** 4)
 
-        print(f"\n{Colors.BOLD}SMART pretext (sorted by severity of the issue, low -> high):{Colors.ENDC}")
-        for it in items:
-            aid = it["id"]
-            if aid in (5, 197, 198, 187, 188, 184, 199, 1, 7, 10, 3, 9, 4, 12, 193, 192, 191, 190, 194, 189, 240, 241, 242, 254, 196, "SELFTEST"):
-                pass
-            else:
-                continue
+        def _rank_color(rank):
+            if rank <= 5:
+                return Colors.FAIL
+            if rank <= 15:
+                return Colors.WARNING
+            if rank <= 21:
+                return Colors.OKCYAN
+            return Colors.OKGREEN
 
-            row = it["row"]
-            if aid == "SELFTEST":
-                lvl = it["sev"][0]
-                print(f"\n{_sev_tag(lvl)} {Colors.BOLD}Self-Test Failure:{Colors.ENDC} {_color_raw(lvl, long_fail if long_fail is not None else '-')}")
-                print("\nMeaning: Number of non-success entries in the SMART Self-test log for long/extended tests.")
-                print("How good: Excellent at 0.")
-                print("Failure signal quality: Very high. A failed long test is a strong end-of-life indicator.")
-                continue
+        def _fmt_smart_value(aid):
+            # Single-line value formatting (no multi-line blocks).
+            if aid == 188 and _smartctl_looks_seagate(out) and d188 and d188.get("raw_int") is not None and d188["raw_int"] > 0xFFFF:
+                return f"{d188['timeouts']} (decoded: >5s={d188['gt_5s']}, >7.5s={d188['gt_7_5s']}; raw={d188['hex']})"
 
-            lvl = it["sev"][0]
-            nm = it.get("label") or (row.get("name") if row else "Unknown")
-            raw_disp = (cmd188_disp if aid == 188 else (row.get("raw") if row else None))
+            row = rows.get(aid)
+            if not row:
+                return "-"
 
-            # Header line matching your template, with severity tag + colored current value.
-            print(f"\n{_sev_tag(lvl)} {Colors.BOLD}{aid} — {nm}:{Colors.ENDC} {_color_raw(lvl, raw_disp)}{_fmt_fields(row, aid)}")
-
+            raw = row.get("raw", "-")
+            if aid in (5, 1, 7, 10):
+                return f"{raw} (VALUE {row.get('value', '-')}, THRESH {row.get('thresh', '-')})"
+            if aid == 187:
+                return f"{raw} (VALUE {row.get('value', '-')})"
             if aid == 188:
-                print("\nMeaning: Commands interrupted by resets/aborts/timeouts (host path instability, or drive hangs).")
-                if _smartctl_looks_seagate(out) and d188 and d188.get("raw_int") is not None and d188["raw_int"] > 0xFFFF:
-                    print("It’s almost certainly not “billions of command timeouts”.")
-                    print("On many Seagate drives, SMART 188 (Command_Timeout) is a packed field: three 16-bit counters in the 6 RAW bytes.")
-                    print("")
-                    hx = d188["hex"][2:]  # drop 0x
-                    print(f"Decode your raw value: {d188['raw_int']} == {d188['hex']} (0x{hx[0:4]} {hx[4:8]} {hx[8:12]})")
-                    print(f"- Raw[1:0] (low word) = {d188['timeouts']} -> total command timeouts")
-                    print(f"- Raw[3:2]           = {d188['gt_5s']} -> commands taking > 5 seconds")
-                    print(f"- Raw[5:4] (high)   = {d188['gt_7_5s']} -> commands taking > 7.5 seconds (included in >5s bucket)")
-                    print("")
-                    print("How good: Not “billions”; here it’s the decoded counters that matter. Increasing is concerning.")
-                    print("Failure signal quality: Medium-to-high. Very early indicator of link/power/controller/bridge problems; less specific to platter damage.")
-                else:
-                    n = cmd188_timeouts or 0
-                    print(f"How good: {'Excellent at 0.' if n == 0 else 'Non-zero; watch if increasing.'}")
-                    print("Failure signal quality: Medium. Often points to link/power instability or drive hangs.")
-                continue
+                return f"{raw} (VALUE {row.get('value', '-')}, WORST {row.get('worst', '-')})"
+            if aid == 3:
+                return f"{raw} (VALUE {row.get('value', '-')})"
+            if aid == 193:
+                rv = _first_int_from_text(raw)
+                if rv is not None:
+                    return f"{rv:,} (VALUE {row.get('value', '-')})"
+                return f"{raw} (VALUE {row.get('value', '-')})"
+            if aid in (241, 242):
+                rv = _first_int_from_text(raw)
+                tb = _tb_from_lbas(rv) if rv is not None else None
+                if tb is not None:
+                    return f"{raw} (~{tb:.2f} TiB)"
+                return raw
+            return raw
 
-            # Per-attribute explanations (modeled after your text).
-            if aid == 5:
-                print("\nMeaning: Count of sectors the drive has permanently swapped out for spares because they were bad.")
-                rv = _first_int_from_text(row.get("raw")) if row else None
-                print(f"How good: {'Excellent at 0.' if (rv or 0) == 0 else 'Non-zero; watch trend closely.'}")
-                print("Failure signal quality: High severity, usually mid-to-late indicator. Once this starts increasing (especially continuously), media degradation is real.")
-            elif aid == 197:
-                print("\nMeaning: Sectors the drive currently cannot read reliably; they’re pending reallocation if rewritten.")
-                rv = _first_int_from_text(row.get("raw")) if row else None
-                print(f"How good: {'Excellent at 0.' if (rv or 0) == 0 else 'BAD: non-zero means data at risk right now.'}")
-                print("Failure signal quality: One of the strongest early indicators of surface trouble. If it becomes non-zero, that’s an immediate “data at risk” flag.")
-            elif aid == 198:
-                print("\nMeaning: Unrecoverable sectors found during offline scan/self-test.")
-                rv = _first_int_from_text(row.get("raw")) if row else None
-                print(f"How good: {'Excellent at 0.' if (rv or 0) == 0 else 'BAD: non-zero means unrecoverable sectors were found.'}")
-                print("Failure signal quality: High severity. Non-zero here means the drive found sectors it cannot read back even with internal recovery.")
-            elif aid == 187:
-                print("\nMeaning: Times the drive reported “uncorrectable” to the host (couldn’t return valid data for requested LBA after ECC/retries).")
-                rv = _first_int_from_text(row.get("raw")) if row else None
-                if rv is not None and rv > 0:
-                    print(f"How good: Bad historically. {rv} is a lot of “I couldn’t read that” events at some point in its life.")
-                else:
-                    print("How good: Excellent at 0.")
-                print("Failure signal quality: High severity, often early-ish, but it can be inflated by host-path events (controller resets, power drops, flaky bridges).")
-                print("What matters now: whether 187 keeps increasing on this system.")
-            elif aid == 184:
-                print("\nMeaning: Data path integrity inside the drive (cache/buffer ↔ media).")
-                rv = _first_int_from_text(row.get("raw")) if row else None
-                print(f"How good: {'Excellent at 0.' if (rv or 0) == 0 else 'BAD: non-zero indicates internal data-path integrity errors.'}")
-                print("Failure signal quality: High severity if non-zero, but many consumer drives never increment it.")
-            elif aid == 199:
-                print("\nMeaning: CRC errors on the SATA link (bad cable, noise, flaky bridge/port).")
-                rv = _first_int_from_text(row.get("raw")) if row else None
-                print(f"How good: {'Excellent at 0.' if (rv or 0) == 0 else 'Non-zero; fix cable/port/bridge and re-check.'}")
-                print("Failure signal quality: Early indicator of link problems, not platter failure. If it climbs, fix the path before blaming the disk.")
-            elif aid == 1:
-                print("\nMeaning: Vendor-specific read-channel/ECC stats (RAW is not a clean error count on many Seagate drives).")
-                if row:
-                    print(f"How good: VALUE {row['value']} vs THRESH {row['thresh']} -> {'fine' if row['value'] > row['thresh'] else 'bad'}.")
-                print("Failure signal quality: Low-to-medium (noisy, vendor-specific). Watch VALUE trending down, not RAW.")
-            elif aid == 7:
-                print("\nMeaning: Vendor-specific seek stats; RAW is not a clean count on many Seagate drives.")
-                if row:
-                    print(f"How good: VALUE {row['value']} vs THRESH {row['thresh']} -> {'fine' if row['value'] > row['thresh'] else 'bad'}.")
-                print("Failure signal quality: Low-to-medium. A steadily dropping normalized VALUE can matter; RAW alone doesn’t.")
-            elif aid == 10:
-                print("\nMeaning: Times the spindle had to retry spinning up.")
-                rv = _first_int_from_text(row.get("raw")) if row else None
-                print(f"How good: {'Excellent at 0.' if (rv or 0) == 0 else 'BAD: non-zero is often motor/bearing/power trouble.'}")
-                print("Failure signal quality: High severity if non-zero. Usually an “act now” sign.")
-            elif aid == 3:
-                print("\nMeaning: Time to spin up (RAW is vendor-specific and can be non-obvious).")
-                if row:
-                    print(f"How good: Normalized VALUE {row['value']} (THRESH {row['thresh']}).")
-                print("Failure signal quality: Low unless VALUE worsens or Spin_Retry_Count appears.")
-            elif aid == 9:
-                rv = _first_int_from_text(row.get("raw")) if row else None
-                years = (rv / 24 / 365) if rv is not None else None
-                print("\nMeaning: Total powered-on lifetime.")
-                if rv is not None:
-                    print(f"How good: Context. {rv} hours (~{years:.2f} years).")
-                else:
-                    print("How good: Context.")
-                print("Failure signal quality: Not a predictor alone; higher POH increases baseline risk.")
-            elif aid == 4:
-                print("\nMeaning: Spindle start/stop cycles.")
-                print("How good: Context; wear indicator.")
-                print("Failure signal quality: Low unless extremely high / paired with spin issues.")
-            elif aid == 12:
-                print("\nMeaning: Number of times power was cycled.")
-                print("How good: Context.")
-                print("Failure signal quality: Low.")
-            elif aid == 193:
-                print("\nMeaning: Head load/unload (parking) cycles.")
-                rv = _first_int_from_text(row.get("raw")) if row else None
-                if rv is not None:
-                    print(f"How good: Lower is better. Your RAW is {rv:,}. Very high counts imply aggressive head parking over its life.")
-                else:
-                    print("How good: Lower is better; very high counts imply aggressive head parking over its life.")
-                print("Failure signal quality: Medium severity mechanical wear risk (parking/ramp mechanism), not direct proof of platter damage.")
-            elif aid == 192:
-                print("\nMeaning: Emergency retracts (often power loss / unsafe removal).")
-                print("How good: Lower is better; non-zero suggests rough power events.")
-                print("Failure signal quality: Medium as an environment/path indicator; can correlate with later issues.")
-            elif aid == 191:
-                print("\nMeaning: Shock events detected.")
-                print("How good: Lower is better.")
-                print("Failure signal quality: Medium context; shocks can cause latent issues, but this isn’t a direct failure counter.")
-            elif aid in (190, 194):
-                raw = row.get("raw") if row else "-"
-                print("\nMeaning: Drive temperature (vendor attribute).")
-                print(f"How good: {raw}. Sustained high temps (50–60C+) increase failure risk.")
-                print("Failure signal quality: Low at normal temps; useful as a risk accelerator.")
-            elif aid == 189:
-                print("\nMeaning: Head flying height anomalies during writes (vendor-specific).")
-                rv = _first_int_from_text(row.get("raw")) if row else None
-                print(f"How good: {'Excellent at 0.' if (rv or 0) == 0 else 'Non-zero; watch.'}")
-                print("Failure signal quality: Medium-to-high if it increments, but many drives never use it meaningfully.")
-            elif aid == 240:
-                print("\nMeaning: Time the heads were flying (not parked).")
-                print("How good: Informational.")
-                print("Failure signal quality: Low (mostly context).")
-            elif aid == 241:
-                rv = _first_int_from_text(row.get("raw")) if row else None
-                tb = _tb_from_lbas(rv) if rv is not None else None
-                print("\nMeaning: Cumulative LBAs written.")
-                if tb is not None:
-                    print(f"How good: Context (~{tb:.2f} TiB written).")
-                else:
-                    print("How good: Context.")
-                print("Failure signal quality: Low (more context than predictor).")
-            elif aid == 242:
-                rv = _first_int_from_text(row.get("raw")) if row else None
-                tb = _tb_from_lbas(rv) if rv is not None else None
-                print("\nMeaning: Cumulative LBAs read.")
-                if tb is not None:
-                    print(f"How good: Context (~{tb:.2f} TiB read).")
-                else:
-                    print("How good: Context.")
-                print("Failure signal quality: Low (more context than predictor).")
-            elif aid == 254:
-                print("\nMeaning: Free-fall events (if supported).")
-                print("How good: Fine at 0.")
-                print("Failure signal quality: Low.")
-            elif aid == 196:
-                print("\nMeaning: Reallocation event count (attempts to remap).")
-                print("How good: Excellent at 0.")
-                print("Failure signal quality: Medium-to-high if it increases with reallocations.")
+        ranked = [
+            (1, 187, "Reported_Uncorrect", "Uncorrectable errors reached the OS/host; corruption has already happened."),
+            (2, 198, "Offline_Uncorrectable", "Unrecoverable sectors found during offline scan/self-test; physical defects confirmed."),
+            (3, 5, "Reallocated_Sector_Ct", "Bad sectors remapped to spares; increasing suggests real media degradation."),
+            (4, 197, "Current_Pending_Sector", "Unstable sectors awaiting re-read/rewrite; data at risk until resolved."),
+            (5, 184, "End-to-End_Error", "Internal data-path corruption (cache/buffer <-> media); logic/RAM path issues."),
+            (6, 10, "Spin_Retry_Count", "Spin-up retries; motor/bearing/power trouble can trap data permanently."),
+            (7, 1, "Raw_Read_Error_Rate", "Vendor-specific; watch normalized VALUE trend for rapid decline (RAW is noisy)."),
+            (8, 7, "Seek_Error_Rate", "Vendor-specific; watch normalized VALUE trend for rapid decline (RAW is noisy)."),
+            (9, 3, "Spin_Up_Time", "Drive taking longer to become ready; can indicate wear (trend matters)."),
+            (10, 188, "Command_Timeout", "Drive commands timing out/hanging; often link/power/bridge issues (trend matters)."),
+            (11, 199, "UDMA_CRC_Error_Count", "Interface CRC errors; usually cable/port/bridge noise, not platter damage."),
+            (12, 191, "G-Sense_Error_Rate", "Shock/vibration events while running; can cause (not just reflect) damage."),
+            (13, 254, "Free_Fall_Sensor", "Recorded free-fall/drop events (history of dangerous handling)."),
+            (14, 193, "Load_Cycle_Count", "Head parking cycles; very high counts increase mechanical wear risk."),
+            (15, 189, "High_Fly_Writes", "Head flying height anomalies during writes; risk weak writes/data fade."),
+            (16, 194, "Temperature_Celsius", "Internal temperature; only critical when extreme (e.g. >60C)."),
+            (17, 190, "Airflow_Temperature_Cel", "Alternate temperature sensor; only critical when extreme."),
+            (18, 9, "Power_On_Hours", "Lifetime hours; context only (older drives have higher baseline risk)."),
+            (19, 4, "Start_Stop_Count", "Spindle start/stop cycles; wear context."),
+            (20, 12, "Power_Cycle_Count", "Power cycles; wear/environment context."),
+            (21, 192, "Power-Off_Retract_Count", "Emergency retracts (power loss/unplug); environment context."),
+            (22, 241, "Total_LBAs_Written", "Cumulative writes; statistics/context."),
+            (23, 242, "Total_LBAs_Read", "Cumulative reads; statistics/context."),
+            (24, 240, "Head_Flying_Hours", "Head flying time; informational."),
+        ]
+
+        zone_headers = {
+            1: "The \"Data is Already Gone\" Zone",
+            6: "The \"Mechanical Failure Imminent\" Zone",
+            11: "The \"Environmental & Usage Stress\" Zone",
+            16: "The \"Old Age & Thermometer\" Zone",
+            22: "The \"Pure Statistics\" Zone (Least Critical)",
+        }
+
+        print(f"\n{Colors.BOLD}SMART attributes ranked strictly from 1 (most critical) to 24 (least critical):{Colors.ENDC}")
+        print("Each attribute is printed on one line (ID + name + current value + meaning).")
+        for rank, aid, nm, meaning in ranked:
+            if rank in zone_headers:
+                print(f"\n{Colors.BOLD}{zone_headers[rank]}:{Colors.ENDC}")
+            c = _rank_color(rank)
+            v = _fmt_smart_value(aid)
+            print(f"{c}{rank:2d}.{Colors.ENDC} {Colors.BOLD}{aid}{Colors.ENDC} {nm}: {v} - {meaning}")
 
         if overall or temp or poh or realloc or pending or offline_unc:
             if overall:
