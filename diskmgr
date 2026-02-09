@@ -83,6 +83,31 @@ def find_mount_targets(source):
         return []
     return _split_nonempty_lines(getattr(res, 'stdout', ''))
 
+def cleanup_mountpoint_dir(mountpoint):
+    """
+    Best-effort cleanup of a mountpoint directory after unmount.
+
+    Only attempts removal for mountpoints under /media/$USER/ and only if the
+    directory is no longer a mount target. Uses rmdir (so it only removes empty
+    directories) to avoid deleting real data.
+    """
+    if not mountpoint:
+        return
+
+    user = os.environ.get('USER', 'root')
+    media_root = os.path.realpath(f"/media/{user}")
+    mp_real = os.path.realpath(mountpoint)
+    if not (mp_real == media_root or mp_real.startswith(media_root + os.sep)):
+        return
+
+    # Still mounted? Don't touch it.
+    if run_command(['findmnt', '-rn', '-M', mountpoint], check=False).returncode == 0:
+        return
+
+    res = run_command(['rmdir', mountpoint], sudo=True, check=False)
+    if getattr(res, 'returncode', 1) == 0:
+        log(f"Removed mountpoint directory {mountpoint}")
+
 def get_script_dir():
     return Path(__file__).resolve().parent
 
@@ -1354,12 +1379,14 @@ class DiskMgrShell(cmd.Cmd):
 
         # Unmount
         unmounted = False
+        unmounted_targets = []
         # 1. Try by mapper
         targets = find_mount_targets(mapper_path)
         if targets:
             for mp in targets:
                 log(f"Unmounting {mp}...")
                 run_command(['umount', mp], sudo=True)
+                unmounted_targets.append(mp)
             unmounted = True
         
         # 2. Try by source path (for non-LUKS)
@@ -1372,6 +1399,7 @@ class DiskMgrShell(cmd.Cmd):
                     for mp in targets:
                         log(f"Unmounting {mp}...")
                         run_command(['umount', mp], sudo=True)
+                        unmounted_targets.append(mp)
                     unmounted = True
 
         # 3. Try by guess
@@ -1379,7 +1407,12 @@ class DiskMgrShell(cmd.Cmd):
             if run_command(['findmnt', '-rn', '-M', mount_guess], check=False).returncode == 0:
                  log(f"Unmounting {mount_guess}...")
                  run_command(['umount', mount_guess], sudo=True)
+                 unmounted_targets.append(mount_guess)
                  unmounted = True
+
+        # Cleanup mountpoint dir(s) (best-effort)
+        for mp in unmounted_targets:
+            cleanup_mountpoint_dir(mp)
         
         # Close
         if os.path.exists(mapper_path):
