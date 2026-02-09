@@ -364,6 +364,33 @@ def _parse_ddrescue_failed_ranges(map_path, sector_size=512):
         return []
     return out
 
+def _lsblk_type(dev_path):
+    res = run_command(['lsblk', '-no', 'TYPE', dev_path], check=False)
+    return (getattr(res, 'stdout', '') or '').strip()
+
+def _lsblk_fstype(dev_path):
+    res = run_command(['lsblk', '-no', 'FSTYPE', dev_path], check=False)
+    return (getattr(res, 'stdout', '') or '').strip()
+
+def _lsblk_partitions(dev_path):
+    """
+    Return a list of partitions under a disk device (NAME, FSTYPE).
+    """
+    res = run_command(['lsblk', '-nr', '-o', 'NAME,TYPE,FSTYPE', dev_path], check=False)
+    rows = []
+    for raw in (getattr(res, 'stdout', '') or '').splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        parts = line.split(None, 2)
+        if len(parts) < 2:
+            continue
+        n, t = parts[0], parts[1]
+        fs = parts[2].strip() if len(parts) >= 3 else ""
+        if t == 'part':
+            rows.append({"name": n, "fstype": fs})
+    return rows
+
 def get_script_dir():
     return Path(__file__).resolve().parent
 
@@ -1530,6 +1557,12 @@ class DiskMgrShell(cmd.Cmd):
             - Ensures the directory exists and attaches the device.
         6.  Policy Enforcement: If the disk is already mounted at a non-standard path, 
             it unmounts and remounts it to the preferred path.
+
+        SAFETY NOTE:
+        - If your mapping points to a whole disk (e.g. /dev/sda) but the actual LUKS/filesystem
+          lives on a partition (e.g. /dev/sda2), diskmgr will only auto-select a partition when
+          it is unambiguous (exactly one candidate). Otherwise it will refuse and ask you to map
+          the correct partition explicitly.
         '''
         name = arg.strip()
         if not name:
@@ -1554,24 +1587,72 @@ class DiskMgrShell(cmd.Cmd):
             log(f"Device not found: {src}", 'ERROR')
             return
             
-        devnode = os.path.realpath(src)
-        
-        # Check LUKS
+        mapped_devnode = os.path.realpath(src)
+        devnode = mapped_devnode
+
+        # Check LUKS / filesystem, with safe partition auto-detection when mapping points at a disk.
         is_luks = False
         try:
             res = run_command(['cryptsetup', 'isLuks', devnode], sudo=True, check=False)
             if res.returncode == 0:
                 is_luks = True
-        except:
-             pass
+        except Exception:
+            pass
 
         if not is_luks:
-             # Not LUKS, check if it has a filesystem
-             res = run_command(['lsblk', '-n', '-o', 'FSTYPE', devnode], check=False)
-             if not res.stdout.strip():
-                 log(f"Device {devnode} is not a valid LUKS device and has no recognizable filesystem.", 'ERROR')
-                 return
-             log(f"Device {devnode} is not LUKS, but has a filesystem. Proceeding with plain mount.")
+            dev_type = _lsblk_type(devnode)
+
+            # If mapping points at a whole disk, try to locate the real payload on a partition.
+            if dev_type == 'disk':
+                disk_fs = _lsblk_fstype(devnode)
+                if disk_fs:
+                    log(f"Device {devnode} is a whole-disk filesystem ({disk_fs}). Proceeding with plain mount.")
+                else:
+                    parts = _lsblk_partitions(devnode)
+                    luks_parts = [p for p in parts if p.get('fstype') == 'crypto_LUKS']
+                    fs_parts = [p for p in parts if p.get('fstype') and p.get('fstype') != 'crypto_LUKS']
+
+                    if len(luks_parts) == 1:
+                        part_path = os.path.realpath(f"/dev/{luks_parts[0]['name']}")
+                        log(f"Mapping '{name}' points to disk {mapped_devnode}, but LUKS was detected on {part_path}. Using the partition for open.")
+                        devnode = part_path
+                        is_luks = True
+                    elif len(luks_parts) > 1:
+                        log(f"Mapping '{name}' points to disk {mapped_devnode}, but multiple LUKS partitions were found.", 'ERROR')
+                        for p in luks_parts:
+                            log(f"  candidate: /dev/{p['name']} (fstype={p.get('fstype')})", 'ERROR')
+                        log(f"Please map the correct partition (e.g. map <id> {name}_part) and open that mapping.", 'ERROR')
+                        return
+                    elif len(fs_parts) == 1:
+                        part_path = os.path.realpath(f"/dev/{fs_parts[0]['name']}")
+                        log(f"Mapping '{name}' points to disk {mapped_devnode}, but a filesystem was detected on {part_path} ({fs_parts[0].get('fstype')}). Using the partition for open.")
+                        devnode = part_path
+                    elif len(fs_parts) > 1:
+                        log(f"Mapping '{name}' points to disk {mapped_devnode}, but multiple filesystem partitions were found.", 'ERROR')
+                        for p in fs_parts:
+                            log(f"  candidate: /dev/{p['name']} (fstype={p.get('fstype')})", 'ERROR')
+                        log("Please map the correct partition explicitly and open that mapping.", 'ERROR')
+                        return
+                    else:
+                        log(f"Device {devnode} is not a valid LUKS device and has no recognizable filesystem (disk has partitions but none look mountable).", 'ERROR')
+                        return
+
+            # Re-check LUKS if we switched from disk -> partition.
+            if devnode != mapped_devnode and not is_luks:
+                try:
+                    res = run_command(['cryptsetup', 'isLuks', devnode], sudo=True, check=False)
+                    if res.returncode == 0:
+                        is_luks = True
+                except Exception:
+                    pass
+
+            if not is_luks:
+                # Not LUKS, check if it has a filesystem
+                fs = _lsblk_fstype(devnode)
+                if not fs:
+                    log(f"Device {devnode} is not a valid LUKS device and has no recognizable filesystem.", 'ERROR')
+                    return
+                log(f"Device {devnode} is not LUKS, but has a filesystem ({fs}). Proceeding with plain mount.")
 
         mapper_path = f"/dev/mapper/{name}"
         target_to_mount = mapper_path
