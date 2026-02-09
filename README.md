@@ -462,7 +462,9 @@ Clone one disk or partition to another: clone <src_name> <dst_name>
         2.  Size Validation: Queries 'blockdev --getsize64' for both. Aborts if dst < src.
         3.  Safety Audit: Verifies that the target is NOT the system root drive.
         4.  Confirmation: Requires solving two math problems to authorize data destruction.
-        5.  Cloning: Executes 'ddrescue --force <src> <dst> <mapfile>' to clone and record progress.
+        5.  Cloning: Executes ddrescue in two phases:
+            - Pass 1: 'ddrescue --force <src> <dst> <mapfile>'
+            - Retry:  'ddrescue --force -r3 <src> <dst> <mapfile>'
         6.  Sync: Flushes kernel buffers to ensure all data is physically committed to disk.
 
         Note: This is a DESTRUCTIVE operation. Solving two math problems is MANDATORY to proceed.

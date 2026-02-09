@@ -309,6 +309,61 @@ def _find_tool_or_common_paths(tool_name, common_paths):
             continue
     return None
 
+def _parse_ddrescue_failed_ranges(map_path, sector_size=512):
+    """
+    Return a list of failed ranges from a ddrescue mapfile.
+
+    ddrescue map lines are typically: <start_hex> <size_hex> <status_char>
+    We treat status '-' as "unrecovered".
+    Ranges are returned as dicts with byte and sector offsets.
+    """
+    if not map_path or not os.path.exists(map_path):
+        return []
+    try:
+        ss = int(sector_size)
+        if ss <= 0:
+            ss = 512
+    except Exception:
+        ss = 512
+
+    out = []
+    try:
+        with open(map_path, 'r', encoding='utf-8', errors='replace') as f:
+            for raw in f:
+                line = raw.strip()
+                if not line or line.startswith('#'):
+                    continue
+                parts = line.split()
+                if len(parts) < 3:
+                    continue
+                a, b, st = parts[0], parts[1], parts[2]
+                if not (a.startswith('0x') and b.startswith('0x') and st):
+                    continue
+                if st[0] != '-':
+                    continue
+                try:
+                    start_b = int(a, 16)
+                    size_b = int(b, 16)
+                except ValueError:
+                    continue
+                if size_b <= 0:
+                    continue
+                end_b = start_b + size_b
+                # Prefer reporting in sectors, but keep bytes if not aligned.
+                start_lba = start_b // ss
+                end_lba = (end_b + ss - 1) // ss  # ceil
+                out.append({
+                    "start_b": start_b,
+                    "end_b": end_b,
+                    "size_b": size_b,
+                    "start_lba": start_lba,
+                    "end_lba": end_lba,
+                    "count_lba": max(0, end_lba - start_lba),
+                })
+    except Exception:
+        return []
+    return out
+
 def get_script_dir():
     return Path(__file__).resolve().parent
 
@@ -2103,7 +2158,9 @@ class DiskMgrShell(cmd.Cmd):
         2.  Size Validation: Queries 'blockdev --getsize64' for both. Aborts if dst < src.
         3.  Safety Audit: Verifies that the target is NOT the system root drive.
         4.  Confirmation: Requires solving two math problems to authorize data destruction.
-        5.  Cloning: Executes 'ddrescue --force <src> <dst> <mapfile>' to clone and record progress.
+        5.  Cloning: Executes ddrescue in two phases:
+            - Pass 1: 'ddrescue --force <src> <dst> <mapfile>'
+            - Retry:  'ddrescue --force -r3 <src> <dst> <mapfile>'
         6.  Sync: Flushes kernel buffers to ensure all data is physically committed to disk.
 
         Note: This is a DESTRUCTIVE operation. Solving two math problems is MANDATORY to proceed.
@@ -2184,6 +2241,16 @@ class DiskMgrShell(cmd.Cmd):
             log("ddrescue not found. Install 'gddrescue' and retry.", 'ERROR')
             return
 
+        # Prefer logical sector size for reporting failures.
+        sector_size = 512
+        try:
+            res_ss = run_command(['sudo', 'blockdev', '--getss', src_real], capture_output=True, check=False)
+            ss = (getattr(res_ss, 'stdout', '') or '').strip()
+            if ss.isdigit():
+                sector_size = int(ss)
+        except Exception:
+            sector_size = 512
+
         # Refuse to run if anything on the destination device tree is mounted.
         # (Whole-disk clone should not proceed if any target partitions are mounted.)
         try:
@@ -2211,15 +2278,36 @@ class DiskMgrShell(cmd.Cmd):
             mapfile = str(mapdir / f"{safe_src}_to_{safe_dst}.map")
 
             log(f"ddrescue mapfile: {mapfile}")
+            # Pass 1: fast clone + mapfile progress.
             cmd = [ddrescue_bin, '--force', src_real, dst_real, mapfile]
-            res = run_command(cmd, sudo=True, capture_output=False, check=False)
+            res1 = run_command(cmd, sudo=True, capture_output=False, check=False)
+
+            # Pass 2: retry failed areas (up to 3 times).
+            log("ddrescue retry pass: -r3 (retry failed sectors up to 3 times)...")
+            cmd_retry = [ddrescue_bin, '--force', '-r3', src_real, dst_real, mapfile]
+            res2 = run_command(cmd_retry, sudo=True, capture_output=False, check=False)
             run_command(['sync'], sudo=True, check=False)
 
-            rc = getattr(res, 'returncode', 0)
-            if rc == 0:
-                log("Cloning complete.")
+            # Report failures based on mapfile after retries.
+            failed = _parse_ddrescue_failed_ranges(mapfile, sector_size=sector_size)
+            if failed:
+                log(f"Unrecovered sectors remain after retries (mapfile: {mapfile}).", 'WARN')
+                print(f"\n{Colors.FAIL}{Colors.BOLD}Unrecovered sector ranges:{Colors.ENDC}")
+                max_show = 80
+                for r in failed[:max_show]:
+                    # LBA range shown as [start, end) for clarity.
+                    print(f"  LBA [{r['start_lba']}, {r['end_lba']})  count={r['count_lba']}  bytes={r['size_b']}")
+                if len(failed) > max_show:
+                    print(f"  ... truncated ({len(failed)} ranges total)")
+                print(f"\n{Colors.WARNING}Mapfile:{Colors.ENDC} {mapfile}")
             else:
-                log(f"Cloning completed with ddrescue exit status {rc}. Check the mapfile for unreadable areas: {mapfile}", 'WARN')
+                log("Cloning complete (no unrecovered sectors reported in the ddrescue mapfile).")
+
+            # ddrescue uses bitmask exit codes; preserve them in logs for troubleshooting.
+            rc1 = getattr(res1, 'returncode', 0)
+            rc2 = getattr(res2, 'returncode', 0)
+            if rc1 != 0 or rc2 != 0:
+                log(f"ddrescue exit status: pass1={rc1}, retry={rc2} (non-zero can indicate read errors even if output is usable).", 'WARN')
         except Exception as e:
             log(f"Cloning failed: {e}", 'ERROR')
 
