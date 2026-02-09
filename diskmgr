@@ -2330,7 +2330,7 @@ class DiskMgrShell(cmd.Cmd):
 
         mode = "-d sat" if ('-d' in cmd) else "-a"
         extra = f"{tran}" if tran else "unknown transport"
-        print(f"\n{Colors.HEADER}--- SMART health: {name} ({extra}, smartctl {mode}) ---{Colors.ENDC}")
+        print(f"\n{Colors.HEADER}{Colors.BOLD}=== SMART health: {name} ({extra}, smartctl {mode}) ==={Colors.ENDC}")
         print(f"{Colors.BOLD}Mapped device:{Colors.ENDC} {mapped_dev}")
         if mapped_dev != disk_dev:
             print(f"{Colors.BOLD}SMART queried on:{Colors.ENDC} {disk_dev} (SMART is disk-level, not partition-level)")
@@ -2348,48 +2348,101 @@ class DiskMgrShell(cmd.Cmd):
         relocev196 = _parse_smart_attr_raw(out, 196)
         long_fail = _parse_smart_long_selftest_failures(out)
 
+        def _to_int(x):
+            if x is None:
+                return None
+            if isinstance(x, int):
+                return x
+            s = str(x).strip().replace(",", "")
+            if s.isdigit() or (s.startswith('-') and s[1:].isdigit()):
+                try:
+                    return int(s, 10)
+                except ValueError:
+                    return None
+            return None
+
         def _v(x):
             return x if x is not None else "-"
 
+        def _color_val(kind, val):
+            """
+            Colorize values: OK=green, WATCH=yellow, BAD=red.
+            """
+            ival = _to_int(val)
+            raw = str(_v(val))
+
+            # Unknown/unavailable
+            if val is None:
+                return raw
+
+            # Severity rules (conservative; trend is unknown).
+            if kind in ("pending", "unc", "reported", "selftest"):
+                if ival is not None and ival > 0:
+                    return f"{Colors.FAIL}{raw}{Colors.ENDC}"
+                return f"{Colors.OKGREEN}{raw}{Colors.ENDC}"
+            if kind in ("crc", "timeout", "errlog", "realloc"):
+                if ival is not None and ival > 0:
+                    return f"{Colors.WARNING}{raw}{Colors.ENDC}"
+                return f"{Colors.OKGREEN}{raw}{Colors.ENDC}"
+            if kind == "temp":
+                if ival is None:
+                    return raw
+                if ival >= 60:
+                    return f"{Colors.FAIL}{raw}{Colors.ENDC}"
+                if ival >= 50:
+                    return f"{Colors.WARNING}{raw}{Colors.ENDC}"
+                return f"{Colors.OKGREEN}{raw}{Colors.ENDC}"
+            return raw
+
+        def _color_overall(s):
+            if not s:
+                return "-"
+            t = str(s).strip()
+            if "PASSED" in t.upper() or "OK" == t.upper():
+                return f"{Colors.OKGREEN}{t}{Colors.ENDC}"
+            return f"{Colors.FAIL}{t}{Colors.ENDC}"
+
+        # Compact, colored summary block first.
         print(f"\n{Colors.BOLD}Key SMART signals (earliest -> most severe):{Colors.ENDC}")
-        print(f"1. 199 UDMA_CRC_Error_Count: {_v(crc199)}")
+        print(f"1. 199 UDMA_CRC_Error_Count: {_color_val('crc', crc199)}")
         print("   - Earliest sign of trouble, usually cable/USB bridge/port/noise, not the platter.")
         print("   - Severity depends on whether it's increasing.")
-        print(f"2. 188 Command_Timeout: {_v(cmd188)}")
+        print(f"2. 188 Command_Timeout: {_color_val('timeout', cmd188)}")
         print("   - Commands timing out can be flaky power, cabling/bridge issues, or a struggling drive.")
         print("   - Increasing is concerning.")
-        print(f"3. SMART error log entries / recent I/O errors: {_v(errlog)}")
+        print(f"3. SMART error log entries / recent I/O errors: {_color_val('errlog', errlog)}")
         print("   - If the drive logged read/write errors recently, treat it as an early-but-real warning.")
-        print(f"4. 197 Current_Pending_Sector: {_v(pend197)}")
+        print(f"4. 197 Current_Pending_Sector: {_color_val('pending', pend197)}")
         print("   - Sectors the drive can't read reliably right now.")
         print("   - Any non-zero is a red flag; increasing is worse.")
-        print(f"5. 198 Offline_Uncorrectable: {_v(off198)}")
+        print(f"5. 198 Offline_Uncorrectable: {_color_val('unc', off198)}")
         print("   - Unrecoverable sectors found during offline scan.")
         print("   - Any non-zero is bad.")
-        print(f"6. 187 Reported_Uncorrect: {_v(rep187)}")
+        print(f"6. 187 Reported_Uncorrect: {_color_val('reported', rep187)}")
         print("   - The drive had to tell the host \"I can't read this.\"")
         print("   - Any non-zero is serious.")
-        print(f"7. 5 Reallocated_Sector_Ct: {_v(realloc5)}   196 Reallocation_Event_Count: {_v(relocev196)}")
+        print(f"7. 5 Reallocated_Sector_Ct: {_color_val('realloc', realloc5)}   196 Reallocation_Event_Count: {_color_val('realloc', relocev196)}")
         print("   - The drive has started swapping bad sectors for spares.")
         print("   - A small stable number can happen; a number that keeps growing is a strong \"drive is degrading\" signal.")
-        print(f"8. SMART long/extended self-test failures: {_v(long_fail)}")
+        print(f"8. SMART long/extended self-test failures: {_color_val('selftest', long_fail)}")
         print("   - One of the strongest \"this drive is not trustworthy\" indicators, because it's an end-to-end read test that actually failed.")
 
         if overall or temp or poh or realloc or pending or offline_unc:
             if overall:
-                print(f"{Colors.BOLD}Overall:{Colors.ENDC} {overall}")
+                print(f"\n{Colors.BOLD}Overall:{Colors.ENDC} {_color_overall(overall)}")
             if temp:
-                print(f"{Colors.BOLD}Temp:{Colors.ENDC} {temp} C")
+                print(f"{Colors.BOLD}Temp:{Colors.ENDC} {_color_val('temp', temp)} C")
             if poh:
                 print(f"{Colors.BOLD}Power-on hours:{Colors.ENDC} {poh}")
             if realloc:
-                print(f"{Colors.BOLD}Reallocated sectors:{Colors.ENDC} {realloc}")
+                print(f"{Colors.BOLD}Reallocated sectors:{Colors.ENDC} {_color_val('realloc', realloc)}")
             if pending:
-                print(f"{Colors.BOLD}Pending sectors:{Colors.ENDC} {pending}")
+                print(f"{Colors.BOLD}Pending sectors:{Colors.ENDC} {_color_val('pending', pending)}")
             if offline_unc:
-                print(f"{Colors.BOLD}Offline uncorrectable:{Colors.ENDC} {offline_unc}")
+                print(f"{Colors.BOLD}Offline uncorrectable:{Colors.ENDC} {_color_val('unc', offline_unc)}")
             print("")
 
+        print(f"{Colors.HEADER}{Colors.BOLD}--- smartctl output ---{Colors.ENDC}")
         if out.strip():
             print(out.rstrip())
         if err.strip():
