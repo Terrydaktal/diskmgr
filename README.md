@@ -2,6 +2,32 @@
 
 A utility designed to simplify the management of encrypted and plain removable media. It maps friendly labels to hardware-specific Persistent Device Paths (PDP), ensuring that disks are recognized reliably even if device nodes change.
 
+## Project Structure
+
+```text
+.
+├── diskmap.tsv      # Configuration file storing disk mappings
+├── diskmgr          # Main Python-based interactive CLI tool
+├── gen_readme.py    # Script to regenerate this documentation
+└── README.md        # This file
+```
+
+## File Descriptions
+
+### `diskmgr` (Main Application)
+- **Description**: A comprehensive interactive shell for managing disks, LUKS containers, and filesystems.
+- **Inputs**: User commands via interactive shell or pipe; system hardware information via `lsblk`, `udevadm`, `cryptsetup`, etc.
+- **Outputs**: Formatted tables, system state changes (mounts, encryption status), and updates to `diskmap.tsv`.
+
+### `diskmap.tsv` (Configuration)
+- **Description**: Tab-separated values file that stores the mapping between user-defined friendly names and persistent device paths (e.g., `/dev/disk/by-id/...`).
+- **Format**: `<friendly_name>\t<persistent_device_path>`
+
+### `gen_readme.py` (Documentation Generator)
+- **Description**: Automates the generation of `README.md` by querying `diskmgr`'s help system and examples.
+- **Inputs**: `diskmgr` help output and command examples.
+- **Outputs**: An updated `README.md` file.
+
 ## Overview
 
 ```text
@@ -103,13 +129,33 @@ Display the physical partition layout and free space for all plugged-in disks.
 ### Example Output
 
 ```text
-Disk: /dev/sda (ST1000LM035-1RK172)
+Disk: /dev/sda (ST1000LM035-1RK172) [gpt] [Sector: L512/P4096] [Total Sectors: 1953525168]
+[ GPT Primary 34s (17408.00B) ] [ free 2014s (1007.00KiB) ] [ sda1 - 262144s (128.00MiB) (msftres, no_automount) ] [ sda2 - 1953259520s (953740.00MiB ≈ 931.4GiB) (msftdata) ] [ free 1423s (711.50KiB) ] [ GPT Backup 33s (16896.00B) ]
+
+NAME                      FSTYPE       FSVER  LABEL        UUID                                   FSAVAIL    FSUSE%   MOUNTPOINTS
+sda
+├─sda1
+└─sda2                    crypto_LUKS  2                   e038a8b5-d3a7-4bbb-bbea-5bed8cc07a04
+    └─1a                  ext4         1.0    1a           5933d845-1098-4f16-ad7f-ff1f4a4a2105   18.3G      98%      /media/lewis/1a
+-----------------------------------------------------------------------------------------------------------------------------------------------------------
 
 Disk: /dev/sdb (ST2000DM008-2FR102)
 
-Disk: /dev/nvme0n1 (WD_BLACK SN8100 2000GB)
+Disk: /dev/nvme0n1 (WD_BLACK SN8100 2000GB) [msdos] [Sector: L512/P512] [Total Sectors: 3907029168]
+[ MBR 2s (1024.00B) ] [ free 2046s (1023.00KiB) ] [ nvme0n1p1 ext4 3907026944s (1907728.00MiB ≈ 1863.0GiB) (boot) ] [ free 176s (88.00KiB) ]
 
-Disk: /dev/nvme1n1 (WD Blue SN570 1TB)
+NAME                      FSTYPE       FSVER  LABEL        UUID                                   FSAVAIL    FSUSE%   MOUNTPOINTS
+nvme0n1
+└─nvme0n1p1               ext4         1.0                 88f1dad3-95c6-418e-bea8-f5f3e072ea29   765.9G     53%      /
+-----------------------------------------------------------------------------------------------------------------------------------------------------------
+
+Disk: /dev/nvme1n1 (WD Blue SN570 1TB) [msdos] [Sector: L512/P512] [Total Sectors: 1953525168]
+[ MBR 2s (1024.00B) ] [ free 2046s (1023.00KiB) ] [ nvme1n1p1 ext4 1953523120s (953868.71MiB ≈ 931.5GiB) ]
+
+NAME                      FSTYPE       FSVER  LABEL        UUID                                   FSAVAIL    FSUSE%   MOUNTPOINTS
+nvme1n1
+└─nvme1n1p1               ext4         1.0    data         72c22012-b161-4e2a-a762-94ff7fda47f9   142.3G     79%      /media/lewis/data1
+-----------------------------------------------------------------------------------------------------------------------------------------------------------
 ```
 
 ## Command Reference: `boot`
@@ -145,7 +191,24 @@ Device: /dev/dm-1 (ext4)
 
 Device: /dev/nvme0n1p1 (ext4)
   Result: Found GRUB config at /boot/grub/grub.cfg
-  Result: Error checking path: Command '['sudo', 'awk', '-F', "'", '\n  /search[[:space:]].*--fs-uuid/ {g_search=$NF}\n\n  /^[[:space:]]*submenu / {\n    submenu_title=$2\n    next\n  }\n\n  /^[[:space:]]*menuentry / {\n    e=$2; search_u=""; root_u=""; in_entry=1\n    next\n  }\n\n  in_entry && search_u=="" && /search[[:space:]].*--fs-uuid/ {search_u=$NF}\n  in_entry && root_u=="" && /(linux|linuxefi)[[:space:]].*root=UUID=/ {\n    match($0,/root=UUID=[0-9a-fA-F-]+/)\n    if (RSTART) root_u=substr($0,RSTART+10,RLENGTH-10)\n  }\n\n  in_entry && /^[[:space:]]*}/ {\n    if (submenu_title=="") submenu_title="Top-level"\n    s = (search_u!="" ? search_u : g_search)\n    r = (root_u!=""   ? root_u   : "-")\n    if (e ~ /UEFI Firmware Settings/) { s="(firmware)"; r="(firmware)" }\n    \n    print submenu_title "\\t" e "\\t" s "\\t" r\n    in_entry=0\n  }\n', '/boot/grub/grub.cfg']' returned non-zero exit status 1.
+
+Top-level
+  └─ Linux Mint 22.1 Xfce                                                      SEARCH=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]  ROOT=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]
+
+Advanced options for Linux Mint 22.1 Xfce
+  ├─ Linux Mint 22.1 Xfce, with Linux 6.17.9-061709-generic                    SEARCH=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]  ROOT=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]
+  ├─ Linux Mint 22.1 Xfce, with Linux 6.17.9-061709-generic (recovery mode)    SEARCH=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]  ROOT=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]
+  ├─ Linux Mint 22.1 Xfce, with Linux 6.16.12-061612-generic                   SEARCH=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]  ROOT=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]
+  ├─ Linux Mint 22.1 Xfce, with Linux 6.16.12-061612-generic (recovery mode)   SEARCH=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]  ROOT=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]
+  ├─ Linux Mint 22.1 Xfce, with Linux 6.16.0-061600-generic                    SEARCH=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]  ROOT=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]
+  ├─ Linux Mint 22.1 Xfce, with Linux 6.16.0-061600-generic (recovery mode)    SEARCH=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]  ROOT=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]
+  ├─ Linux Mint 22.1 Xfce, with Linux 6.8.0-100-generic                        SEARCH=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]  ROOT=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]
+  ├─ Linux Mint 22.1 Xfce, with Linux 6.8.0-100-generic (recovery mode)        SEARCH=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]  ROOT=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]
+  ├─ Linux Mint 22.1 Xfce, with Linux 6.8.0-88-generic                         SEARCH=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]  ROOT=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]
+  ├─ Linux Mint 22.1 Xfce, with Linux 6.8.0-88-generic (recovery mode)         SEARCH=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]  ROOT=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]
+  ├─ Linux Mint 22.1 Xfce, with Linux 6.8.0-51-generic                         SEARCH=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]  ROOT=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]
+  ├─ Linux Mint 22.1 Xfce, with Linux 6.8.0-51-generic (recovery mode)         SEARCH=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]  ROOT=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]
+  └─ UEFI Firmware Settings                                                    SEARCH=(firmware)                           [-]  ROOT=(firmware)                           [-]
 ------------------------------------------------------------
 
 Device: /dev/nvme1n1p1 (ext4)

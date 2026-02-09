@@ -52,6 +52,32 @@ def main():
     readme_content = "# Disk Manager (diskmgr)\n\n"
     readme_content += "A utility designed to simplify the management of encrypted and plain removable media. It maps friendly labels to hardware-specific Persistent Device Paths (PDP), ensuring that disks are recognized reliably even if device nodes change.\n\n"
 
+    # Project Structure
+    readme_content += "## Project Structure\n\n"
+    readme_content += "```text\n"
+    readme_content += ".\n"
+    readme_content += "├── diskmap.tsv      # Configuration file storing disk mappings\n"
+    readme_content += "├── diskmgr          # Main Python-based interactive CLI tool\n"
+    readme_content += "├── gen_readme.py    # Script to regenerate this documentation\n"
+    readme_content += "└── README.md        # This file\n"
+    readme_content += "```\n\n"
+
+    # File Descriptions
+    readme_content += "## File Descriptions\n\n"
+    readme_content += "### `diskmgr` (Main Application)\n"
+    readme_content += "- **Description**: A comprehensive interactive shell for managing disks, LUKS containers, and filesystems.\n"
+    readme_content += "- **Inputs**: User commands via interactive shell or pipe; system hardware information via `lsblk`, `udevadm`, `cryptsetup`, etc.\n"
+    readme_content += "- **Outputs**: Formatted tables, system state changes (mounts, encryption status), and updates to `diskmap.tsv`.\n\n"
+    
+    readme_content += "### `diskmap.tsv` (Configuration)\n"
+    readme_content += "- **Description**: Tab-separated values file that stores the mapping between user-defined friendly names and persistent device paths (e.g., `/dev/disk/by-id/...`).\n"
+    readme_content += "- **Format**: `<friendly_name>\\t<persistent_device_path>`\n\n"
+
+    readme_content += "### `gen_readme.py` (Documentation Generator)\n"
+    readme_content += "- **Description**: Automates the generation of `README.md` by querying `diskmgr`'s help system and examples.\n"
+    readme_content += "- **Inputs**: `diskmgr` help output and command examples.\n"
+    readme_content += "- **Outputs**: An updated `README.md` file.\n\n"
+
     # 1. Main Help / Overview
     main_help = clean_diskmgr_output(get_help())
     readme_content += "## Overview\n\n```text\n" + main_help + "\n```\n\n"
