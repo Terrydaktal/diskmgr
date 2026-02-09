@@ -233,6 +233,27 @@ def _parse_smart_error_log_count(out):
             return cnt
     return None
 
+def _parse_smart_last_error_poh(out):
+    """
+    Parse the most recent ATA SMART Error Log entry's power-on lifetime (hours).
+
+    smartctl typically formats the most recent entry as:
+      "Error 1 occurred at disk power-on lifetime: 21239 hours (885 days + 23 hours)"
+    Returns int hours, or None if not found / not an ATA SMART error log.
+    """
+    if not out:
+        return None
+    m = re.search(
+        r"(?m)^\s*Error\s+1\s+occurred\s+at\s+disk\s+power-on\s+lifetime:\s*([0-9,]+)\s*(?:hours|h)\b",
+        str(out),
+    )
+    if not m:
+        return None
+    try:
+        return int(m.group(1).replace(",", ""), 10)
+    except ValueError:
+        return None
+
 def _smartctl_looks_seagate(out):
     if not out:
         return False
@@ -2531,10 +2552,29 @@ class DiskMgrShell(cmd.Cmd):
         else:
             print(f"{Colors.BOLD}SMART queried on:{Colors.ENDC} {disk_dev}")
 
+        # Time since last SMART error (if the drive has an ATA SMART Error Log).
+        cur_poh_h = _first_int_from_text(poh)
+        last_err_poh_h = _parse_smart_last_error_poh(out)
+        errlog_cnt = _parse_smart_error_log_count(out)
+        if last_err_poh_h is not None:
+            delta_h = cur_poh_h - last_err_poh_h if (cur_poh_h is not None) else None
+            if delta_h is not None and delta_h >= 0:
+                delta_days = delta_h / 24.0
+                # Color: green if very old, yellow if recent.
+                if delta_h < 72:
+                    delta_disp = f"{Colors.WARNING}{delta_h}h{Colors.ENDC} (~{delta_days:.1f} days)"
+                else:
+                    delta_disp = f"{Colors.OKGREEN}{delta_h}h{Colors.ENDC} (~{delta_days:.1f} days)"
+                print(f"{Colors.BOLD}Time since last SMART error:{Colors.ENDC} {delta_disp} (last at POH {last_err_poh_h}h)")
+            else:
+                print(f"{Colors.BOLD}Last SMART error logged at:{Colors.ENDC} POH {last_err_poh_h}h")
+        elif errlog_cnt == 0:
+            print(f"{Colors.BOLD}SMART Error Log:{Colors.ENDC} {Colors.OKGREEN}No Errors Logged{Colors.ENDC}")
+
         # Key HDD indicators (earliest -> most severe), with current values if present.
         crc199 = _parse_smart_attr_raw(out, 199)
         cmd188 = _parse_smart_attr_raw(out, 188)
-        errlog = _parse_smart_error_log_count(out)
+        errlog = errlog_cnt
         pend197 = _parse_smart_attr_raw(out, 197)
         off198 = _parse_smart_attr_raw(out, 198)
         rep187 = _parse_smart_attr_raw(out, 187)
