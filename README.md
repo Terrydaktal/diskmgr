@@ -420,7 +420,7 @@ Initialize a disk: create <name> [options]
              manageable via diskmgr's persistent naming.
 
         Options:
-          --fs <ext4|xfs>   Filesystem type (default: ext4)
+          --fs <ext4|xfs|btrfs>   Filesystem type (default: ext4)
           --label <label>   Set a different internal filesystem label (other than <name>)
           --plain           Create a non-encrypted disk (skips LUKS)
           --gpt             Create GPT partition table + 1 partition (Whole disk only)
@@ -434,7 +434,7 @@ Initialize a disk: create <name> [options]
             - Uses 'passgen' to generate a master key.
             - Runs 'cryptsetup luksFormat' with LUKS2 encryption.
         5.  Filesystem:
-            - Formats the cleartext device with ext4 or xfs.
+            - Formats the cleartext device with ext4, xfs, or btrfs.
             - (ext4 only): Reclaims the 5% reserved space for root using 'tune2fs -m 0'.
         6.  Persistence: Adds the new disk's PDP to diskmap.tsv automatically.
 

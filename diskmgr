@@ -2900,7 +2900,7 @@ class DiskMgrShell(cmd.Cmd):
              manageable via diskmgr's persistent naming.
         
         Options:
-          --fs <ext4|xfs>   Filesystem type (default: ext4)
+          --fs <ext4|xfs|btrfs>   Filesystem type (default: ext4)
           --label <label>   Set a different internal filesystem label (other than <name>)
           --plain           Create a non-encrypted disk (skips LUKS)
           --gpt             Create GPT partition table + 1 partition (Whole disk only)
@@ -2913,8 +2913,8 @@ class DiskMgrShell(cmd.Cmd):
         4.  LUKS Format (Default):
             - Uses 'passgen' to generate a master key.
             - Runs 'cryptsetup luksFormat' with LUKS2 encryption.
-        5.  Filesystem: 
-            - Formats the cleartext device with ext4 or xfs.
+        5.  Filesystem:
+            - Formats the cleartext device with ext4, xfs, or btrfs.
             - (ext4 only): Reclaims the 5% reserved space for root using 'tune2fs -m 0'.
         6.  Persistence: Adds the new disk's PDP to diskmap.tsv automatically.
 
@@ -2922,7 +2922,7 @@ class DiskMgrShell(cmd.Cmd):
         '''
         parser = CmdArgumentParser(prog='create', add_help=False)
         parser.add_argument('args', nargs=1, help='<name>')
-        parser.add_argument('--fs', default='ext4', choices=['ext4', 'xfs'])
+        parser.add_argument('--fs', default='ext4', choices=['ext4', 'xfs', 'btrfs'])
         parser.add_argument('--label', help='Filesystem label')
         parser.add_argument('--plain', action='store_true', help='No LUKS encryption')
         parser.add_argument('--gpt', action='store_true')
@@ -3033,6 +3033,14 @@ class DiskMgrShell(cmd.Cmd):
             run_command(['tune2fs', '-m', '0', fs_target], sudo=True)
         elif args.fs == 'xfs':
             run_command(['mkfs.xfs', '-f', '-L', label, fs_target], sudo=True)
+        elif args.fs == 'btrfs':
+            mkfs_btrfs = _find_tool_or_common_paths('mkfs.btrfs', [
+                '/usr/sbin/mkfs.btrfs',
+                '/sbin/mkfs.btrfs',
+                '/usr/local/sbin/mkfs.btrfs',
+            ]) or 'mkfs.btrfs'
+            # -f required because we just wipefs'ed; still safer to be explicit.
+            run_command([mkfs_btrfs, '-f', '-L', label, fs_target], sudo=True)
 
         # Mount
         mountpoint = f"/media/{os.environ.get('USER', 'root')}/{label}"
