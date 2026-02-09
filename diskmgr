@@ -883,8 +883,12 @@ class DiskMgrShell(cmd.Cmd):
         print(f"  {Colors.OKGREEN}health <name>{Colors.ENDC}")
         print("      Shows SMART health (smartctl -a) for the underlying disk (USB uses -d sat).")
 
+        print(f"  {Colors.OKGREEN}scrub <name>{Colors.ENDC}")
+        print("      Runs a blocking btrfs scrub on a mounted filesystem and records user.last_scrub in xattrs.")
+
         print(f"  {Colors.OKGREEN}selftest <name>{Colors.ENDC}")
         print("      Starts a SMART long self-test (smartctl -t long) for the underlying disk (USB uses -d sat).")
+
 
         print(f"  {Colors.OKGREEN}exit / quit / Ctrl+D{Colors.ENDC}")
         print("      Exit the application.")
@@ -3180,6 +3184,85 @@ class DiskMgrShell(cmd.Cmd):
             log(f"Recorded xattr: user.last_defrag={ds} on {mnt}")
         except Exception as e:
             log(f"Defrag failed: {e}", 'ERROR')
+
+    def do_scrub(self, arg):
+        '''Scrub a mounted btrfs filesystem: scrub <name>
+
+        UNDER THE HOOD:
+        1.  Validation: Verifies the disk is mapped and currently mounted.
+        2.  Confirmation: Requires solving two math problems.
+        3.  Execution: Runs 'sudo btrfs scrub start -B -R <mountpoint>'.
+        4.  Recording: Stores a timestamp on the mountpoint root via:
+              sudo setfattr -n user.last_scrub -v "<date>" <mountpoint>
+        '''
+        args = arg.split()
+        if len(args) != 1:
+            log("Usage: scrub <name>", 'ERROR')
+            return
+
+        name = args[0]
+        mnt = self.get_mountpoint(name)
+        if not mnt:
+            log(f"Disk '{name}' is not mounted. Run 'open {name}' first.", 'ERROR')
+            return
+
+        # Determine filesystem type.
+        fstype = ""
+        try:
+            res_fs = run_command(['findmnt', '-rn', '-M', mnt, '-o', 'FSTYPE'], check=False)
+            fstype = (getattr(res_fs, 'stdout', '') or '').strip().lower()
+        except Exception:
+            fstype = ""
+
+        if fstype != "btrfs":
+            log(f"Scrub requires btrfs, but {mnt} is '{fstype or 'unknown'}'.", 'ERROR')
+            return
+
+        print(f"Scrubbing: {Colors.BOLD}{mnt}{Colors.ENDC} (fstype=btrfs)")
+        if not self.extensive_confirm(f"scrub {name} ({mnt})", destructive=False):
+            return
+
+        run_command(['sudo', '-v'])
+
+        btrfs_bin = _find_tool_or_common_paths('btrfs', [
+            '/usr/sbin/btrfs',
+            '/sbin/btrfs',
+            '/usr/local/sbin/btrfs',
+            '/usr/bin/btrfs',
+            '/bin/btrfs',
+        ])
+        if btrfs_bin is None:
+            log("btrfs not found. Install 'btrfs-progs' and retry.", 'ERROR')
+            return
+
+        setfattr_bin = _find_tool_or_common_paths('setfattr', [
+            '/usr/bin/setfattr',
+            '/bin/setfattr',
+            '/usr/sbin/setfattr',
+            '/sbin/setfattr',
+        ])
+
+        try:
+            # -B blocks until complete; -R reports stats.
+            run_command([btrfs_bin, 'scrub', 'start', '-B', '-R', mnt], sudo=True, capture_output=False, check=False)
+
+            if setfattr_bin is None:
+                log("setfattr not found. Install 'attr' and retry to record last_scrub.", 'WARN')
+                return
+
+            ds = ""
+            try:
+                res_date = run_command(['date'], capture_output=True, check=False)
+                ds = (getattr(res_date, 'stdout', '') or '').strip()
+            except Exception:
+                ds = ""
+            if not ds:
+                ds = datetime.datetime.now().isoformat(sep=' ', timespec='seconds')
+
+            run_command([setfattr_bin, '-n', 'user.last_scrub', '-v', ds, mnt], sudo=True, check=False)
+            log(f"Recorded xattr: user.last_scrub={ds} on {mnt}")
+        except Exception as e:
+            log(f"Scrub failed: {e}", 'ERROR')
 
     def do_create(self, arg):
         '''Initialize a disk: create <name> [options]
