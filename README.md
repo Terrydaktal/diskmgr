@@ -25,9 +25,10 @@ COMMANDS:
       Mounts to /media/$USER/<label> (prefers label over mapping name).
   close <name>
       Unmounts and closes the disk.
-  label <name> [new_label] [--remount]
+  label <name> [new_label]
       Get or set the filesystem label of an OPEN disk.
-      Use --remount to immediately move the mount to the new label path.
+  remount <name>
+      Move an OPEN disk's mount to /media/$USER/<label> (and clean up old mountpoint dirs).
   luks <passwd|backup|restore>
       LUKS management: change password, backup/restore headers.
   create <name> [options]
@@ -257,10 +258,7 @@ Unmount and lock (if encrypted) a disk: close <name>
 ## Command Reference: `label`
 
 ```text
-Get or set the filesystem label of an OPEN disk: label <name> [new_label] [--remount]
-
-        Options:
-          --remount        Unmount and remount the disk to the new label's path.
+Get or set the filesystem label of an OPEN disk: label <name> [new_label]
 
         UNDER THE HOOD:
         1.  Validation: Verifies that the disk is currently open/unlocked.
@@ -269,9 +267,22 @@ Get or set the filesystem label of an OPEN disk: label <name> [new_label] [--rem
             - ext4: Uses 'e2label' on the active device.
             - xfs: Requires a temporary unmount, then uses 'xfs_admin -L', then remounts.
         4.  Refresh: Executes 'udevadm trigger' to force tools like 'lsblk' to see the change.
-        5.  Remount (Optional): If --remount is set, moves the mount to /media/$USER/new_label.
 
         The label is written directly to the disk hardware and persists across different computers.
+```
+
+## Command Reference: `remount`
+
+```text
+Remount an OPEN disk to its label path: remount <name>
+
+        Moves the current mount (which may be at /media/$USER/<uuid> or another path)
+        to /media/$USER/<label>. Cleans up old mountpoint directories under /media/$USER
+        if they become empty after unmount.
+
+        Safety:
+        - Refuses if /media/$USER/<label> is already mounted by a different device.
+        - Refuses if the target directory exists, is not a mountpoint, and is non-empty.
 ```
 
 ## Command Reference: `luks`
