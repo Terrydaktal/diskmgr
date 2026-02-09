@@ -65,8 +65,16 @@ COMMANDS:
       Clones one disk to another (requires target >= source size).
   sync <sec_name> <pri_name>
       Syncs two mounted disks (rsync pri -> sec).
+  defrag <name>
+      Defragments a mounted filesystem and records the timestamp in xattrs (user.last_defrag).
+  fsdiag <name>
+      Shows filesystem diagnostics, last_defrag xattr, and (ext4 only) a fragmentation score.
   health <name>
       Shows SMART health (smartctl -a) for the underlying disk (USB uses -d sat).
+  scrub <name>
+      Runs a blocking btrfs scrub on a mounted filesystem and records user.last_scrub in xattrs.
+  selftest <name>
+      Starts a SMART long self-test (smartctl -t long) for the underlying disk (USB uses -d sat).
   exit / quit / Ctrl+D
       Exit the application.
 
@@ -141,14 +149,19 @@ sda
     └─1a                  ext4         1.0    1a           5933d845-1098-4f16-ad7f-ff1f4a4a2105   18.3G      98%      /media/lewis/1a
 -----------------------------------------------------------------------------------------------------------------------------------------------------------
 
-Disk: /dev/sdb (ST2000DM008-2FR102)
+Disk: /dev/sdb (ST2000DM008-2FR102) [none] [Sector: L512/P4096] [Total Sectors: 3907029168]
+
+NAME                      FSTYPE       FSVER  LABEL        UUID                                   FSAVAIL    FSUSE%   MOUNTPOINTS
+sdb                       crypto_LUKS  2                   885a66c1-6d5f-4d24-adfd-e7c7975dfe65
+└─1b                      ext4         1.0    1b           7b6531c9-459f-4b44-a286-0cc25fbe3ab7   875.1G     47%      /media/lewis/1b
+-----------------------------------------------------------------------------------------------------------------------------------------------------------
 
 Disk: /dev/nvme0n1 (WD_BLACK SN8100 2000GB) [msdos] [Sector: L512/P512] [Total Sectors: 3907029168]
 [ MBR 2s (1024.00B) ] [ free 2046s (1023.00KiB) ] [ nvme0n1p1 ext4 3907026944s (1907728.00MiB ≈ 1863.0GiB) (boot) ] [ free 176s (88.00KiB) ]
 
 NAME                      FSTYPE       FSVER  LABEL        UUID                                   FSAVAIL    FSUSE%   MOUNTPOINTS
 nvme0n1
-└─nvme0n1p1               ext4         1.0                 88f1dad3-95c6-418e-bea8-f5f3e072ea29   765.9G     53%      /
+└─nvme0n1p1               ext4         1.0                 88f1dad3-95c6-418e-bea8-f5f3e072ea29   765.8G     53%      /
 -----------------------------------------------------------------------------------------------------------------------------------------------------------
 
 Disk: /dev/nvme1n1 (WD Blue SN570 1TB) [msdos] [Sector: L512/P512] [Total Sectors: 1953525168]
@@ -156,7 +169,7 @@ Disk: /dev/nvme1n1 (WD Blue SN570 1TB) [msdos] [Sector: L512/P512] [Total Sector
 
 NAME                      FSTYPE       FSVER  LABEL        UUID                                   FSAVAIL    FSUSE%   MOUNTPOINTS
 nvme1n1
-└─nvme1n1p1               ext4         1.0    data         72c22012-b161-4e2a-a762-94ff7fda47f9   142.3G     79%      /media/lewis/data1
+└─nvme1n1p1               ext4         1.0    data         72c22012-b161-4e2a-a762-94ff7fda47f9   219.6G     71%      /media/lewis/data1
 -----------------------------------------------------------------------------------------------------------------------------------------------------------
 ```
 
@@ -276,6 +289,12 @@ Unlock (if encrypted) and mount a disk: open <name>
             - Ensures the directory exists and attaches the device.
         6.  Policy Enforcement: If the disk is already mounted at a non-standard path,
             it unmounts and remounts it to the preferred path.
+
+        SAFETY NOTE:
+        - If your mapping points to a whole disk (e.g. /dev/sda) but the actual LUKS/filesystem
+          lives on a partition (e.g. /dev/sda2), diskmgr will only auto-select a partition when
+          it is unambiguous (exactly one candidate). Otherwise it will refuse and ask you to map
+          the correct partition explicitly.
 ```
 
 ## Command Reference: `close`
@@ -342,6 +361,74 @@ LUKS encryption management: luks <passwd|backup|restore> [options]
           passwd <name>           Change the LUKS passphrase.
           backup <name> [file]    Save the LUKS header to a file.
           restore <name> <file>   Restore the LUKS header from a file (Destructive).
+```
+
+## Command Reference: `health`
+
+```text
+Display SMART health for a mapped disk: health <name>
+
+        Runs smartctl against the underlying DISK device for the mapping.
+        - If the mapping points to a partition, diskmgr automatically targets the parent disk.
+        - If the disk transport is USB and the device is /dev/sdX, diskmgr uses:
+              smartctl -d sat -a /dev/sdX
+          (common for USB-SATA bridges).
+```
+
+## Command Reference: `selftest`
+
+```text
+Start a SMART long self-test: selftest <name>
+
+        Runs smartctl long test against the underlying DISK device for the mapping.
+        - If the mapping points to a partition, diskmgr targets the parent disk.
+        - If the disk transport is USB and the device is /dev/sdX, diskmgr uses:
+              smartctl -d sat -t long /dev/sdX
+          (common for USB-SATA bridges).
+```
+
+## Command Reference: `defrag`
+
+```text
+Defragment a mounted filesystem: defrag <name>
+
+        UNDER THE HOOD:
+        1.  Validation: Verifies the disk is mapped and currently mounted.
+        2.  Confirmation: Requires solving two math problems.
+        3.  Execution:
+            - ext4:  runs 'sudo e4defrag <mountpoint>'
+            - btrfs: runs 'sudo btrfs filesystem defragment -r <mountpoint>'
+        4.  Recording: Stores a timestamp on the mountpoint root via:
+              sudo setfattr -n user.last_defrag -v "<date>" <mountpoint>
+```
+
+## Command Reference: `fsdiag`
+
+```text
+Filesystem diagnostics: fsdiag <name>
+
+        Shows filesystem-specific diagnostic output and local "maintenance" timestamps.
+
+        - ext4:  sudo tune2fs -l <device>
+                sudo e4defrag -c <mountpoint>   (fragmentation score)
+        - btrfs: sudo btrfs filesystem usage <mountpoint>
+        - xfs:   xfs_info <mountpoint>
+
+        Also reads xattrs from the mountpoint root:
+          user.last_defrag, user.last_scrub
+```
+
+## Command Reference: `scrub`
+
+```text
+Scrub a mounted btrfs filesystem: scrub <name>
+
+        UNDER THE HOOD:
+        1.  Validation: Verifies the disk is mapped and currently mounted.
+        2.  Confirmation: Requires solving two math problems.
+        3.  Execution: Runs 'sudo btrfs scrub start -B -R <mountpoint>'.
+        4.  Recording: Stores a timestamp on the mountpoint root via:
+              sudo setfattr -n user.last_scrub -v "<date>" <mountpoint>
 ```
 
 ## Command Reference: `erase`
@@ -445,7 +532,7 @@ Initialize a disk: create <name> [options]
 Clone one disk or partition to another: clone <src_name> <dst_name>
 
         WARNING (DATA DESTRUCTION):
-        - This command writes directly to the destination block device (like running dd).
+        - This command writes directly to the destination block device (like running ddrescue/dd).
         - The destination is overwritten starting at byte 0. Any existing partition table,
           filesystems, and files on the destination WILL BE DESTROYED.
         - If the destination is larger than the source, bytes beyond the source size are
@@ -510,18 +597,6 @@ Synchronize two mounted disks: sync <secondary_name> <primary_name>
 
         Note: The SECONDARY disk will be modified to match the PRIMARY disk.
         All files on the secondary that do not exist on the primary will be DELETED.
-```
-
-## Command Reference: `health`
-
-```text
-Display SMART health for a mapped disk: health <name>
-
-        Runs smartctl against the underlying DISK device for the mapping.
-        - If the mapping points to a partition, diskmgr automatically targets the parent disk.
-        - If the disk transport is USB and the device is /dev/sdX, diskmgr uses:
-              smartctl -d sat -a /dev/sdX
-          (common for USB-SATA bridges).
 ```
 
 ## Configuration

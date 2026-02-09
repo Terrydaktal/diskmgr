@@ -47,7 +47,10 @@ def clean_diskmgr_output(raw_content):
     return "\n".join(content_lines).strip()
 
 def main():
-    commands = ['list', 'layout', 'boot', 'map', 'unmap', 'open', 'close', 'label', 'remount', 'luks', 'erase', 'create', 'clone', 'sync', 'health']
+    commands = [
+        'list', 'layout', 'boot', 'map', 'unmap', 'open', 'close', 'label', 'remount', 'luks',
+        'health', 'selftest', 'defrag', 'fsdiag', 'scrub', 'erase', 'create', 'clone', 'sync'
+    ]
     
     readme_content = "# Disk Manager (diskmgr)\n\n"
     readme_content += "A utility designed to simplify the management of encrypted and plain removable media. It maps friendly labels to hardware-specific Persistent Device Paths (PDP), ensuring that disks are recognized reliably even if device nodes change.\n\n"
