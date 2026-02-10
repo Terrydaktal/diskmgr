@@ -880,8 +880,8 @@ class DiskMgrShell(cmd.Cmd):
         print(f"  {Colors.OKGREEN}defrag <name>{Colors.ENDC}")
         print("      Defragments a mounted filesystem and records the timestamp in xattrs (user.last_defrag).")
 
-        print(f"  {Colors.OKGREEN}fsdiag <name>{Colors.ENDC}")
-        print("      Shows filesystem diagnostics, last_defrag xattr, and (ext4 only) a fragmentation score.")
+        print(f"  {Colors.OKGREEN}fshealth <name>{Colors.ENDC}")
+        print("      Shows filesystem health/diagnostics, last_defrag/last_scrub xattrs, and (ext4 only) a fragmentation score.")
 
         print(f"  {Colors.OKGREEN}health <name>{Colors.ENDC}")
         print("      Shows SMART health (smartctl -a) for the underlying disk (USB uses -d sat).")
@@ -3298,8 +3298,8 @@ class DiskMgrShell(cmd.Cmd):
         except Exception as e:
             log(f"Defrag failed: {e}", 'ERROR')
 
-    def do_fsdiag(self, arg):
-        '''Filesystem diagnostics: fsdiag <name>
+    def do_fshealth(self, arg):
+        '''Filesystem health/diagnostics: fshealth <name>
 
         Shows filesystem-specific diagnostic output and local "maintenance" timestamps.
 
@@ -3313,7 +3313,7 @@ class DiskMgrShell(cmd.Cmd):
         '''
         args = arg.split()
         if len(args) != 1:
-            log("Usage: fsdiag <name>", 'ERROR')
+            log("Usage: fshealth <name>", 'ERROR')
             return
 
         name = args[0]
@@ -3356,7 +3356,7 @@ class DiskMgrShell(cmd.Cmd):
         last_defrag = _read_xattr_text(mnt, 'user.last_defrag')
         last_scrub = _read_xattr_text(mnt, 'user.last_scrub')
 
-        print(f"\n{Colors.HEADER}{Colors.BOLD}=== Filesystem diagnostics: {name} ==={Colors.ENDC}")
+        print(f"\n{Colors.HEADER}{Colors.BOLD}=== Filesystem health: {name} ==={Colors.ENDC}")
         print(f"{Colors.BOLD}Mountpoint:{Colors.ENDC} {mnt}")
         if src_real:
             print(f"{Colors.BOLD}Source:{Colors.ENDC} {src_real}")
@@ -3455,6 +3455,14 @@ class DiskMgrShell(cmd.Cmd):
                 print(res.stderr.rstrip(), file=sys.stderr)
         else:
             log(f"Unsupported or unknown filesystem type '{fstype or 'unknown'}'.", 'ERROR')
+
+    def do_fsdiag(self, arg):
+        '''(Deprecated) Alias for fshealth: fsdiag <name>
+
+        This command was renamed to 'fshealth'. Prefer: fshealth <name>
+        '''
+        log("fsdiag was renamed to fshealth; running fshealth ...", 'WARN')
+        return self.do_fshealth(arg)
 
     def do_scrub(self, arg):
         '''Scrub a mounted btrfs filesystem: scrub <name>
