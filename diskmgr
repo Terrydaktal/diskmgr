@@ -1005,8 +1005,8 @@ class DiskMgrShell(cmd.Cmd):
                             if ls_res.stdout.strip():
                                 data = json.loads(ls_res.stdout)
                                 if 'blockdevices' in data:
-                                    print(f"{Colors.BOLD}{'NAME':<25} {'TYPE':<6} {'SIZE':<10} {'FSTYPE':<12} {'FSVER':<6} {'FSLABEL':<12} {'FSUUID':<38} {'FSAVAIL':<10} {'FSUSE%':<8} {'FSMOUNTPOINTS':<20} {'PERSISTENT PATH'}{Colors.ENDC}")
-                                    self.render_lsblk_json(data['blockdevices'])
+                                    rows = self._collect_lsblk_rows(data['blockdevices'])
+                                    self._print_lsblk_rows(rows)
                         except Exception as e:
                             log(f"Could not render lsblk tree: {e}", 'DEBUG')
                     print("-" * 155)
@@ -1099,8 +1099,8 @@ class DiskMgrShell(cmd.Cmd):
                     if ls_res.stdout.strip():
                         data = json.loads(ls_res.stdout)
                         if 'blockdevices' in data:
-                            print(f"{Colors.BOLD}{'NAME':<25} {'TYPE':<6} {'SIZE':<10} {'FSTYPE':<12} {'FSVER':<6} {'FSLABEL':<12} {'FSUUID':<38} {'FSAVAIL':<10} {'FSUSE%':<8} {'FSMOUNTPOINTS':<20} {'PERSISTENT PATH'}{Colors.ENDC}")
-                            self.render_lsblk_json(data['blockdevices'])
+                            rows = self._collect_lsblk_rows(data['blockdevices'])
+                            self._print_lsblk_rows(rows)
                 except Exception as e:
                     log(f"Could not render lsblk tree: {e}", 'DEBUG')
                 print("-" * 155)
@@ -1109,11 +1109,16 @@ class DiskMgrShell(cmd.Cmd):
                 log(f"Could not read layout for {dev_path}: {e}", 'WARN')
         print("")
 
-    def render_lsblk_json(self, devices, indent="", is_root=True, parent_wwn=""):
+    def _collect_lsblk_rows(self, devices, indent="", is_root=True, parent_wwn=""):
+        """
+        Collect an lsblk JSON tree into flat rows, while preserving the tree glyphs in NAME.
+        Returns a list of dicts with consistent string keys.
+        """
+        rows = []
         for i, dev in enumerate(devices):
             is_last = (i == len(devices) - 1)
 
-            name = dev.get('name', '')
+            name = dev.get('name', '') or ""
             dtype = dev.get('type') or ""
             size = dev.get('size') or ""
             fstype = dev.get('fstype') or ""
@@ -1131,7 +1136,7 @@ class DiskMgrShell(cmd.Cmd):
             else:
                 mounts = str(mp or "")
 
-            # Persistent path: best-effort /dev/disk/by-id/... (or "-")
+            # Persistent path: prefer IEEE identifier by-id links (WWN/EUI) when possible.
             pdp = "-"
             try:
                 pdp = self.find_persistent_path(name, wwn=wwn, type_=dtype or 'disk')
@@ -1147,12 +1152,56 @@ class DiskMgrShell(cmd.Cmd):
                 tree_part = indent + char + name
                 next_indent = indent + ("    " if is_last else "│   ")
 
-            # Print row
-            # NAME(25) TYPE(6) SIZE(10) FSTYPE(12) FSVER(6) FSLABEL(12) FSUUID(38) FSAVAIL(10) FSUSE(8) FSMOUNTPOINTS(20) PERSISTENT PATH
-            print(f"{tree_part:<25} {dtype:<6} {size:<10} {fstype:<12} {fsver:<6} {label:<12} {uuid:<38} {fsavail:<10} {fsuse:<8} {mounts:<20} {pdp}".rstrip())
+            rows.append({
+                "NAME": tree_part,
+                "PERSISTENT PATH": pdp,
+                "TYPE": dtype,
+                "SIZE": size,
+                "FSTYPE": fstype,
+                "FSVER": fsver,
+                "FSLABEL": label,
+                "FSUUID": uuid,
+                "FSAVAIL": fsavail,
+                "FSUSE%": fsuse,
+                "FSMOUNTPOINTS": mounts,
+            })
 
             if 'children' in dev:
-                self.render_lsblk_json(dev['children'], next_indent, is_root=False, parent_wwn=wwn)
+                rows.extend(self._collect_lsblk_rows(dev['children'], next_indent, is_root=False, parent_wwn=wwn))
+        return rows
+
+    def _print_lsblk_rows(self, rows):
+        """
+        Print a column-aligned table where each column width matches the largest element in that column.
+        Persistent path is printed immediately after NAME.
+        """
+        cols = [
+            "NAME",
+            "PERSISTENT PATH",
+            "TYPE",
+            "SIZE",
+            "FSTYPE",
+            "FSVER",
+            "FSLABEL",
+            "FSUUID",
+            "FSAVAIL",
+            "FSUSE%",
+            "FSMOUNTPOINTS",
+        ]
+        widths = {}
+        for c in cols:
+            widths[c] = len(c)
+        for r in rows:
+            for c in cols:
+                v = str(r.get(c, "") or "")
+                if len(v) > widths[c]:
+                    widths[c] = len(v)
+
+        header = " ".join([f"{c:<{widths[c]}}" for c in cols]).rstrip()
+        print(f"{Colors.BOLD}{header}{Colors.ENDC}")
+        for r in rows:
+            line = " ".join([f"{str(r.get(c, '') or ''):<{widths[c]}}" for c in cols]).rstrip()
+            print(line)
 
     def resolve_uuid_to_dev(self, uuid):
         '''Resolves a UUID to a short device name like sda1 or nvme0n1p1.'''
