@@ -11,6 +11,7 @@ import argparse
 import random
 import re
 import shutil
+import datetime
 from pathlib import Path
 
 # Configuration
@@ -886,9 +887,9 @@ class DiskMgrShell(cmd.Cmd):
         print(f"  {Colors.OKGREEN}health <name>{Colors.ENDC}")
         print("      Shows SMART health (smartctl -a) for the underlying disk (USB uses -d sat).")
 
-        print(f"  {Colors.OKGREEN}scrub <name> [--watch]{Colors.ENDC}")
+        print(f"  {Colors.OKGREEN}scrub <name> [--no-watch]{Colors.ENDC}")
         print("      Runs a blocking btrfs scrub on a mounted filesystem and records user.last_scrub in xattrs.")
-        print("      With --watch, tails kernel logs for checksum errors during scrub and resolves paths when possible.")
+        print("      By default, tails kernel logs for checksum errors during scrub and resolves paths when possible.")
 
         print(f"  {Colors.OKGREEN}selftest <name>{Colors.ENDC}")
         print("      Starts a SMART long self-test (smartctl -t long) for the underlying disk (USB uses -d sat).")
@@ -3466,7 +3467,7 @@ class DiskMgrShell(cmd.Cmd):
         return self.do_fshealth(arg)
 
     def do_scrub(self, arg):
-        '''Scrub a mounted btrfs filesystem: scrub <name> [--watch]
+        '''Scrub a mounted btrfs filesystem: scrub <name> [--no-watch]
 
         UNDER THE HOOD:
         1.  Validation: Verifies the disk is mapped and currently mounted.
@@ -3476,7 +3477,8 @@ class DiskMgrShell(cmd.Cmd):
               sudo setfattr -n user.last_scrub -v "<date>" <mountpoint>
 
         OPTIONAL:
-        - --watch: tails kernel logs during the scrub and prints checksum errors as they happen.
+        - default (watch mode): tails kernel logs during the scrub and prints checksum errors as they happen.
+        - --no-watch: disable log tailing (quiet; you only get the scrub summary output).
           Btrfs typically logs logical addresses (and sometimes inode numbers); diskmgr will attempt
           to resolve those to paths via:
             btrfs inspect-internal logical-resolve <logical> <mountpoint>
@@ -3484,7 +3486,9 @@ class DiskMgrShell(cmd.Cmd):
         '''
         parser = CmdArgumentParser(prog='scrub', add_help=False)
         parser.add_argument('name')
-        parser.add_argument('--watch', '-w', action='store_true', help='Tail kernel logs for checksum errors during scrub')
+        g = parser.add_mutually_exclusive_group()
+        g.add_argument('--watch', '-w', action='store_true', help='(default) Tail kernel logs for checksum errors during scrub')
+        g.add_argument('--no-watch', action='store_true', help='Disable log tailing during scrub')
         try:
             split_args = shlex.split(arg)
             args = parser.parse_args(split_args)
@@ -3495,7 +3499,8 @@ class DiskMgrShell(cmd.Cmd):
             return
 
         name = args.name
-        watch = bool(getattr(args, 'watch', False))
+        # Default to watch mode unless explicitly disabled.
+        watch = (not bool(getattr(args, 'no_watch', False)))
         mnt = self.get_mountpoint(name)
         if not mnt:
             log(f"Disk '{name}' is not mounted. Run 'open {name}' first.", 'ERROR')
@@ -3546,12 +3551,12 @@ class DiskMgrShell(cmd.Cmd):
             '/sbin/setfattr',
         ])
 
-        def _watch_btrfs_checksum_errors(mountpoint):
+        def _watch_btrfs_checksum_errors(mountpoint, device_tag=None):
             """
             Best-effort: follow kernel logs and print checksum errors with resolved paths, while scrub runs.
             """
             since = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            cmd_j = ['sudo', 'journalctl', '-k', '-f', '--since', since, '--no-pager', '-o', 'short-precise']
+            cmd_j = ['sudo', 'journalctl', '-k', '-b', '-f', '--since', since, '--no-pager', '-o', 'short-precise']
             try:
                 proc = subprocess.Popen(cmd_j, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
             except Exception as e:
@@ -3602,6 +3607,10 @@ class DiskMgrShell(cmd.Cmd):
                     low = line.lower()
                     if "csum" not in low and "checksum" not in low:
                         continue
+                    # If we know the device tag for this mount, prefer matching "(device <tag>)" to avoid unrelated noise.
+                    if device_tag:
+                        if re.search(rf"\\(device\\s+{re.escape(device_tag)}\\)", line, re.IGNORECASE) is None:
+                            continue
 
                     logical = None
                     ino = None
@@ -3618,18 +3627,24 @@ class DiskMgrShell(cmd.Cmd):
                         except ValueError:
                             ino = None
 
-                    key = (logical, ino, line.strip())
+                    # Dedupe aggressively to reduce spam: only print first occurrence per (logical, ino).
+                    # If we can't parse either, skip (no actionable mapping).
+                    if logical is None and ino is None:
+                        continue
+                    key = (logical, ino)
                     if key in seen:
                         continue
                     seen.add(key)
 
                     paths = _resolve_paths(logical=logical, ino=ino) if (logical is not None or ino is not None) else []
-                    suffix = ""
-                    if paths:
-                        # Print resolved paths in brackets.
-                        suffix = " " + " ".join([f"[{p}]" for p in paths])
-
-                    print(f"{Colors.FAIL}{Colors.BOLD}BTRFS checksum error:{Colors.ENDC} {line.strip()}{suffix}", flush=True)
+                    parts = []
+                    if logical is not None:
+                        parts.append(f"logical={logical}")
+                    if ino is not None:
+                        parts.append(f"ino={ino}")
+                    head = ", ".join(parts) if parts else "checksum error"
+                    suffix = (" " + " ".join([f"[{p}]" for p in paths])) if paths else ""
+                    print(f"{Colors.FAIL}{Colors.BOLD}BTRFS checksum error:{Colors.ENDC} {head}{suffix}", flush=True)
 
             t = threading.Thread(target=_reader, daemon=True)
             t.start()
@@ -3639,12 +3654,19 @@ class DiskMgrShell(cmd.Cmd):
             watcher_proc = None
             watcher_stop = None
             if watch:
-                # Imports used only for watch-mode to avoid overhead in normal mode.
-                import datetime
                 import threading
-                watcher_proc, watcher_stop = _watch_btrfs_checksum_errors(mnt)
+                device_tag = None
+                try:
+                    res_src = run_command(['findmnt', '-rn', '-M', mnt, '-o', 'SOURCE'], check=False)
+                    src = (getattr(res_src, 'stdout', '') or '').strip()
+                    if src:
+                        device_tag = os.path.basename(os.path.realpath(src))
+                except Exception:
+                    device_tag = None
+
+                watcher_proc, watcher_stop = _watch_btrfs_checksum_errors(mnt, device_tag=device_tag)
                 if watcher_proc:
-                    log("Watching kernel logs for BTRFS checksum errors during scrub (Ctrl+C to abort watcher).")
+                    log("Watching kernel logs for BTRFS checksum errors during scrub (deduped).")
 
             # -B blocks until complete; -R reports stats.
             res_scrub = run_command([btrfs_bin, 'scrub', 'start', '-B', '-R', mnt], sudo=True, capture_output=True, check=False)
