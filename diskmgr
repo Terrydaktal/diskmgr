@@ -966,6 +966,32 @@ class DiskMgrShell(cmd.Cmd):
             log("No physical disks found.", 'WARN')
             return
 
+        # Precompute lsblk rows for all disks first so we can:
+        # - keep the output stable across disks
+        # - compute column widths across ALL disks (not per-disk)
+        disk_rows = {}
+        all_rows = []
+        for d in disks:
+            d_name = d.get('name', '')
+            if not d_name:
+                continue
+            dev_path = f"/dev/{d_name}"
+            try:
+                ls_res = run_command(['lsblk', '-J', '-f', '-o',
+                                      'NAME,TYPE,SIZE,FSTYPE,FSVER,LABEL,UUID,FSAVAIL,FSUSE%,MOUNTPOINTS,WWN',
+                                      dev_path], sudo=True, check=False)
+                rows = []
+                if (getattr(ls_res, 'stdout', '') or '').strip():
+                    data = json.loads(ls_res.stdout)
+                    if 'blockdevices' in data:
+                        rows = self._collect_lsblk_rows(data['blockdevices'])
+                disk_rows[d_name] = rows
+                all_rows.extend(rows)
+            except Exception:
+                disk_rows[d_name] = []
+
+        widths_global = self._lsblk_col_widths(all_rows)
+
         for disk in disks:
             d_name = disk['name']
             dev_path = f"/dev/{d_name}"
@@ -996,19 +1022,11 @@ class DiskMgrShell(cmd.Cmd):
                         else:
                             log(f"{dev_path}: could not read partition layout: {stderr}", 'WARN')
 
-                        # Still show lsblk hierarchy so the user can see what's on the disk.
+                    # Still show lsblk hierarchy so the user can see what's on the disk.
+                    rows = disk_rows.get(d_name, [])
+                    if rows:
                         print("")
-                        try:
-                            ls_res = run_command(['lsblk', '-J', '-f', '-o',
-                                                  'NAME,TYPE,SIZE,FSTYPE,FSVER,LABEL,UUID,FSAVAIL,FSUSE%,MOUNTPOINTS,WWN',
-                                                  dev_path], sudo=True, check=False)
-                            if ls_res.stdout.strip():
-                                data = json.loads(ls_res.stdout)
-                                if 'blockdevices' in data:
-                                    rows = self._collect_lsblk_rows(data['blockdevices'])
-                                    self._print_lsblk_rows(rows)
-                        except Exception as e:
-                            log(f"Could not render lsblk tree: {e}", 'DEBUG')
+                        self._print_lsblk_rows(rows, widths=widths_global)
                     print("-" * 155)
                     continue
 
@@ -1092,15 +1110,9 @@ class DiskMgrShell(cmd.Cmd):
                 # 4. Print lsblk hierarchy at the bottom
                 print("")
                 try:
-                    # Use JSON output for absolute reliability in data capture
-                    ls_res = run_command(['lsblk', '-J', '-f', '-o',
-                                          'NAME,TYPE,SIZE,FSTYPE,FSVER,LABEL,UUID,FSAVAIL,FSUSE%,MOUNTPOINTS,WWN',
-                                          dev_path], sudo=True, check=False)
-                    if ls_res.stdout.strip():
-                        data = json.loads(ls_res.stdout)
-                        if 'blockdevices' in data:
-                            rows = self._collect_lsblk_rows(data['blockdevices'])
-                            self._print_lsblk_rows(rows)
+                    rows = disk_rows.get(d_name, [])
+                    if rows:
+                        self._print_lsblk_rows(rows, widths=widths_global)
                 except Exception as e:
                     log(f"Could not render lsblk tree: {e}", 'DEBUG')
                 print("-" * 155)
@@ -1108,6 +1120,33 @@ class DiskMgrShell(cmd.Cmd):
                 print(f"\n{Colors.BOLD}Disk: {dev_path} ({model}){Colors.ENDC}")
                 log(f"Could not read layout for {dev_path}: {e}", 'WARN')
         print("")
+
+    def _lsblk_col_widths(self, rows):
+        cols = [
+            "NAME",
+            "TYPE",
+            "SIZE",
+            "FSTYPE",
+            "FSVER",
+            "FSLABEL",
+            "FSUUID",
+            "FSAVAIL",
+            "FSUSE%",
+            "FSMOUNTPOINTS",
+            "PERSISTENT PATH (IEEE)",
+        ]
+        widths = {}
+        for c in cols:
+            widths[c] = len(c)
+        for r in rows:
+            for c in cols:
+                v = str(r.get(c, "") or "")
+                if len(v) > widths[c]:
+                    widths[c] = len(v)
+        # Add 1 space padding on each side.
+        for c in cols:
+            widths[c] += 2
+        return widths
 
     def _collect_lsblk_rows(self, devices, indent="", is_root=True, parent_wwn=""):
         """
@@ -1170,7 +1209,7 @@ class DiskMgrShell(cmd.Cmd):
                 rows.extend(self._collect_lsblk_rows(dev['children'], next_indent, is_root=False, parent_wwn=wwn))
         return rows
 
-    def _print_lsblk_rows(self, rows):
+    def _print_lsblk_rows(self, rows, widths=None):
         """
         Print a column-aligned table where each cell is padded with one space on each side.
         Persistent path is printed immediately after NAME.
@@ -1188,18 +1227,8 @@ class DiskMgrShell(cmd.Cmd):
             "FSMOUNTPOINTS",
             "PERSISTENT PATH (IEEE)",
         ]
-        widths = {}
-        for c in cols:
-            widths[c] = len(c)
-        for r in rows:
-            for c in cols:
-                v = str(r.get(c, "") or "")
-                if len(v) > widths[c]:
-                    widths[c] = len(v)
-
-        # Add one leading + one trailing space per column (so total width is max + 2).
-        for c in cols:
-            widths[c] += 2
+        if widths is None:
+            widths = self._lsblk_col_widths(rows)
 
         def _cell(text, width):
             inner = max(width - 2, 0)
