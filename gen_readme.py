@@ -49,7 +49,7 @@ def clean_diskmgr_output(raw_content):
 def main():
     commands = [
         'list', 'layout', 'boot', 'map', 'unmap', 'open', 'close', 'label', 'remount', 'luks',
-        'health', 'selftest', 'defrag', 'fsdiag', 'scrub', 'erase', 'create', 'clone', 'sync'
+        'health', 'selftest', 'defrag', 'fshealth', 'scrub', 'erase', 'create', 'clone', 'sync'
     ]
     
     readme_content = "# Disk Manager (diskmgr)\n\n"

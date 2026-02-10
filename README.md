@@ -67,12 +67,13 @@ COMMANDS:
       Syncs two mounted disks (rsync pri -> sec).
   defrag <name>
       Defragments a mounted filesystem and records the timestamp in xattrs (user.last_defrag).
-  fsdiag <name>
-      Shows filesystem diagnostics, last_defrag xattr, and (ext4 only) a fragmentation score.
+  fshealth <name>
+      Shows filesystem health/diagnostics, last_defrag/last_scrub xattrs, and (ext4 only) a fragmentation score.
   health <name>
       Shows SMART health (smartctl -a) for the underlying disk (USB uses -d sat).
-  scrub <name>
+  scrub <name> [--no-watch]
       Runs a blocking btrfs scrub on a mounted filesystem and records user.last_scrub in xattrs.
+      By default, tails kernel logs for checksum errors during scrub and resolves paths when possible.
   selftest <name>
       Starts a SMART long self-test (smartctl -t long) for the underlying disk (USB uses -d sat).
   exit / quit / Ctrl+D
@@ -161,7 +162,7 @@ Disk: /dev/nvme0n1 (WD_BLACK SN8100 2000GB) [msdos] [Sector: L512/P512] [Total S
 
 NAME                      FSTYPE       FSVER  LABEL        UUID                                   FSAVAIL    FSUSE%   MOUNTPOINTS
 nvme0n1
-└─nvme0n1p1               ext4         1.0                 88f1dad3-95c6-418e-bea8-f5f3e072ea29   765.8G     53%      /
+└─nvme0n1p1               ext4         1.0                 88f1dad3-95c6-418e-bea8-f5f3e072ea29   765.6G     53%      /
 -----------------------------------------------------------------------------------------------------------------------------------------------------------
 
 Disk: /dev/nvme1n1 (WD Blue SN570 1TB) [msdos] [Sector: L512/P512] [Total Sectors: 1953525168]
@@ -169,7 +170,7 @@ Disk: /dev/nvme1n1 (WD Blue SN570 1TB) [msdos] [Sector: L512/P512] [Total Sector
 
 NAME                      FSTYPE       FSVER  LABEL        UUID                                   FSAVAIL    FSUSE%   MOUNTPOINTS
 nvme1n1
-└─nvme1n1p1               ext4         1.0    data         72c22012-b161-4e2a-a762-94ff7fda47f9   219.6G     71%      /media/lewis/data1
+└─nvme1n1p1               ext4         1.0    data         72c22012-b161-4e2a-a762-94ff7fda47f9   194.4G     74%      /media/lewis/data1
 -----------------------------------------------------------------------------------------------------------------------------------------------------------
 ```
 
@@ -402,10 +403,10 @@ Defragment a mounted filesystem: defrag <name>
               sudo setfattr -n user.last_defrag -v "<date>" <mountpoint>
 ```
 
-## Command Reference: `fsdiag`
+## Command Reference: `fshealth`
 
 ```text
-Filesystem diagnostics: fsdiag <name>
+Filesystem health/diagnostics: fshealth <name>
 
         Shows filesystem-specific diagnostic output and local "maintenance" timestamps.
 
@@ -421,7 +422,7 @@ Filesystem diagnostics: fsdiag <name>
 ## Command Reference: `scrub`
 
 ```text
-Scrub a mounted btrfs filesystem: scrub <name>
+Scrub a mounted btrfs filesystem: scrub <name> [--no-watch]
 
         UNDER THE HOOD:
         1.  Validation: Verifies the disk is mapped and currently mounted.
@@ -429,6 +430,14 @@ Scrub a mounted btrfs filesystem: scrub <name>
         3.  Execution: Runs 'sudo btrfs scrub start -B -R <mountpoint>'.
         4.  Recording: Stores a timestamp on the mountpoint root via:
               sudo setfattr -n user.last_scrub -v "<date>" <mountpoint>
+
+        OPTIONAL:
+        - default (watch mode): tails kernel logs during the scrub and prints checksum errors as they happen.
+        - --no-watch: disable log tailing (quiet; you only get the scrub summary output).
+          Btrfs typically logs logical addresses (and sometimes inode numbers); diskmgr will attempt
+          to resolve those to paths via:
+            btrfs inspect-internal logical-resolve <logical> <mountpoint>
+            btrfs inspect-internal inode-resolve <ino> <mountpoint>
 ```
 
 ## Command Reference: `erase`
