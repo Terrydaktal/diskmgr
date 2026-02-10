@@ -1158,7 +1158,6 @@ class DiskMgrShell(cmd.Cmd):
         print("")
 
         # Missing mappings section: show friendly names and their configured persistent IDs.
-        # Note: LUKS status can't be probed if the device is not present.
         if missing_mappings:
             print(f"{Colors.HEADER}--- Missing Mappings ({get_map_file_path()}) ---{Colors.ENDC}")
             rows = []
@@ -1166,10 +1165,9 @@ class DiskMgrShell(cmd.Cmd):
                 rows.append({
                     "NAME": str(friendly),
                     "PERSISTENT ID": str(target),
-                    "LUKS": "? (device missing)",
                 })
 
-            cols = ["NAME", "PERSISTENT ID", "LUKS"]
+            cols = ["NAME", "PERSISTENT ID"]
             widths = {c: len(c) for c in cols}
             for r in rows:
                 for c in cols:
