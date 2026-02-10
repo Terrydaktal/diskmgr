@@ -977,7 +977,7 @@ class DiskMgrShell(cmd.Cmd):
             dev_path = f"/dev/{d_name}"
             try:
                 ls_res = run_command(['lsblk', '-J', '-f', '-o',
-                                      'NAME,TYPE,SIZE,FSTYPE,FSVER,LABEL,UUID,FSAVAIL,FSUSE%,MOUNTPOINTS,WWN',
+                                      'NAME,TYPE,SIZE,FSTYPE,FSVER,LABEL,UUID,FSAVAIL,FSUSE%,MOUNTPOINTS,WWN,PARTUUID',
                                       dev_path], sudo=True, check=False)
                 rows = []
                 if (getattr(ls_res, 'stdout', '') or '').strip():
@@ -1150,6 +1150,7 @@ class DiskMgrShell(cmd.Cmd):
             "FSUSE%",
             "FSMOUNTPOINTS",
             "PERSISTENT PATH (IEEE)",
+            "PARTUUID",
         ]
         widths = {}
         for c in cols:
@@ -1221,6 +1222,7 @@ class DiskMgrShell(cmd.Cmd):
                 "FSAVAIL": fsavail,
                 "FSUSE%": fsuse,
                 "FSMOUNTPOINTS": mounts,
+                "PARTUUID": dev.get('partuuid') or "",
             })
 
             if 'children' in dev:
@@ -1245,6 +1247,7 @@ class DiskMgrShell(cmd.Cmd):
             "FSUSE%",
             "FSMOUNTPOINTS",
             "PERSISTENT PATH (IEEE)",
+            "PARTUUID",
         ]
         if widths is None:
             widths = self._lsblk_col_widths(rows)
