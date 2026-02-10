@@ -866,8 +866,8 @@ class DiskMgrShell(cmd.Cmd):
         print(f"  {Colors.OKGREEN}luks <passwd|backup|restore>{Colors.ENDC}")
         print("      LUKS management: change password, backup/restore headers.")
         
-        print(f"  {Colors.OKGREEN}create <name> [options]{Colors.ENDC}")
-        print("      Creates a new superfloppy or single-partition volume (plain or encrypted) and mounts it.")
+        print(f"  {Colors.OKGREEN}format <name> [options]{Colors.ENDC}")
+        print("      Formats a new superfloppy or single-partition volume (plain or encrypted) and mounts it.")
         print("      Non-destructive: it will refuse to overwrite an in-use/partitioned disk. Use: erase <name> first.")
 
         print(f"  {Colors.OKGREEN}erase <name>{Colors.ENDC}")
@@ -3844,13 +3844,13 @@ class DiskMgrShell(cmd.Cmd):
         except Exception as e:
             log(f"Scrub failed: {e}", 'ERROR')
 
-    def do_create(self, arg):
-        '''Create a superfloppy or single-partition volume: create <name> [options]
+    def do_format(self, arg):
+        '''Format a superfloppy or single-partition volume: format <name> [options]
         
         Note: You must 'map' a disk first to give it a name before initializing it.
         
         NUANCES & SCOPE:
-        1. Running create on a Partition (e.g., sda2)
+        1. Running format on a Partition (e.g., sda2)
            The Result: Container-in-a-Box.
            The script treats the existing partition as its "entire world."
            - Partitioning: It skips the GPT/MBR step because you've already given it a partition.
@@ -3859,21 +3859,21 @@ class DiskMgrShell(cmd.Cmd):
            - The Big Picture: The rest of your disk (like sda1 or sda3) is untouched. 
              You are simply replacing whatever was inside partition #2 with a new encrypted volume.
 
-	        2. Running create on a Whole Disk (e.g., sda)
+	        2. Running format on a Whole Disk (e.g., sda)
 	           The Result: New Volume (Superfloppy or Single-Partition), but non-destructive by default.
 	           - If you don't use --gpt or --mbr:
-	             * Creates a "superfloppy" volume directly on the disk (plain or LUKS).
-	             * This would overwrite any existing partition table, so diskmgr will refuse unless the disk
-	               is unpartitioned and not in use.
+		             * Creates a "superfloppy" volume directly on the disk (plain or LUKS).
+		             * This would overwrite any existing partition table, so diskmgr will refuse unless the disk
+		               is unpartitioned and not in use.
 	           - If you use --gpt or --mbr:
-	             * Creates a partition table of that type (if missing) and creates ONE partition spanning
-	               the whole disk, then puts plain/LUKS + filesystem inside that.
-	             * diskmgr will refuse if the disk already has partitions (to avoid destroying existing data).
-	           - To wipe an existing disk quickly before provisioning, use: erase <name>
+		             * Creates a partition table of that type (if missing) and creates ONE partition spanning
+		               the whole disk, then puts plain/LUKS + filesystem inside that.
+		             * diskmgr will refuse if the disk already has partitions (to avoid destroying existing data).
+		           - To wipe an existing disk quickly before provisioning, use: erase <name>
 
-        3. Using --plain with --gpt or --mbr
-           The Result: Standard Unencrypted Disk.
-           - Partitioning: Creates a fresh GPT/MBR table and one primary partition.
+	        3. Using --plain with --gpt or --mbr
+	           The Result: Standard Unencrypted Disk.
+	           - Partitioning: Creates a fresh GPT/MBR table and one primary partition.
            - Encryption: Skipped entirely.
            - Mapping: The friendly name in diskmap.tsv points directly to the 
              raw hardware partition (e.g., /dev/disk/by-id/...-part1).
@@ -3902,7 +3902,7 @@ class DiskMgrShell(cmd.Cmd):
 
         Note: This is a DESTRUCTIVE operation. Solving two math problems is MANDATORY to proceed.
         '''
-        parser = CmdArgumentParser(prog='create', add_help=False)
+        parser = CmdArgumentParser(prog='format', add_help=False)
         parser.add_argument('args', nargs=1, help='<name>')
         parser.add_argument('--fs', default='ext4', choices=['ext4', 'xfs', 'btrfs'])
         parser.add_argument('--label', help='Filesystem label')
@@ -4047,7 +4047,7 @@ class DiskMgrShell(cmd.Cmd):
                     pttype = ""
                 if pttype:
                     log(f"OPERATION BLOCKED: {real_target} is partitioned ({pttype}). Refusing to create a superfloppy over an existing partition table.", 'ERROR')
-                    log("Use create --gpt/--mbr for a single-partition volume, or erase <name> to wipe the disk first.", 'ERROR')
+                    log("Use format --gpt/--mbr for a single-partition volume, or erase <name> to wipe the disk first.", 'ERROR')
                     return
 
         if not args.plain:
@@ -4127,6 +4127,14 @@ class DiskMgrShell(cmd.Cmd):
             log(f"Added mapping: {name} -> {stable_path}")
 
         log("Disk initialization complete.")
+
+    def do_create(self, arg):
+        '''(Deprecated) Alias for format: create <name> [options]
+
+        This command was renamed to 'format'. Prefer: format <name> [options]
+        '''
+        log("create was renamed to format; running format ...", 'WARN')
+        return self.do_format(arg)
 
 
 if __name__ == '__main__':
