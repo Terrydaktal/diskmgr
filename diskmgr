@@ -886,8 +886,9 @@ class DiskMgrShell(cmd.Cmd):
         print(f"  {Colors.OKGREEN}health <name>{Colors.ENDC}")
         print("      Shows SMART health (smartctl -a) for the underlying disk (USB uses -d sat).")
 
-        print(f"  {Colors.OKGREEN}scrub <name>{Colors.ENDC}")
+        print(f"  {Colors.OKGREEN}scrub <name> [--watch]{Colors.ENDC}")
         print("      Runs a blocking btrfs scrub on a mounted filesystem and records user.last_scrub in xattrs.")
+        print("      With --watch, tails kernel logs for checksum errors during scrub and resolves paths when possible.")
 
         print(f"  {Colors.OKGREEN}selftest <name>{Colors.ENDC}")
         print("      Starts a SMART long self-test (smartctl -t long) for the underlying disk (USB uses -d sat).")
@@ -3465,7 +3466,7 @@ class DiskMgrShell(cmd.Cmd):
         return self.do_fshealth(arg)
 
     def do_scrub(self, arg):
-        '''Scrub a mounted btrfs filesystem: scrub <name>
+        '''Scrub a mounted btrfs filesystem: scrub <name> [--watch]
 
         UNDER THE HOOD:
         1.  Validation: Verifies the disk is mapped and currently mounted.
@@ -3473,13 +3474,28 @@ class DiskMgrShell(cmd.Cmd):
         3.  Execution: Runs 'sudo btrfs scrub start -B -R <mountpoint>'.
         4.  Recording: Stores a timestamp on the mountpoint root via:
               sudo setfattr -n user.last_scrub -v "<date>" <mountpoint>
+
+        OPTIONAL:
+        - --watch: tails kernel logs during the scrub and prints checksum errors as they happen.
+          Btrfs typically logs logical addresses (and sometimes inode numbers); diskmgr will attempt
+          to resolve those to paths via:
+            btrfs inspect-internal logical-resolve <logical> <mountpoint>
+            btrfs inspect-internal inode-resolve <ino> <mountpoint>
         '''
-        args = arg.split()
-        if len(args) != 1:
-            log("Usage: scrub <name>", 'ERROR')
+        parser = CmdArgumentParser(prog='scrub', add_help=False)
+        parser.add_argument('name')
+        parser.add_argument('--watch', '-w', action='store_true', help='Tail kernel logs for checksum errors during scrub')
+        try:
+            split_args = shlex.split(arg)
+            args = parser.parse_args(split_args)
+        except argparse.ArgumentError as e:
+            log(str(e), 'ERROR')
+            return
+        except SystemExit:
             return
 
-        name = args[0]
+        name = args.name
+        watch = bool(getattr(args, 'watch', False))
         mnt = self.get_mountpoint(name)
         if not mnt:
             log(f"Disk '{name}' is not mounted. Run 'open {name}' first.", 'ERROR')
@@ -3530,9 +3546,121 @@ class DiskMgrShell(cmd.Cmd):
             '/sbin/setfattr',
         ])
 
+        def _watch_btrfs_checksum_errors(mountpoint):
+            """
+            Best-effort: follow kernel logs and print checksum errors with resolved paths, while scrub runs.
+            """
+            since = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            cmd_j = ['sudo', 'journalctl', '-k', '-f', '--since', since, '--no-pager', '-o', 'short-precise']
+            try:
+                proc = subprocess.Popen(cmd_j, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
+            except Exception as e:
+                log(f"Failed to start journalctl watcher: {e}", 'WARN')
+                return None, None
+
+            stop = threading.Event()
+            seen = set()
+
+            def _resolve_paths(logical=None, ino=None):
+                paths = []
+                try:
+                    if logical is not None:
+                        res_l = run_command([btrfs_bin, 'inspect-internal', 'logical-resolve', str(logical), mountpoint],
+                                            sudo=True, capture_output=True, check=False)
+                        out_l = (getattr(res_l, 'stdout', '') or '').strip()
+                        if out_l:
+                            paths.extend(out_l.splitlines())
+                    if ino is not None:
+                        res_i = run_command([btrfs_bin, 'inspect-internal', 'inode-resolve', str(ino), mountpoint],
+                                            sudo=True, capture_output=True, check=False)
+                        out_i = (getattr(res_i, 'stdout', '') or '').strip()
+                        if out_i:
+                            paths.extend(out_i.splitlines())
+                except Exception:
+                    pass
+                # Deduplicate while keeping order.
+                uniq = []
+                for p in paths:
+                    p = p.strip()
+                    if p and p not in uniq:
+                        uniq.append(p)
+                return uniq
+
+            def _reader():
+                # Typical kernel lines include "BTRFS ... csum failed" and/or "csum error at logical ...".
+                re_logical = re.compile(r"\blogical\s+([0-9]+)\b", re.IGNORECASE)
+                re_ino = re.compile(r"\bino\s+([0-9]+)\b", re.IGNORECASE)
+                while not stop.is_set():
+                    line = proc.stdout.readline() if proc.stdout else ""
+                    if not line:
+                        if proc.poll() is not None:
+                            break
+                        time.sleep(0.05)
+                        continue
+                    if "BTRFS" not in line and "btrfs" not in line:
+                        continue
+                    low = line.lower()
+                    if "csum" not in low and "checksum" not in low:
+                        continue
+
+                    logical = None
+                    ino = None
+                    m1 = re_logical.search(line)
+                    if m1:
+                        try:
+                            logical = int(m1.group(1), 10)
+                        except ValueError:
+                            logical = None
+                    m2 = re_ino.search(line)
+                    if m2:
+                        try:
+                            ino = int(m2.group(1), 10)
+                        except ValueError:
+                            ino = None
+
+                    key = (logical, ino, line.strip())
+                    if key in seen:
+                        continue
+                    seen.add(key)
+
+                    paths = _resolve_paths(logical=logical, ino=ino) if (logical is not None or ino is not None) else []
+                    suffix = ""
+                    if paths:
+                        # Print resolved paths in brackets.
+                        suffix = " " + " ".join([f"[{p}]" for p in paths])
+
+                    print(f"{Colors.FAIL}{Colors.BOLD}BTRFS checksum error:{Colors.ENDC} {line.strip()}{suffix}", flush=True)
+
+            t = threading.Thread(target=_reader, daemon=True)
+            t.start()
+            return proc, stop
+
         try:
+            watcher_proc = None
+            watcher_stop = None
+            if watch:
+                # Imports used only for watch-mode to avoid overhead in normal mode.
+                import datetime
+                import threading
+                watcher_proc, watcher_stop = _watch_btrfs_checksum_errors(mnt)
+                if watcher_proc:
+                    log("Watching kernel logs for BTRFS checksum errors during scrub (Ctrl+C to abort watcher).")
+
             # -B blocks until complete; -R reports stats.
-            run_command([btrfs_bin, 'scrub', 'start', '-B', '-R', mnt], sudo=True, capture_output=False, check=False)
+            res_scrub = run_command([btrfs_bin, 'scrub', 'start', '-B', '-R', mnt], sudo=True, capture_output=True, check=False)
+
+            if watch and watcher_stop is not None:
+                watcher_stop.set()
+                try:
+                    if watcher_proc:
+                        watcher_proc.terminate()
+                except Exception:
+                    pass
+
+            if (getattr(res_scrub, 'stdout', '') or '').strip():
+                print((getattr(res_scrub, 'stdout', '') or '').rstrip())
+            if (getattr(res_scrub, 'stderr', '') or '').strip():
+                print((getattr(res_scrub, 'stderr', '') or '').rstrip(), file=sys.stderr)
 
             if setfattr_bin is None:
                 log("setfattr not found. Install 'attr' and retry to record last_scrub.", 'WARN')
