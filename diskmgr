@@ -970,7 +970,6 @@ class DiskMgrShell(cmd.Cmd):
         # - keep the output stable across disks
         # - compute column widths across ALL disks (not per-disk)
         disk_rows = {}
-        all_rows = []
         for d in disks:
             d_name = d.get('name', '')
             if not d_name:
@@ -986,9 +985,25 @@ class DiskMgrShell(cmd.Cmd):
                     if 'blockdevices' in data:
                         rows = self._collect_lsblk_rows(data['blockdevices'])
                 disk_rows[d_name] = rows
-                all_rows.extend(rows)
             except Exception:
                 disk_rows[d_name] = []
+
+        # Assign a single global index across all disks/partitions, in print order.
+        # Only number real kernel disk/partition nodes; dm-crypt /dev/mapper nodes get "-".
+        idx = 1
+        for d in disks:
+            d_name = d.get('name', '')
+            for r in disk_rows.get(d_name, []):
+                if (r.get('TYPE') or '') in ('disk', 'part'):
+                    r['#'] = str(idx)
+                    idx += 1
+                else:
+                    r['#'] = '-'
+
+        all_rows = []
+        for d in disks:
+            d_name = d.get('name', '')
+            all_rows.extend(disk_rows.get(d_name, []))
 
         widths_global = self._lsblk_col_widths(all_rows)
 
@@ -1123,6 +1138,7 @@ class DiskMgrShell(cmd.Cmd):
 
     def _lsblk_col_widths(self, rows):
         cols = [
+            "#",
             "NAME",
             "TYPE",
             "SIZE",
@@ -1192,6 +1208,8 @@ class DiskMgrShell(cmd.Cmd):
                 next_indent = indent + ("    " if is_last else "│   ")
 
             rows.append({
+                "#": "-",
+                "KNAME": name,
                 "NAME": tree_part,
                 "PERSISTENT PATH (IEEE)": pdp,
                 "TYPE": dtype,
@@ -1215,6 +1233,7 @@ class DiskMgrShell(cmd.Cmd):
         Persistent path is printed immediately after NAME.
         """
         cols = [
+            "#",
             "NAME",
             "TYPE",
             "SIZE",
