@@ -1161,13 +1161,16 @@ class DiskMgrShell(cmd.Cmd):
         if missing_mappings:
             print(f"{Colors.HEADER}--- Missing Mappings ({get_map_file_path()}) ---{Colors.ENDC}")
             rows = []
+            missing_idx = idx
             for friendly, target in missing_mappings:
                 rows.append({
+                    "#": str(missing_idx),
                     "NAME": str(friendly),
                     "PERSISTENT ID": str(target),
                 })
+                missing_idx += 1
 
-            cols = ["NAME", "PERSISTENT ID"]
+            cols = ["#", "NAME", "PERSISTENT ID"]
             widths = {c: len(c) for c in cols}
             for r in rows:
                 for c in cols:
