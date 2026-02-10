@@ -1177,7 +1177,6 @@ class DiskMgrShell(cmd.Cmd):
         """
         cols = [
             "NAME",
-            "PERSISTENT PATH (IEEE)",
             "TYPE",
             "SIZE",
             "FSTYPE",
@@ -1187,6 +1186,7 @@ class DiskMgrShell(cmd.Cmd):
             "FSAVAIL",
             "FSUSE%",
             "FSMOUNTPOINTS",
+            "PERSISTENT PATH (IEEE)",
         ]
         widths = {}
         for c in cols:
