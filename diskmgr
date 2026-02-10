@@ -864,9 +864,6 @@ class DiskMgrShell(cmd.Cmd):
         
         print(f"{Colors.BOLD}COMMANDS:{Colors.ENDC}")
         print(f"  {Colors.OKGREEN}list{Colors.ENDC}")
-        print("      Shows all configured mappings and unmapped system disks in one table.")
-
-        print(f"  {Colors.OKGREEN}layout{Colors.ENDC}")
         print("      Displays the physical partition layout and free space for all disks.")
 
         print(f"  {Colors.OKGREEN}boot{Colors.ENDC}")
@@ -945,7 +942,7 @@ class DiskMgrShell(cmd.Cmd):
         print("")
         return True
 
-    def do_layout(self, arg):
+    def do_list(self, arg):
         '''Display the physical partition layout and free space for all plugged-in disks.
         
         UNDER THE HOOD:
@@ -1156,6 +1153,14 @@ class DiskMgrShell(cmd.Cmd):
                 print(f"\n{Colors.BOLD}Disk: {dev_path} ({model}){Colors.ENDC}")
                 log(f"Could not read layout for {dev_path}: {e}", 'WARN')
         print("")
+
+    def do_layout(self, arg):
+        '''(Deprecated) Alias for list: layout
+
+        This command was renamed to 'list'. Prefer: list
+        '''
+        log("layout was renamed to list; running list ...", 'WARN')
+        return self.do_list(arg)
 
         # Missing mappings section: show friendly names and their configured persistent IDs.
         if missing_mappings:
@@ -1451,263 +1456,6 @@ class DiskMgrShell(cmd.Cmd):
                     print(f"  {Colors.FAIL}Result: Error checking path: {e}{Colors.ENDC}")
             
             print("-" * 60)
-
-    def do_list(self, arg):
-        '''List all configured mappings and available system disks in a single table.
-        
-        UNDER THE HOOD:
-        1.  Resolution: Refreshes mappings from diskmap.tsv.
-        2.  Hardware Discovery: Uses 'lsblk' to gather hardware properties and identifies 
-            underlying physical partitions even when opened as virtual devices.
-        3.  Zero-Sudo LUKS Detection: Queries the system 'udev' database via 'udevadm info' 
-            to accurately identify encrypted disks without requiring root privileges.
-        4.  Status Logic:
-            - MISSING: Persistent path not found in /dev.
-            - CLOSED: Present but locked (LUKS) or unmounted (Plain).
-            - OPEN: Unlocked/Decrypted but not yet mounted.
-            - MOUNTED: Active filesystem attached to the preferred path (/media/$USER/name).
-        5.  Dynamic Formatting: Pre-calculates the maximum width of every column across 
-            all rows for a perfectly aligned, readable table.
-        6.  Exclusion Logic: Rigorously filters out virtual mapper devices and their 
-            kernel aliases (dm-X) from the unmapped list once they are active.
-        '''
-        self.mappings = read_luks_map()
-        mapped_rows = []
-        unmapped_rows = []
-        
-        # 1. Collect Mapped Disks
-        mapped_real_paths = set()
-        mapped_names = set()
-        i = 1
-        for name, path in self.mappings.items():
-            phys_device = "-"
-            dm_device = ""
-            fstype = "-"
-            size = "-"
-            label = "-"
-            mountpoint = f"/media/{os.environ.get('USER', 'root')}/{name}"
-            is_luks = "-"
-            state = "MISSING"
-            
-            mapped_names.add(name)
-            
-            # Default mountpoint based on name
-            mount_name = name
-
-            if os.path.exists(path):
-                real_path = os.path.realpath(path)
-                mapped_real_paths.add(real_path)
-                state = "CLOSED"
-                is_luks = "N"
-                
-                # Get Physical Device Properties
-                try:
-                    cmd_p = ['lsblk', '-n', '-P', '-o', 'KNAME,PKNAME,FSTYPE,SIZE,LABEL', real_path]
-                    res_p = run_command(cmd_p, check=False)
-                    if res_p.stdout.strip():
-                        props = {}
-                        for part in shlex.split(res_p.stdout.strip()):
-                            if '=' in part:
-                                k, v = part.split('=', 1)
-                                props[k] = v
-                        
-                        phys_device = props.get('KNAME', '-')
-                        # If the 'physical' device is actually a DM device, try to get its parent
-                        if phys_device.startswith('dm-'):
-                            parent = props.get('PKNAME', '')
-                            if parent: phys_device = parent
-
-                        fstype = props.get('FSTYPE', '-')
-                        size = props.get('SIZE', '-')
-                        label = props.get('LABEL', '-')
-                        
-                        # Fallback to blkid for more reliable label (lsblk is often stale)
-                        try:
-                            res_b = run_command(['blkid', '-o', 'value', '-s', 'LABEL', real_path], sudo=True, check=False)
-                            if res_b.stdout.strip():
-                                label = res_b.stdout.strip()
-                        except:
-                            pass
-                        
-                        if label and label != '-':
-                            mount_name = label
-
-                        # Check LUKS status using udev (No sudo required)
-                        res_u = run_command(['udevadm', 'info', '--query=property', f'--name={real_path}'], check=False)
-                        if 'ID_FS_TYPE=crypto_LUKS' in res_u.stdout:
-                            is_luks = "Y"
-                        elif fstype == 'crypto_LUKS':
-                            is_luks = "Y"
-                except:
-                    pass
-
-            mountpoint = f"/media/{os.environ.get('USER', 'root')}/{mount_name}"
-
-            mapper_path = f"/dev/mapper/{name}"
-            target_to_mount = mapper_path
-
-            if is_luks == "Y" and os.path.exists(mapper_path):
-                mapped_real_paths.add(os.path.realpath(mapper_path))
-                mapped_real_paths.add(mapper_path)
-                mapped_names.add(name) # Hide '1a'
-                
-                state = "OPEN"
-                try:
-                    cmd_m = ['lsblk', '-n', '-P', '-o', 'KNAME,PKNAME,FSTYPE,LABEL,SIZE', mapper_path]
-                    res_m = run_command(cmd_m, check=False)
-                    if res_m.stdout.strip():
-                        props = {}
-                        for part in shlex.split(res_m.stdout.strip()):
-                            if '=' in part:
-                                k, v = part.split('=', 1)
-                                props[k] = v
-                        # Get mapper kernel name (e.g. dm-0)
-                        dm_device = props.get('KNAME', '')
-                        if dm_device: mapped_names.add(dm_device)
-                        
-                        # Also hide the physical parent of the DM device
-                        dm_parent = props.get('PKNAME', '')
-                        if dm_parent: 
-                            mapped_names.add(dm_parent)
-                            if phys_device == '-': phys_device = dm_parent
-                        
-                        # Use mapper properties for FS details
-                        if props.get('FSTYPE'): fstype = props.get('FSTYPE')
-                        if props.get('LABEL'): 
-                            label = props.get('LABEL')
-                            if label and label != '-':
-                                mountpoint = f"/media/{os.environ.get('USER', 'root')}/{label}"
-                        if props.get('SIZE'): size = props.get('SIZE')
-                except:
-                    pass
-                
-                targets = find_mount_targets(mapper_path)
-                if targets:
-                    mountpoint = ", ".join(targets)
-                    state = "MOUNTED"
-            elif is_luks == "N" and state != "MISSING":
-                 targets = find_mount_targets(path)
-                 if targets:
-                     mountpoint = ", ".join(targets)
-                     state = "MOUNTED"
-
-            # Only show mountpoint if actually MOUNTED
-            if state != "MOUNTED":
-                mountpoint = "-"
-
-            display_dev = phys_device
-            if dm_device and dm_device != phys_device:
-                display_dev = f"{phys_device}({dm_device})"
-
-            mapped_rows.append({
-                'idx': f"[{i}]", 'name': name, 'luks': is_luks, 'state': state, 
-                'fstype': fstype, 'label': label if label else "-", 'mount': mountpoint, 
-                'dev': display_dev, 'size': size, 'path': path
-            })
-            i += 1
-
-        # 2. Collect Unmapped Disks
-        all_disks = self.get_disk_info()
-        flat_disks = self.flatten_disks(all_disks)
-        self.unmapped_cache = []
-        u_idx = 1
-        for dev in flat_disks:
-            d_name = dev.get('name') # Usually mapper name or short kernel name
-            d_kname = dev.get('kname') # Kernel name (sda2, dm-0)
-            if not d_name or d_name.startswith('loop'):
-                continue
-            
-            # Hide if NAME or KNAME matches a known mapping (1a, dm-0, etc.)
-            if d_name in mapped_names or d_kname in mapped_names:
-                continue
-
-            dev_path = f"/dev/{d_name}"
-            real_dev_path = os.path.realpath(dev_path)
-            
-            # Hide if this is a known mapped physical device or mapper device path
-            if real_dev_path in mapped_real_paths or dev_path in mapped_real_paths:
-                continue
-            
-            # Check for /dev/mapper/ links appearing in dev nodes
-            if os.path.exists(f"/dev/mapper/{d_name}"):
-                continue
-
-            fstype = dev.get('fstype') or '-'
-            label = dev.get('label') or '-'
-            
-            # Fallback to blkid for more reliable label
-            try:
-                res_b = run_command(['blkid', '-o', 'value', '-s', 'LABEL', dev_path], sudo=True, check=False)
-                if res_b.stdout.strip():
-                    label = res_b.stdout.strip()
-            except:
-                pass
-
-            size = dev.get('size') or '-'
-            mountpoint = dev.get('mountpoint') or '-'
-            pdp = self.find_persistent_path(d_name, dev.get('wwn'))
-            
-            self.unmapped_cache.append({
-                'dev': dev_path, 'pdp': pdp if pdp != '-' else dev_path,
-                'size': size, 'model': dev.get('model'), 'type': dev.get('type')
-            })
-            
-            is_luks_u = "N"
-            if fstype == 'crypto_LUKS':
-                is_luks_u = "Y"
-            else:
-                # Check udev for unmapped too
-                res_uu = subprocess.run(['udevadm', 'info', '--query=property', f'--name={dev_path}'], capture_output=True, text=True)
-                if 'ID_FS_TYPE=crypto_LUKS' in res_uu.stdout:
-                    is_luks_u = "Y"
-
-            # Check if this device has any active LUKS children (is it open?)
-            is_open = False
-            has_mount = mountpoint != '-'
-            
-            # Look for crypt children in the flattened list
-            # A bit inefficient but reliable: find if any device has this one as PKNAME
-            for child in flat_disks:
-                if child.get('pkname') == d_name or child.get('pkname') == d_kname:
-                    if child.get('type') == 'crypt':
-                        is_open = True
-                        if child.get('mountpoint'):
-                            has_mount = True
-                            mountpoint = child.get('mountpoint')
-
-            state_u = "UNMOUNTED"
-            if has_mount:
-                state_u = "MOUNTED"
-            elif is_open:
-                state_u = "OPEN"
-            elif is_luks_u == "Y":
-                state_u = "LOCKED"
-
-            unmapped_rows.append({
-                'idx': f"[U{u_idx}]", 'name': "-", 'luks': is_luks_u, 'state': state_u,
-                'fstype': fstype, 'label': label, 'mount': mountpoint,
-                'dev': d_kname if d_kname else d_name, 'size': size, 'path': pdp
-            })
-            u_idx += 1
-
-        # 3. Calculate Widths and Print
-        all_rows = mapped_rows + unmapped_rows
-        headers = ["#", "NAME", "LUKS", "STATE", "FSTYPE", "LABEL", "MOUNTPOINT", "DEVICE", "SIZE", "PERSISTENT PATH (IEEE)"]
-        keys = ['idx', 'name', 'luks', 'state', 'fstype', 'label', 'mount', 'dev', 'size', 'path']
-        widths = {k: len(h) for k, h in zip(keys, headers)}
-        
-        for row in all_rows:
-            for k in keys:
-                widths[k] = max(widths[k], len(str(row[k])))
-        
-        fmt = "  ".join([f"{{:<{widths[k]}}}" for k in keys])
-
-        print(f"\n{Colors.HEADER}--- Disk Management Table ({get_map_file_path()}) ---{Colors.ENDC}")
-        print(fmt.format(*headers))
-        print("-" * (sum(widths.values()) + len(keys)*2))
-        for row in all_rows:
-            print(fmt.format(*[row[k] for k in keys]))
-        print("")
 
     def resolve_target(self, target_str, allow_id=True):
         '''Resolves a target string to a physical path.
