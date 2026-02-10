@@ -994,7 +994,7 @@ class DiskMgrShell(cmd.Cmd):
             dev_path = f"/dev/{d_name}"
             try:
                 ls_res = run_command(['lsblk', '-J', '-f', '-o',
-                                      'NAME,TYPE,SIZE,FSTYPE,FSVER,LABEL,UUID,FSAVAIL,FSUSE%,MOUNTPOINTS,WWN,PARTUUID',
+                                      'NAME,KNAME,TYPE,SIZE,FSTYPE,FSVER,LABEL,UUID,FSAVAIL,FSUSE%,MOUNTPOINTS,WWN,PARTUUID',
                                       dev_path], sudo=True, check=False)
                 rows = []
                 if (getattr(ls_res, 'stdout', '') or '').strip():
@@ -1193,6 +1193,7 @@ class DiskMgrShell(cmd.Cmd):
             is_last = (i == len(devices) - 1)
 
             name = dev.get('name', '') or ""
+            kname = dev.get('kname', '') or name
             dtype = dev.get('type') or ""
             size = dev.get('size') or ""
             fstype = dev.get('fstype') or ""
@@ -1219,11 +1220,19 @@ class DiskMgrShell(cmd.Cmd):
 
             # Tree characters
             if is_root:
-                tree_part = name
+                # For device-mapper/crypto nodes, show the kernel name plus friendly name in brackets.
+                # Example: dm-0 (1a)
+                if dtype == 'crypt' and kname and name and kname != name:
+                    tree_part = f"{kname} ({name})"
+                else:
+                    tree_part = name
                 next_indent = ""
             else:
                 char = "└─" if is_last else "├─"
-                tree_part = indent + char + name
+                shown = name
+                if dtype == 'crypt' and kname and name and kname != name:
+                    shown = f"{kname} ({name})"
+                tree_part = indent + char + shown
                 next_indent = indent + ("    " if is_last else "│   ")
 
             # Friendly name (diskmap.tsv) is only for real disk/partition nodes.
@@ -1238,7 +1247,7 @@ class DiskMgrShell(cmd.Cmd):
 
             rows.append({
                 "#": "-",
-                "KNAME": name,
+                "KNAME": kname,
                 "NAME": friendly,
                 "DEVICE": tree_part,
                 "PERSISTENT PATH (IEEE)": pdp,
