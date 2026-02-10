@@ -1172,7 +1172,7 @@ class DiskMgrShell(cmd.Cmd):
 
     def _print_lsblk_rows(self, rows):
         """
-        Print a column-aligned table where each column width is (largest element in that column) + 1 space.
+        Print a column-aligned table where each cell is padded with one space on each side.
         Persistent path is printed immediately after NAME.
         """
         cols = [
@@ -1197,14 +1197,18 @@ class DiskMgrShell(cmd.Cmd):
                 if len(v) > widths[c]:
                     widths[c] = len(v)
 
-        # Add one trailing space per column for readability; join without an extra separator.
+        # Add one leading + one trailing space per column (so total width is max + 2).
         for c in cols:
-            widths[c] += 1
+            widths[c] += 2
 
-        header = "".join([f"{c:<{widths[c]}}" for c in cols]).rstrip()
+        def _cell(text, width):
+            inner = max(width - 2, 0)
+            return f" {text:<{inner}} "
+
+        header = "".join([_cell(c, widths[c]) for c in cols]).rstrip()
         print(f"{Colors.BOLD}{header}{Colors.ENDC}")
         for r in rows:
-            line = "".join([f"{str(r.get(c, '') or ''):<{widths[c]}}" for c in cols]).rstrip()
+            line = "".join([_cell(str(r.get(c, '') or ''), widths[c]) for c in cols]).rstrip()
             print(line)
 
     def resolve_uuid_to_dev(self, uuid):
