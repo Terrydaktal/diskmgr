@@ -1139,7 +1139,7 @@ class DiskMgrShell(cmd.Cmd):
     def _lsblk_col_widths(self, rows):
         cols = [
             "#",
-            "NAME",
+            "DEVICE",
             "TYPE",
             "SIZE",
             "FSTYPE",
@@ -1211,7 +1211,7 @@ class DiskMgrShell(cmd.Cmd):
             rows.append({
                 "#": "-",
                 "KNAME": name,
-                "NAME": tree_part,
+                "DEVICE": tree_part,
                 "PERSISTENT PATH (IEEE)": pdp,
                 "TYPE": dtype,
                 "SIZE": size,
@@ -1236,7 +1236,7 @@ class DiskMgrShell(cmd.Cmd):
         """
         cols = [
             "#",
-            "NAME",
+            "DEVICE",
             "TYPE",
             "SIZE",
             "FSTYPE",
