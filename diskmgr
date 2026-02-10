@@ -1534,32 +1534,53 @@ class DiskMgrShell(cmd.Cmd):
     def is_root_disk(self, target_path):
         """Checks if the target path is the root disk or partition."""
         try:
-            # Get the root device
+            # Root SOURCE can be a partition (/dev/nvme0n1p1) or a dm-crypt device (/dev/dm-0).
             res = run_command(['findmnt', '-nro', 'SOURCE', '/'], capture_output=True)
-            root_dev = os.path.realpath(res.stdout.strip())
-            
+            root_source = os.path.realpath(res.stdout.strip())
+
             target_real = os.path.realpath(target_path)
-            
-            # 1. Direct match
-            if target_real == root_dev:
+
+            def _top_level_disk(dev_path):
+                """Return the top-level /dev/<disk> for any block device (partition/dm/crypt), or None."""
+                cur = os.path.realpath(dev_path)
+                seen = set()
+                for _ in range(16):
+                    if cur in seen:
+                        return None
+                    seen.add(cur)
+
+                    if _lsblk_type(cur) == 'disk':
+                        return cur
+
+                    res_pk = run_command(['lsblk', '-no', 'PKNAME', cur], check=False)
+                    pk = (getattr(res_pk, 'stdout', '') or '').strip()
+                    if not pk:
+                        return None
+                    cur = os.path.realpath(f"/dev/{pk}")
+                return None
+
+            root_disk = _top_level_disk(root_source)
+            target_disk = _top_level_disk(target_real)
+
+            # Direct match against the root source (e.g., /dev/nvme0n1p1 or /dev/dm-0).
+            if target_real == root_source:
                 return True
-                
-            # 2. Parent disk match (if target is /dev/sda and root is /dev/sda2)
-            res_p = run_command(['lsblk', '-no', 'PKNAME', root_dev], check=False)
-            parent = res_p.stdout.strip()
-            if parent and target_real == os.path.realpath(f"/dev/{parent}"):
+
+            # Anything that resolves to the same physical disk as '/' counts as "root drive".
+            if root_disk and target_disk and target_disk == root_disk:
                 return True
-                
-            # 3. Child partition match (if target is /dev/sda2 and root is /dev/sda)
-            res_c = run_command(['lsblk', '-no', 'PKNAME', target_real], check=False)
-            target_parent = res_c.stdout.strip()
-            if target_parent and root_dev == os.path.realpath(f"/dev/{target_parent}"):
-                # This is actually covered by case 1 if root is the disk, 
-                # but if root is a partition we don't want to wipe its siblings?
-                # Actually, the most dangerous case is wiping the disk containing root.
-                pass
 
         except:
+            pass
+        return False
+
+    def _block_if_root_drive(self, target_path, operation):
+        """Return True (and log) if target_path is on the system root drive."""
+        try:
+            if self.is_root_disk(target_path):
+                log(f"OPERATION BLOCKED: {operation} is not allowed on the system root drive ({target_path}).", 'ERROR')
+                return True
+        except Exception:
             pass
         return False
 
@@ -1693,6 +1714,8 @@ class DiskMgrShell(cmd.Cmd):
             return
             
         mapped_devnode = os.path.realpath(src)
+        if self._block_if_root_drive(mapped_devnode, f"open {name}"):
+            return
         devnode = mapped_devnode
 
         # Check LUKS / filesystem, with safe partition auto-detection when mapping points at a disk.
@@ -1855,6 +1878,13 @@ class DiskMgrShell(cmd.Cmd):
             log("Usage: close <name>", 'ERROR')
             return
 
+        # Never attempt unmount/close operations on the system root drive.
+        self.mappings = read_luks_map()
+        if name in self.mappings:
+            real_src = os.path.realpath(self.mappings[name])
+            if self._block_if_root_drive(real_src, f"close {name}"):
+                return
+
         mapper_path = f"/dev/mapper/{name}"
         mount_guess = f"/media/{os.environ.get('USER', 'root')}/{name}"
 
@@ -1964,6 +1994,9 @@ class DiskMgrShell(cmd.Cmd):
                 log(f"Device not found or unknown mapping: {name}", 'ERROR')
                 return
              
+        if self._block_if_root_drive(target_dev, f"label {name}"):
+            return
+
         # Get info
         try:
             cmd = ['lsblk', '-J', '-o', 'FSTYPE,MOUNTPOINT,LABEL', target_dev]
@@ -2092,6 +2125,9 @@ class DiskMgrShell(cmd.Cmd):
 
             target_dev = devnode
 
+        if self._block_if_root_drive(target_dev, f"remount {name}"):
+            return
+
         # Determine label -> preferred mountpoint.
         label = ""
         try:
@@ -2190,6 +2226,8 @@ class DiskMgrShell(cmd.Cmd):
                 log(f"Unknown mapping: '{name}'.", 'ERROR')
                 return
             devnode = os.path.realpath(src)
+            if self._block_if_root_drive(devnode, f"luks passwd {name}"):
+                return
             res = run_command(['cryptsetup', 'isLuks', devnode], sudo=True, check=False)
             if res.returncode != 0:
                 log(f"Device {name} ({devnode}) is not a LUKS encrypted device.", 'ERROR')
@@ -2212,6 +2250,8 @@ class DiskMgrShell(cmd.Cmd):
                 log(f"Unknown target: '{name}'", 'ERROR')
                 return
             devnode = os.path.realpath(src)
+            if self._block_if_root_drive(devnode, f"luks backup {name}"):
+                return
             res = run_command(['cryptsetup', 'isLuks', devnode], sudo=True, check=False)
             if res.returncode != 0:
                 log(f"Device {devnode} is not a valid LUKS device.", 'ERROR')
@@ -2236,6 +2276,8 @@ class DiskMgrShell(cmd.Cmd):
                 log(f"Unknown target: '{name}'", 'ERROR')
                 return
             devnode = os.path.realpath(src)
+            if self._block_if_root_drive(devnode, f"luks restore {name}"):
+                return
             log(f"RESTORE WARNING: About to overwrite LUKS header on {name} ({devnode}) using {filename}")
             if not self.extensive_confirm(name):
                 return
@@ -3081,6 +3123,19 @@ class DiskMgrShell(cmd.Cmd):
             log(f"Primary disk '{primary}' is not mounted.", 'ERROR')
             return
 
+        # Block syncing to/from the system root drive.
+        try:
+            res_s = run_command(['findmnt', '-rn', '-M', sec_mnt, '-o', 'SOURCE'], check=False)
+            sec_src = (getattr(res_s, 'stdout', '') or '').strip()
+            res_p = run_command(['findmnt', '-rn', '-M', pri_mnt, '-o', 'SOURCE'], check=False)
+            pri_src = (getattr(res_p, 'stdout', '') or '').strip()
+            if sec_src and self._block_if_root_drive(os.path.realpath(sec_src), f"sync {secondary} {primary}"):
+                return
+            if pri_src and self._block_if_root_drive(os.path.realpath(pri_src), f"sync {secondary} {primary}"):
+                return
+        except Exception:
+            pass
+
         print(f"Syncing: {Colors.BOLD}{pri_mnt}/{Colors.ENDC} -> {Colors.WARNING}{sec_mnt}/{Colors.ENDC}")
         
         if not self.extensive_confirm(secondary):
@@ -3123,6 +3178,15 @@ class DiskMgrShell(cmd.Cmd):
         if not mnt:
             log(f"Disk '{name}' is not mounted. Run 'open {name}' first.", 'ERROR')
             return
+
+        # Block defrag on the system root drive (writes lots of blocks/metadata).
+        try:
+            res_src = run_command(['findmnt', '-rn', '-M', mnt, '-o', 'SOURCE'], check=False)
+            src = (getattr(res_src, 'stdout', '') or '').strip()
+            if src and self._block_if_root_drive(os.path.realpath(src), f"defrag {name}"):
+                return
+        except Exception:
+            pass
 
         # Determine filesystem type.
         fstype = ""
@@ -3389,6 +3453,15 @@ class DiskMgrShell(cmd.Cmd):
         if fstype != "btrfs":
             log(f"Scrub requires btrfs, but {mnt} is '{fstype or 'unknown'}'.", 'ERROR')
             return
+
+        # Block scrub on the system root drive.
+        try:
+            res_src = run_command(['findmnt', '-rn', '-M', mnt, '-o', 'SOURCE'], check=False)
+            src = (getattr(res_src, 'stdout', '') or '').strip()
+            if src and self._block_if_root_drive(os.path.realpath(src), f"scrub {name}"):
+                return
+        except Exception:
+            pass
 
         print(f"Scrubbing: {Colors.BOLD}{mnt}{Colors.ENDC} (fstype=btrfs)")
         if not self.extensive_confirm(f"scrub {name} ({mnt})", destructive=False):
