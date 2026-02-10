@@ -971,6 +971,7 @@ class DiskMgrShell(cmd.Cmd):
         # - compute column widths across ALL disks (not per-disk)
         # - include the diskmgr mapping name (from diskmap.tsv) per real disk/partition node
         friendly_map = {}
+        missing_mappings = []
         try:
             # Refresh mappings in case they changed on disk.
             self.mappings = read_luks_map()
@@ -981,10 +982,13 @@ class DiskMgrShell(cmd.Cmd):
                     # Only map targets that currently exist, otherwise realpath() can be misleading.
                     if os.path.exists(target):
                         friendly_map[os.path.realpath(target)] = friendly
+                    else:
+                        missing_mappings.append((friendly, target))
                 except Exception:
                     continue
         except Exception:
             friendly_map = {}
+            missing_mappings = []
 
         disk_rows = {}
         for d in disks:
@@ -1152,6 +1156,38 @@ class DiskMgrShell(cmd.Cmd):
                 print(f"\n{Colors.BOLD}Disk: {dev_path} ({model}){Colors.ENDC}")
                 log(f"Could not read layout for {dev_path}: {e}", 'WARN')
         print("")
+
+        # Missing mappings section: show friendly names and their configured persistent IDs.
+        # Note: LUKS status can't be probed if the device is not present.
+        if missing_mappings:
+            print(f"{Colors.HEADER}--- Missing Mappings ({get_map_file_path()}) ---{Colors.ENDC}")
+            rows = []
+            for friendly, target in missing_mappings:
+                rows.append({
+                    "NAME": str(friendly),
+                    "PERSISTENT ID": str(target),
+                    "LUKS": "? (device missing)",
+                })
+
+            cols = ["NAME", "PERSISTENT ID", "LUKS"]
+            widths = {c: len(c) for c in cols}
+            for r in rows:
+                for c in cols:
+                    widths[c] = max(widths[c], len(str(r.get(c, "") or "")))
+            # 1-space padding each side.
+            for c in cols:
+                widths[c] += 2
+
+            def _cell(text, width):
+                inner = max(width - 2, 0)
+                return f" {text:<{inner}} "
+
+            header = "".join([_cell(c, widths[c]) for c in cols]).rstrip()
+            print(f"{Colors.BOLD}{header}{Colors.ENDC}")
+            for r in rows:
+                line = "".join([_cell(str(r.get(c, "") or ""), widths[c]) for c in cols]).rstrip()
+                print(line)
+            print("")
 
     def _lsblk_col_widths(self, rows):
         cols = [
