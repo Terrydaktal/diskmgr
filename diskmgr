@@ -2643,12 +2643,47 @@ class DiskMgrShell(cmd.Cmd):
             print(f"{Colors.BOLD}SMART queried on:{Colors.ENDC} {disk_dev}")
 
         # NVMe drives don't expose ATA SMART attributes/logs in the same format. For NVMe, just show smartctl output.
-        is_nvme = os.path.basename(disk_dev).startswith('nvme') or ('SMART/Health Information (NVMe Log' in out) or ('NVMe Version' in out)
+        is_nvme = (
+            os.path.basename(disk_dev).startswith('nvme')
+            or ('SMART/Health Information (NVMe Log' in out)
+            or ('NVMe Version' in out)
+        )
         if is_nvme:
             if out.strip():
                 print(out.rstrip())
             if err.strip():
                 print(err.rstrip(), file=sys.stderr)
+
+            # Also show nvme-cli smart-log output (often includes vendor-specific counters smartctl doesn't).
+            nvme_bin = _find_tool_or_common_paths('nvme', [
+                '/usr/sbin/nvme',
+                '/sbin/nvme',
+                '/usr/local/sbin/nvme',
+                '/usr/bin/nvme',
+                '/bin/nvme',
+            ])
+            if nvme_bin is None:
+                log("nvme tool not found. Install 'nvme-cli' to show 'nvme smart-log'.", 'WARN')
+            else:
+                # Prefer the controller device (/dev/nvmeX) when available; fall back to the namespace node.
+                nvme_target = disk_dev
+                m = re.match(r"^(/dev/nvme[0-9]+)n[0-9]+$", disk_dev)
+                if m:
+                    ctrl = m.group(1)
+                    if os.path.exists(ctrl):
+                        nvme_target = ctrl
+
+                print(f"\n{Colors.HEADER}{Colors.BOLD}--- nvme smart-log {nvme_target} ---{Colors.ENDC}")
+                res_nv = run_command([nvme_bin, 'smart-log', nvme_target], sudo=True, capture_output=True, check=False)
+                nv_out = (res_nv.stdout or "").rstrip()
+                nv_err = (res_nv.stderr or "").rstrip()
+                if nv_out:
+                    print(nv_out)
+                if nv_err:
+                    print(nv_err, file=sys.stderr)
+                if getattr(res_nv, 'returncode', 0) != 0:
+                    log(f"nvme smart-log exit status: {res_nv.returncode}", 'WARN')
+
             if getattr(res, 'returncode', 0) != 0:
                 log(f"smartctl exit status: {res.returncode} (non-zero may indicate SMART warnings).", 'WARN')
             return
