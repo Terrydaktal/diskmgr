@@ -969,6 +969,23 @@ class DiskMgrShell(cmd.Cmd):
         # Precompute lsblk rows for all disks first so we can:
         # - keep the output stable across disks
         # - compute column widths across ALL disks (not per-disk)
+        # - include the diskmgr mapping name (from diskmap.tsv) per real disk/partition node
+        friendly_map = {}
+        try:
+            # Refresh mappings in case they changed on disk.
+            self.mappings = read_luks_map()
+            for friendly, target in (self.mappings or {}).items():
+                try:
+                    if not target:
+                        continue
+                    # Only map targets that currently exist, otherwise realpath() can be misleading.
+                    if os.path.exists(target):
+                        friendly_map[os.path.realpath(target)] = friendly
+                except Exception:
+                    continue
+        except Exception:
+            friendly_map = {}
+
         disk_rows = {}
         for d in disks:
             d_name = d.get('name', '')
@@ -983,7 +1000,7 @@ class DiskMgrShell(cmd.Cmd):
                 if (getattr(ls_res, 'stdout', '') or '').strip():
                     data = json.loads(ls_res.stdout)
                     if 'blockdevices' in data:
-                        rows = self._collect_lsblk_rows(data['blockdevices'])
+                        rows = self._collect_lsblk_rows(data['blockdevices'], friendly_map=friendly_map)
                 disk_rows[d_name] = rows
             except Exception:
                 disk_rows[d_name] = []
@@ -1139,6 +1156,7 @@ class DiskMgrShell(cmd.Cmd):
     def _lsblk_col_widths(self, rows):
         cols = [
             "#",
+            "NAME",
             "DEVICE",
             "TYPE",
             "SIZE",
@@ -1165,7 +1183,7 @@ class DiskMgrShell(cmd.Cmd):
             widths[c] += 2
         return widths
 
-    def _collect_lsblk_rows(self, devices, indent="", is_root=True, parent_wwn=""):
+    def _collect_lsblk_rows(self, devices, indent="", is_root=True, parent_wwn="", friendly_map=None):
         """
         Collect an lsblk JSON tree into flat rows, while preserving the tree glyphs in NAME.
         Returns a list of dicts with consistent string keys.
@@ -1208,9 +1226,20 @@ class DiskMgrShell(cmd.Cmd):
                 tree_part = indent + char + name
                 next_indent = indent + ("    " if is_last else "│   ")
 
+            # Friendly name (diskmap.tsv) is only for real disk/partition nodes.
+            friendly = "-"
+            if dtype in ('disk', 'part') and friendly_map:
+                try:
+                    devnode = f"/dev/{name}"
+                    if os.path.exists(devnode):
+                        friendly = friendly_map.get(os.path.realpath(devnode), "-")
+                except Exception:
+                    friendly = "-"
+
             rows.append({
                 "#": "-",
                 "KNAME": name,
+                "NAME": friendly,
                 "DEVICE": tree_part,
                 "PERSISTENT PATH (IEEE)": pdp,
                 "TYPE": dtype,
@@ -1226,7 +1255,7 @@ class DiskMgrShell(cmd.Cmd):
             })
 
             if 'children' in dev:
-                rows.extend(self._collect_lsblk_rows(dev['children'], next_indent, is_root=False, parent_wwn=wwn))
+                rows.extend(self._collect_lsblk_rows(dev['children'], next_indent, is_root=False, parent_wwn=wwn, friendly_map=friendly_map))
         return rows
 
     def _print_lsblk_rows(self, rows, widths=None):
@@ -1236,6 +1265,7 @@ class DiskMgrShell(cmd.Cmd):
         """
         cols = [
             "#",
+            "NAME",
             "DEVICE",
             "TYPE",
             "SIZE",
