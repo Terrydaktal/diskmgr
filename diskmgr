@@ -799,28 +799,56 @@ class DiskMgrShell(cmd.Cmd):
         return flat
 
     def find_persistent_path(self, dev_node, wwn=None, type_='disk'):
-        # Try to find /dev/disk/by-id/ match
-        
+        # Try to find a /dev/disk/by-id/ match.
+        #
+        # Requirement: prefer a by-id link that contains the IEEE identifier (WWN/EUI),
+        # e.g. "wwn-0x..." for SATA/SCSI or "nvme-eui...." for NVMe, when available.
+        # For partitions, prefer the corresponding "-partN" link.
+
         # 1. Try WWN logic from opendisk
         if wwn:
-            prefix = "nvme-" if wwn.startswith("eui.") else "wwn-"
-            path = f"/dev/disk/by-id/{prefix}{wwn}"
+            prefix = "nvme-" if str(wwn).startswith("eui.") else "wwn-"
+            base = f"/dev/disk/by-id/{prefix}{wwn}"
+            candidates = []
+
+            if type_ == 'part':
+                # Prefer partition-scoped by-id links if this is a partition.
+                m = re.search(r"p?([0-9]+)$", str(dev_node))
+                if m:
+                    candidates.append(f"{base}-part{m.group(1)}")
+            candidates.append(base)
+
             try:
-                if os.path.realpath(path) == os.path.realpath(f"/dev/{dev_node}"):
-                    return path
-            except:
+                target = os.path.realpath(f"/dev/{dev_node}")
+                for c in candidates:
+                    if os.path.exists(c) and os.path.realpath(c) == target:
+                        return c
+            except Exception:
                 pass
 
         # 2. Brute force check /dev/disk/by-id
         by_id_dir = Path('/dev/disk/by-id')
         if by_id_dir.exists():
+            matches = []
             for link in by_id_dir.iterdir():
                 try:
                     if link.resolve() == Path(f"/dev/{dev_node}").resolve():
-                        return str(link)
-                except:
+                        matches.append(str(link))
+                except Exception:
                     continue
-        
+
+            if matches:
+                # Prefer identifiers that include IEEE IDs when present.
+                def _score(p):
+                    b = os.path.basename(p)
+                    if b.startswith('nvme-eui.'):
+                        return 0
+                    if b.startswith('wwn-'):
+                        return 1
+                    return 2
+                matches.sort(key=_score)
+                return matches[0]
+
         return "-"
 
     def do_help(self, arg):
@@ -1081,7 +1109,7 @@ class DiskMgrShell(cmd.Cmd):
                 log(f"Could not read layout for {dev_path}: {e}", 'WARN')
         print("")
 
-    def render_lsblk_json(self, devices, indent="", is_root=True):
+    def render_lsblk_json(self, devices, indent="", is_root=True, parent_wwn=""):
         for i, dev in enumerate(devices):
             is_last = (i == len(devices) - 1)
 
@@ -1094,7 +1122,8 @@ class DiskMgrShell(cmd.Cmd):
             uuid = dev.get('uuid') or ""
             fsavail = dev.get('fsavail') or ""
             fsuse = dev.get('fsuse%') or ""
-            wwn = dev.get('wwn') or ""
+            # Partitions often don't carry WWN/EUI in lsblk output; inherit from parent disk when missing.
+            wwn = dev.get('wwn') or parent_wwn or ""
 
             mp = dev.get('mountpoints', [])
             if isinstance(mp, list):
@@ -1123,7 +1152,7 @@ class DiskMgrShell(cmd.Cmd):
             print(f"{tree_part:<25} {dtype:<6} {size:<10} {fstype:<12} {fsver:<6} {label:<12} {uuid:<38} {fsavail:<10} {fsuse:<8} {mounts:<20} {pdp}".rstrip())
 
             if 'children' in dev:
-                self.render_lsblk_json(dev['children'], next_indent, is_root=False)
+                self.render_lsblk_json(dev['children'], next_indent, is_root=False, parent_wwn=wwn)
 
     def resolve_uuid_to_dev(self, uuid):
         '''Resolves a UUID to a short device name like sda1 or nvme0n1p1.'''
