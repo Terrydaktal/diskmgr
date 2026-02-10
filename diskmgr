@@ -868,10 +868,13 @@ class DiskMgrShell(cmd.Cmd):
         
         print(f"  {Colors.OKGREEN}create <name> [options]{Colors.ENDC}")
         print("      Creates a new superfloppy or single-partition volume (plain or encrypted) and mounts it.")
-        print("      Non-destructive: it will refuse to overwrite an in-use/partitioned disk. Use: erase --soft <name> first.")
+        print("      Non-destructive: it will refuse to overwrite an in-use/partitioned disk. Use: erase <name> first.")
 
         print(f"  {Colors.OKGREEN}erase <name>{Colors.ENDC}")
-        print("      Securely erases a disk (multi-step hardware-aware wipe).")
+        print("      Fast metadata wipe for re-provisioning (wipefs + zap GPT/MBR metadata).")
+
+        print(f"  {Colors.OKGREEN}nuke <name>{Colors.ENDC}")
+        print("      Secure erase (multi-step hardware-aware wipe).")
 
         print(f"  {Colors.OKGREEN}clone <src_name> <dst_name>{Colors.ENDC}")
         print("      Clones one disk to another (requires target >= source size).")
@@ -2294,19 +2297,140 @@ class DiskMgrShell(cmd.Cmd):
             log(f"Unknown LUKS subcommand: {subcmd}", 'ERROR')
             self.do_help('luks')
 
+    def _soft_erase_target(self, real_target):
+        dev_type = _lsblk_type(real_target)
+
+        wipefs_bin = _find_tool_or_common_paths('wipefs', [
+            '/usr/sbin/wipefs',
+            '/sbin/wipefs',
+            '/usr/bin/wipefs',
+            '/bin/wipefs',
+        ]) or 'wipefs'
+        sgdisk_bin = _find_tool_or_common_paths('sgdisk', [
+            '/usr/sbin/sgdisk',
+            '/sbin/sgdisk',
+            '/usr/bin/sgdisk',
+            '/bin/sgdisk',
+        ])
+        sfdisk_bin = _find_tool_or_common_paths('sfdisk', [
+            '/usr/sbin/sfdisk',
+            '/sbin/sfdisk',
+            '/usr/bin/sfdisk',
+            '/bin/sfdisk',
+        ]) or 'sfdisk'
+
+        log(f"Soft erase: wiping signatures on {real_target} ...")
+
+        # If this is a whole disk, wipe signatures on existing partitions first (best-effort).
+        if dev_type == 'disk':
+            parts = []
+            try:
+                res_p = run_command(['lsblk', '-nr', '-o', 'NAME,TYPE', real_target], check=False)
+                for line in (getattr(res_p, 'stdout', '') or '').splitlines():
+                    cols = line.strip().split()
+                    if len(cols) >= 2 and cols[1] == 'part':
+                        parts.append(os.path.realpath(f"/dev/{cols[0]}"))
+            except Exception:
+                parts = []
+
+            for p in parts:
+                run_command([wipefs_bin, '-a', p], sudo=True, check=False)
+
+            # For whole disks, --force is required to erase partition-table signatures.
+            run_command([wipefs_bin, '-a', '--force', real_target], sudo=True, check=False)
+
+            # Zap GPT/MBR metadata to remove "ghost" headers (e.g., GPT backup at end-of-disk).
+            try:
+                res_pt = run_command(['lsblk', '-no', 'PTTYPE', real_target], check=False)
+                pttype = (getattr(res_pt, 'stdout', '') or '').strip().lower()
+            except Exception:
+                pttype = ""
+
+            if pttype == 'gpt' or not pttype:
+                if sgdisk_bin:
+                    run_command([sgdisk_bin, '--zap-all', real_target], sudo=True, check=False)
+            if pttype in ('dos', 'msdos'):
+                # Write an empty DOS partition table (no partitions).
+                script = "label: dos\n"
+                run_command([sfdisk_bin, '--wipe', 'always', '--wipe-partitions', 'always', real_target],
+                            sudo=True, input_str=script, check=False)
+
+            run_command(['udevadm', 'settle'], sudo=True, check=False)
+            run_command(['partprobe', real_target], sudo=True, check=False)
+        else:
+            run_command([wipefs_bin, '-a', real_target], sudo=True, check=False)
+            run_command(['udevadm', 'settle'], sudo=True, check=False)
+
+        log("Soft erase completed.")
+
     def do_erase(self, arg):
-        '''Securely erase a disk: erase <name> [options]
+        '''Fast metadata wipe (soft erase): erase <name> [--soft]
+        
+        This is a fast "re-provisioning" wipe. It removes recognizable signatures and zaps GPT/MBR metadata
+        (when the target is a whole disk). It is NOT a secure wipe.
+
+        It performs:
+          - wipefs -a (and --force for whole-disk partition-table signatures)
+          - sgdisk --zap-all (GPT) when available
+          - sfdisk (MBR)
+
+        Note: This is a DESTRUCTIVE operation. Solving two math problems is MANDATORY to proceed.
+        '''
+        parser = CmdArgumentParser(prog='erase', add_help=False)
+        parser.add_argument('target', help='Target name or device')
+        parser.add_argument('--soft', action='store_true', help='(Deprecated) erase is already soft; flag is ignored')
+
+        try:
+            split_args = shlex.split(arg)
+            args = parser.parse_args(split_args)
+        except argparse.ArgumentError as e:
+            log(str(e), 'ERROR')
+            return
+        except SystemExit:
+            return
+
+        name = args.target
+        real_target = self.resolve_target(name, allow_id=False)
+
+        if not real_target:
+            log(f"Unknown mapping: '{name}'. You must 'map' a disk before you can erase it.", 'ERROR')
+            return
+
+        if not os.path.exists(real_target):
+            log(f"Target not found: {real_target}", 'ERROR')
+            return
+
+        real_target = os.path.realpath(real_target)
+        log(f"Target resolved: {real_target}")
+
+        if self.is_root_disk(real_target):
+            log(f"OPERATION BLOCKED: {real_target} is part of the system root drive!", 'ERROR')
+            return
+
+        # Refuse to operate on mounted devices (erase is destructive).
+        try:
+            res_m = run_command(['lsblk', '-nr', '-o', 'MOUNTPOINT', real_target], check=False)
+            mounts = [ln.strip() for ln in (getattr(res_m, 'stdout', '') or '').splitlines() if ln.strip()]
+            if mounts:
+                log(f"OPERATION BLOCKED: {real_target} has mounted filesystems ({', '.join(mounts)}). Unmount/close it first.", 'ERROR')
+                return
+        except Exception:
+            pass
+
+        if not self.extensive_confirm(real_target):
+            return
+
+        run_command(['sudo', '-v'])
+
+        if args.soft:
+            log("--soft is deprecated: erase is already a soft/metadata wipe.", 'WARN')
+
+        self._soft_erase_target(real_target)
+
+    def do_nuke(self, arg):
+        '''Securely erase a disk: nuke <name>
         
         Note: You must 'map' a disk first to give it a name before erasing it.
-
-        OPTIONS:
-        - --soft:
-          Soft erase. This is a fast "metadata wipe" intended for re-provisioning, not secure destruction.
-          It only removes recognizable signatures and zaps GPT/MBR metadata (when the target is a whole disk).
-          Specifically:
-            - wipefs -a (and --force for whole-disk partition-table signatures)
-            - sgdisk --zap-all (GPT)
-            - sfdisk (MBR)
 
         NUANCES & SAFETY:
         - Whole Disk (sda): 
@@ -2334,9 +2458,8 @@ class DiskMgrShell(cmd.Cmd):
 
         WARNING: This operation is IRREVERSIBLE.
         '''
-        parser = CmdArgumentParser(prog='erase', add_help=False)
+        parser = CmdArgumentParser(prog='nuke', add_help=False)
         parser.add_argument('target', help='Target name or device')
-        parser.add_argument('--soft', action='store_true', help='Soft erase (wipefs + zap partition table only)')
         
         try:
             split_args = shlex.split(arg)
@@ -2379,74 +2502,7 @@ class DiskMgrShell(cmd.Cmd):
             return
 
         run_command(['sudo', '-v'])
-        
-        if args.soft:
-            dev_type = _lsblk_type(real_target)
 
-            wipefs_bin = _find_tool_or_common_paths('wipefs', [
-                '/usr/sbin/wipefs',
-                '/sbin/wipefs',
-                '/usr/bin/wipefs',
-                '/bin/wipefs',
-            ]) or 'wipefs'
-            sgdisk_bin = _find_tool_or_common_paths('sgdisk', [
-                '/usr/sbin/sgdisk',
-                '/sbin/sgdisk',
-                '/usr/bin/sgdisk',
-                '/bin/sgdisk',
-            ])
-            sfdisk_bin = _find_tool_or_common_paths('sfdisk', [
-                '/usr/sbin/sfdisk',
-                '/sbin/sfdisk',
-                '/usr/bin/sfdisk',
-                '/bin/sfdisk',
-            ]) or 'sfdisk'
-
-            log(f"Soft erase: wiping signatures on {real_target} ...")
-
-            # If this is a whole disk, wipe signatures on existing partitions first (best-effort).
-            if dev_type == 'disk':
-                parts = []
-                try:
-                    res_p = run_command(['lsblk', '-nr', '-o', 'NAME,TYPE', real_target], check=False)
-                    for line in (getattr(res_p, 'stdout', '') or '').splitlines():
-                        cols = line.strip().split()
-                        if len(cols) >= 2 and cols[1] == 'part':
-                            parts.append(os.path.realpath(f"/dev/{cols[0]}"))
-                except Exception:
-                    parts = []
-
-                for p in parts:
-                    run_command([wipefs_bin, '-a', p], sudo=True, check=False)
-
-                # For whole disks, --force is required to erase partition-table signatures.
-                run_command([wipefs_bin, '-a', '--force', real_target], sudo=True, check=False)
-
-                # Zap GPT/MBR metadata to remove "ghost" headers (e.g., GPT backup at end-of-disk).
-                try:
-                    res_pt = run_command(['lsblk', '-no', 'PTTYPE', real_target], check=False)
-                    pttype = (getattr(res_pt, 'stdout', '') or '').strip().lower()
-                except Exception:
-                    pttype = ""
-
-                if pttype == 'gpt' or not pttype:
-                    if sgdisk_bin:
-                        run_command([sgdisk_bin, '--zap-all', real_target], sudo=True, check=False)
-                if pttype in ('dos', 'msdos'):
-                    # Write an empty DOS partition table (no partitions).
-                    script = "label: dos\n"
-                    run_command([sfdisk_bin, '--wipe', 'always', '--wipe-partitions', 'always', real_target],
-                                sudo=True, input_str=script, check=False)
-
-                run_command(['udevadm', 'settle'], sudo=True, check=False)
-                run_command(['partprobe', real_target], sudo=True, check=False)
-            else:
-                run_command([wipefs_bin, '-a', real_target], sudo=True, check=False)
-                run_command(['udevadm', 'settle'], sudo=True, check=False)
-
-            log("Soft erase completed.")
-            return
-        
         if secure_erase_disk(real_target):
             log("Secure erase completed successfully.")
         else:
@@ -2464,7 +2520,8 @@ class DiskMgrShell(cmd.Cmd):
           referenced by the cloned partition table.
         - diskmgr does NOT unmount the destination for you. Unmount/close it first to
           avoid live corruption.
-        - If you need to sanitize the destination, run: erase <dst_name>
+        - If you need to sanitize the destination (secure wipe), run: nuke <dst_name>
+        - If you only need a fast metadata wipe for re-provisioning, run: erase <dst_name>
 
         Note: The target disk MUST be the same size or larger than the source.
         
@@ -3812,7 +3869,7 @@ class DiskMgrShell(cmd.Cmd):
 	             * Creates a partition table of that type (if missing) and creates ONE partition spanning
 	               the whole disk, then puts plain/LUKS + filesystem inside that.
 	             * diskmgr will refuse if the disk already has partitions (to avoid destroying existing data).
-	           - To wipe an existing disk quickly before provisioning, use: erase --soft <name>
+	           - To wipe an existing disk quickly before provisioning, use: erase <name>
 
         3. Using --plain with --gpt or --mbr
            The Result: Standard Unencrypted Disk.
@@ -3912,7 +3969,7 @@ class DiskMgrShell(cmd.Cmd):
                 parts = [ln for ln in (getattr(res_p, 'stdout', '') or '').splitlines() if ln.strip().split()[-1] == 'part']
                 if parts:
                     log(f"OPERATION BLOCKED: {real_target} already has partitions. Refusing to overwrite the partition table.", 'ERROR')
-                    log("If you intend to wipe the disk quickly: erase --soft <name>", 'ERROR')
+                    log("If you intend to wipe the disk quickly: erase <name>", 'ERROR')
                     return
             except Exception:
                 pass
@@ -3926,7 +3983,7 @@ class DiskMgrShell(cmd.Cmd):
                 pttype = ""
             if pttype and pttype != 'gpt':
                 log(f"OPERATION BLOCKED: {real_target} has partition table type '{pttype}'. Refusing to overwrite.", 'ERROR')
-                log("If you intend to wipe the disk quickly: erase --soft <name>", 'ERROR')
+                log("If you intend to wipe the disk quickly: erase <name>", 'ERROR')
                 return
 
             sgdisk_bin = _find_tool_or_common_paths('sgdisk', [
@@ -3955,7 +4012,7 @@ class DiskMgrShell(cmd.Cmd):
                 parts = [ln for ln in (getattr(res_p, 'stdout', '') or '').splitlines() if ln.strip().split()[-1] == 'part']
                 if parts:
                     log(f"OPERATION BLOCKED: {real_target} already has partitions. Refusing to overwrite the partition table.", 'ERROR')
-                    log("If you intend to wipe the disk quickly: erase --soft <name>", 'ERROR')
+                    log("If you intend to wipe the disk quickly: erase <name>", 'ERROR')
                     return
             except Exception:
                 pass
@@ -3968,7 +4025,7 @@ class DiskMgrShell(cmd.Cmd):
                 pttype = ""
             if pttype and pttype not in ('dos', 'msdos'):
                 log(f"OPERATION BLOCKED: {real_target} has partition table type '{pttype}'. Refusing to overwrite.", 'ERROR')
-                log("If you intend to wipe the disk quickly: erase --soft <name>", 'ERROR')
+                log("If you intend to wipe the disk quickly: erase <name>", 'ERROR')
                 return
             # using sfdisk scripting
             sfdisk_script = f"label: dos\n{real_target}1 : start=2048, type=83"
@@ -3990,7 +4047,7 @@ class DiskMgrShell(cmd.Cmd):
                     pttype = ""
                 if pttype:
                     log(f"OPERATION BLOCKED: {real_target} is partitioned ({pttype}). Refusing to create a superfloppy over an existing partition table.", 'ERROR')
-                    log("Use create --gpt/--mbr for a single-partition volume, or erase --soft <name> to wipe the disk first.", 'ERROR')
+                    log("Use create --gpt/--mbr for a single-partition volume, or erase <name> to wipe the disk first.", 'ERROR')
                     return
 
         if not args.plain:
