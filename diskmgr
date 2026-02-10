@@ -968,17 +968,19 @@ class DiskMgrShell(cmd.Cmd):
                         else:
                             log(f"{dev_path}: could not read partition layout: {stderr}", 'WARN')
 
-                    # Still show lsblk hierarchy so the user can see what's on the disk.
-                    print("")
-                    try:
-                        ls_res = run_command(['lsblk', '-J', '-f', dev_path], sudo=True, check=False)
-                        if ls_res.stdout.strip():
-                            data = json.loads(ls_res.stdout)
-                            if 'blockdevices' in data:
-                                print(f"{Colors.BOLD}{'NAME':<25} {'FSTYPE':<12} {'FSVER':<6} {'LABEL':<12} {'UUID':<38} {'FSAVAIL':<10} {'FSUSE%':<8} {'MOUNTPOINTS'}{Colors.ENDC}")
-                                self.render_lsblk_json(data['blockdevices'])
-                    except Exception as e:
-                        log(f"Could not render lsblk tree: {e}", 'DEBUG')
+                        # Still show lsblk hierarchy so the user can see what's on the disk.
+                        print("")
+                        try:
+                            ls_res = run_command(['lsblk', '-J', '-f', '-o',
+                                                  'NAME,TYPE,SIZE,FSTYPE,FSVER,LABEL,UUID,FSAVAIL,FSUSE%,MOUNTPOINTS,WWN',
+                                                  dev_path], sudo=True, check=False)
+                            if ls_res.stdout.strip():
+                                data = json.loads(ls_res.stdout)
+                                if 'blockdevices' in data:
+                                    print(f"{Colors.BOLD}{'NAME':<25} {'TYPE':<6} {'SIZE':<10} {'FSTYPE':<12} {'FSVER':<6} {'FSLABEL':<12} {'FSUUID':<38} {'FSAVAIL':<10} {'FSUSE%':<8} {'FSMOUNTPOINTS':<20} {'PERSISTENT PATH'}{Colors.ENDC}")
+                                    self.render_lsblk_json(data['blockdevices'])
+                        except Exception as e:
+                            log(f"Could not render lsblk tree: {e}", 'DEBUG')
                     print("-" * 155)
                     continue
 
@@ -1063,11 +1065,13 @@ class DiskMgrShell(cmd.Cmd):
                 print("")
                 try:
                     # Use JSON output for absolute reliability in data capture
-                    ls_res = run_command(['lsblk', '-J', '-f', dev_path], sudo=True, check=False)
+                    ls_res = run_command(['lsblk', '-J', '-f', '-o',
+                                          'NAME,TYPE,SIZE,FSTYPE,FSVER,LABEL,UUID,FSAVAIL,FSUSE%,MOUNTPOINTS,WWN',
+                                          dev_path], sudo=True, check=False)
                     if ls_res.stdout.strip():
                         data = json.loads(ls_res.stdout)
                         if 'blockdevices' in data:
-                            print(f"{Colors.BOLD}{'NAME':<25} {'FSTYPE':<12} {'FSVER':<6} {'LABEL':<12} {'UUID':<38} {'FSAVAIL':<10} {'FSUSE%':<8} {'MOUNTPOINTS'}{Colors.ENDC}")
+                            print(f"{Colors.BOLD}{'NAME':<25} {'TYPE':<6} {'SIZE':<10} {'FSTYPE':<12} {'FSVER':<6} {'FSLABEL':<12} {'FSUUID':<38} {'FSAVAIL':<10} {'FSUSE%':<8} {'FSMOUNTPOINTS':<20} {'PERSISTENT PATH'}{Colors.ENDC}")
                             self.render_lsblk_json(data['blockdevices'])
                 except Exception as e:
                     log(f"Could not render lsblk tree: {e}", 'DEBUG')
@@ -1080,15 +1084,30 @@ class DiskMgrShell(cmd.Cmd):
     def render_lsblk_json(self, devices, indent="", is_root=True):
         for i, dev in enumerate(devices):
             is_last = (i == len(devices) - 1)
-            
+
             name = dev.get('name', '')
+            dtype = dev.get('type') or ""
+            size = dev.get('size') or ""
             fstype = dev.get('fstype') or ""
             fsver = dev.get('fsver') or ""
             label = dev.get('label') or ""
             uuid = dev.get('uuid') or ""
             fsavail = dev.get('fsavail') or ""
             fsuse = dev.get('fsuse%') or ""
-            mounts = ", ".join([m for m in dev.get('mountpoints', []) if m])
+            wwn = dev.get('wwn') or ""
+
+            mp = dev.get('mountpoints', [])
+            if isinstance(mp, list):
+                mounts = ", ".join([m for m in mp if m])
+            else:
+                mounts = str(mp or "")
+
+            # Persistent path: best-effort /dev/disk/by-id/... (or "-")
+            pdp = "-"
+            try:
+                pdp = self.find_persistent_path(name, wwn=wwn, type_=dtype or 'disk')
+            except Exception:
+                pdp = "-"
 
             # Tree characters
             if is_root:
@@ -1100,9 +1119,9 @@ class DiskMgrShell(cmd.Cmd):
                 next_indent = indent + ("    " if is_last else "│   ")
 
             # Print row
-            # NAME(25) FSTYPE(12) FSVER(6) LABEL(12) UUID(38) FSAVAIL(10) FSUSE(8) MOUNTPOINTS
-            print(f"{tree_part:<25} {fstype:<12} {fsver:<6} {label:<12} {uuid:<38} {fsavail:<10} {fsuse:<8} {mounts}".rstrip())
-            
+            # NAME(25) TYPE(6) SIZE(10) FSTYPE(12) FSVER(6) FSLABEL(12) FSUUID(38) FSAVAIL(10) FSUSE(8) FSMOUNTPOINTS(20) PERSISTENT PATH
+            print(f"{tree_part:<25} {dtype:<6} {size:<10} {fstype:<12} {fsver:<6} {label:<12} {uuid:<38} {fsavail:<10} {fsuse:<8} {mounts:<20} {pdp}".rstrip())
+
             if 'children' in dev:
                 self.render_lsblk_json(dev['children'], next_indent, is_root=False)
 
@@ -3859,21 +3878,21 @@ class DiskMgrShell(cmd.Cmd):
            - The Big Picture: The rest of your disk (like sda1 or sda3) is untouched. 
              You are simply replacing whatever was inside partition #2 with a new encrypted volume.
 
-	        2. Running format on a Whole Disk (e.g., sda)
-	           The Result: New Volume (Superfloppy or Single-Partition), but non-destructive by default.
-	           - If you don't use --gpt or --mbr:
-		             * Creates a "superfloppy" volume directly on the disk (plain or LUKS).
-		             * This would overwrite any existing partition table, so diskmgr will refuse unless the disk
-		               is unpartitioned and not in use.
-	           - If you use --gpt or --mbr:
-		             * Creates a partition table of that type (if missing) and creates ONE partition spanning
-		               the whole disk, then puts plain/LUKS + filesystem inside that.
-		             * diskmgr will refuse if the disk already has partitions (to avoid destroying existing data).
-		           - To wipe an existing disk quickly before provisioning, use: erase <name>
+            2. Running format on a Whole Disk (e.g., sda)
+               The Result: New Volume (Superfloppy or Single-Partition), but non-destructive by default.
+               - If you don't use --gpt or --mbr:
+                     * Creates a "superfloppy" volume directly on the disk (plain or LUKS).
+                     * This would overwrite any existing partition table, so diskmgr will refuse unless the disk
+                       is unpartitioned and not in use.
+               - If you use --gpt or --mbr:
+                     * Creates a partition table of that type (if missing) and creates ONE partition spanning
+                       the whole disk, then puts plain/LUKS + filesystem inside that.
+                     * diskmgr will refuse if the disk already has partitions (to avoid destroying existing data).
+                   - To wipe an existing disk quickly before provisioning, use: erase <name>
 
-	        3. Using --plain with --gpt or --mbr
-	           The Result: Standard Unencrypted Disk.
-	           - Partitioning: Creates a fresh GPT/MBR table and one primary partition.
+            3. Using --plain with --gpt or --mbr
+               The Result: Standard Unencrypted Disk.
+               - Partitioning: Creates a fresh GPT/MBR table and one primary partition.
            - Encryption: Skipped entirely.
            - Mapping: The friendly name in diskmap.tsv points directly to the 
              raw hardware partition (e.g., /dev/disk/by-id/...-part1).
