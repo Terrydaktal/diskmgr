@@ -1154,7 +1154,7 @@ class DiskMgrShell(cmd.Cmd):
 
             rows.append({
                 "NAME": tree_part,
-                "PERSISTENT PATH": pdp,
+                "PERSISTENT PATH (IEEE)": pdp,
                 "TYPE": dtype,
                 "SIZE": size,
                 "FSTYPE": fstype,
@@ -1177,7 +1177,7 @@ class DiskMgrShell(cmd.Cmd):
         """
         cols = [
             "NAME",
-            "PERSISTENT PATH",
+            "PERSISTENT PATH (IEEE)",
             "TYPE",
             "SIZE",
             "FSTYPE",
@@ -1568,7 +1568,7 @@ class DiskMgrShell(cmd.Cmd):
 
         # 3. Calculate Widths and Print
         all_rows = mapped_rows + unmapped_rows
-        headers = ["#", "NAME", "LUKS", "STATE", "FSTYPE", "LABEL", "MOUNTPOINT", "DEVICE", "SIZE", "PERSISTENT PATH"]
+        headers = ["#", "NAME", "LUKS", "STATE", "FSTYPE", "LABEL", "MOUNTPOINT", "DEVICE", "SIZE", "PERSISTENT PATH (IEEE)"]
         keys = ['idx', 'name', 'luks', 'state', 'fstype', 'label', 'mount', 'dev', 'size', 'path']
         widths = {k: len(h) for k, h in zip(keys, headers)}
         
