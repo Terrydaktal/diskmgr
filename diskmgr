@@ -994,7 +994,7 @@ class DiskMgrShell(cmd.Cmd):
             dev_path = f"/dev/{d_name}"
             try:
                 ls_res = run_command(['lsblk', '-J', '-f', '-o',
-                                      'NAME,KNAME,TYPE,SIZE,FSTYPE,FSVER,LABEL,UUID,FSAVAIL,FSUSE%,MOUNTPOINTS,WWN,PARTUUID',
+                                      'NAME,KNAME,TYPE,SIZE,FSTYPE,LABEL,UUID,FSUSE%,MOUNTPOINTS,WWN',
                                       dev_path], sudo=True, check=False)
                 rows = []
                 if (getattr(ls_res, 'stdout', '') or '').strip():
@@ -1161,14 +1161,11 @@ class DiskMgrShell(cmd.Cmd):
             "TYPE",
             "SIZE",
             "FSTYPE",
-            "FSVER",
             "FSLABEL",
             "FSUUID",
-            "FSAVAIL",
             "FSUSE%",
             "FSMOUNTPOINTS",
             "PERSISTENT PATH (IEEE)",
-            "PARTUUID",
         ]
         widths = {}
         for c in cols:
@@ -1197,10 +1194,8 @@ class DiskMgrShell(cmd.Cmd):
             dtype = dev.get('type') or ""
             size = dev.get('size') or ""
             fstype = dev.get('fstype') or ""
-            fsver = dev.get('fsver') or ""
             label = dev.get('label') or ""
             uuid = dev.get('uuid') or ""
-            fsavail = dev.get('fsavail') or ""
             fsuse = dev.get('fsuse%') or ""
             # Partitions often don't carry WWN/EUI in lsblk output; inherit from parent disk when missing.
             wwn = dev.get('wwn') or parent_wwn or ""
@@ -1254,13 +1249,10 @@ class DiskMgrShell(cmd.Cmd):
                 "TYPE": dtype,
                 "SIZE": size,
                 "FSTYPE": fstype,
-                "FSVER": fsver,
                 "FSLABEL": label,
                 "FSUUID": uuid,
-                "FSAVAIL": fsavail,
                 "FSUSE%": fsuse,
                 "FSMOUNTPOINTS": mounts,
-                "PARTUUID": dev.get('partuuid') or "",
             })
 
             if 'children' in dev:
@@ -1279,14 +1271,11 @@ class DiskMgrShell(cmd.Cmd):
             "TYPE",
             "SIZE",
             "FSTYPE",
-            "FSVER",
             "FSLABEL",
             "FSUUID",
-            "FSAVAIL",
             "FSUSE%",
             "FSMOUNTPOINTS",
             "PERSISTENT PATH (IEEE)",
-            "PARTUUID",
         ]
         if widths is None:
             widths = self._lsblk_col_widths(rows)
