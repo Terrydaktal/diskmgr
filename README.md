@@ -41,16 +41,25 @@ all:
   boot
       Displays all boot entries and submenus from GRUB.
 
+disk:
+  create <name/id> [--gpt|--mbr] [--partition] [--start X] [--end Y]
+      Creates a new GPT/MBR partition table on a whole disk (mapping name or discovery ID).
+      Also supports adding another partition to an existing partitioned disk via --partition.
+      If --start/--end are omitted in partition-only mode, uses the largest free extent.
+      Overlapping ranges are rejected by parted; existing partitions are not overwritten.
+      Safety policy for table creation: disk must be erased first (run: erase <name>).
+  selftest <name/id>
+      Starts a SMART long self-test (smartctl -t long) for the underlying disk
+      (USB uses -d sat).
+  health <name/id> [alias: smart]
+      Shows SMART health (smartctl -a) for the underlying disk (USB uses -d sat).
+
 disk/part (applied to mapped disk/partition targets):
   map <name/id> <name>
       Assigns a friendly name to a disk/partition or renames an existing mapping.
       Discovery IDs use #N format (example: map #1 backup).
   unmap <name/id>
       Removes an existing mapping by name, or by discovery ID (#N).
-  create <name/id> (--gpt|--mbr) [--partition]
-      Creates a new GPT/MBR partition table on a whole disk (mapping name or discovery ID).
-      Optional: add --partition to create one full-disk primary partition.
-      Safety policy: disk must be erased first (run: erase <name>).
   format <name/id> [options]
       Formats a mapped disk/partition as a superfloppy-style volume and mounts it.
       Whole disks must be unpartitioned. Existing partitions are never created/modified by format.
@@ -61,11 +70,8 @@ disk/part (applied to mapped disk/partition targets):
       and rewrites an empty MBR table in MBR mode.
   nuke <name/id>
       Secure erase (multi-step hardware-aware wipe) on disk/part.
-  selftest <name/id>
-      Starts a SMART long self-test (smartctl -t long) for the underlying disk
-      (USB uses -d sat).
-  health <name/id>
-      Shows SMART health (smartctl -a) for the underlying disk (USB uses -d sat).
+  remove <name/id>
+      Removes a partition from its parent disk (partition targets only).
   clone <src_name/id> <dst_name/id>
       Clones one disk/partition to another (requires target >= source size).
 
@@ -102,8 +108,6 @@ file system (applied to disk/part entries with mountable FSTYPE):
 shell:
   exit / quit / Ctrl+D
       Exit the application.
-
-Type 'help <command>' for command-specific details.
 ```
 
 ## Command Reference: `list`
@@ -153,7 +157,7 @@ Disk: /dev/nvme0n1 (WD_BLACK SN8100 2000GB) [msdos] [Sector: L512/P512] [Total S
 
  #   NAME  DEVICE           TYPE   SIZE    FSTYPE       FSLABEL  FSUUID                                FSAVAIL  FSMOUNTPOINTS       PERSISTENT PATH (IEEE)
  7   -     nvme0n1          disk   1.8T                                                                                             /dev/disk/by-id/nvme-eui.e8238fa6bf530001001b448b42d60852
- 8   -     └─nvme0n1p1      part   1.8T    ext4                  88f1dad3-95c6-418e-bea8-f5f3e072ea29  765.5G   /                   /dev/disk/by-id/nvme-eui.e8238fa6bf530001001b448b42d60852-part1
+ 8   -     └─nvme0n1p1      part   1.8T    ext4                  88f1dad3-95c6-418e-bea8-f5f3e072ea29  765.2G   /                   /dev/disk/by-id/nvme-eui.e8238fa6bf530001001b448b42d60852-part1
 ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 Disk: /dev/nvme1n1 (WD Blue SN570 1TB) [msdos] [Sector: L512/P512] [Total Sectors: 1953525168]
@@ -261,21 +265,27 @@ Remove a persistent mapping: unmap <name/id>
 ## Command Reference: `create`
 
 ```text
-Create partition table/partition on an erased whole disk: create <name/id> (--gpt|--mbr) [--partition]
+Create partition table or partition on a whole disk: create <name/id> [--gpt|--mbr] [--partition] [--start X] [--end Y]
 
         Scope:
           - Whole disks only (not partitions).
-          - Requires prior erase: the target must look erased (no partitions, no PT metadata, no signatures).
+          - Table creation requires prior erase: target must look erased (no partitions, no PT metadata, no signatures).
+          - Partition-only mode can add a partition to an existing partitioned disk.
 
         Actions:
-          - --gpt: create GPT partition table
-          - --mbr: create MBR (msdos) partition table
-          - --partition: after creating the table, create one primary partition (1MiB..100%)
+          - --gpt / --mbr: create a new partition table (erased disk only)
+          - --partition:
+              * with --gpt/--mbr: create first partition after table creation
+              * without --gpt/--mbr: create an additional partition on existing table
+              * when --start/--end are omitted, the largest free extent is selected automatically
+              * overlapping ranges are rejected; existing partitions are not overwritten
 
         Examples:
           erase 1b
           create 1b --gpt
           create 1b --gpt --partition
+          create 1b --partition
+          create 1b --partition --start 500GiB --end 100%
           create #4 --mbr --partition
 ```
 
@@ -365,6 +375,16 @@ Securely erase a disk: nuke <name/id>
         Note: This is a DESTRUCTIVE operation. Solving two math problems is MANDATORY to proceed.
 
         WARNING: This operation is IRREVERSIBLE.
+```
+
+## Command Reference: `remove`
+
+```text
+Remove a partition from its parent disk: remove <name/id>
+
+        Scope:
+          - Partition targets only.
+          - Whole-disk targets are refused.
 ```
 
 ## Command Reference: `selftest`
