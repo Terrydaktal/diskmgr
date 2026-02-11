@@ -875,9 +875,9 @@ class DiskMgrShell(cmd.Cmd):
         print(f"  {Colors.OKGREEN}unmap <name>{Colors.ENDC}")
         print("      Removes an existing mapping for a disk/partition from the configuration.")
         print(f"  {Colors.OKGREEN}format <name> [options]{Colors.ENDC}")
-        print("      Formats a new superfloppy (disk) or single-partition volume (part) and mounts it.")
-        print("      Non-destructive policy for partition tables: refuses to overwrite an in-use/partitioned disk.")
-        print("      Use: erase <name> first.")
+        print("      Formats a mapped disk/partition as a superfloppy-style volume and mounts it.")
+        print("      Whole disks must be unpartitioned. Existing partitions are never created/modified by format.")
+        print("      Use: erase <name> first if the disk is currently partitioned.")
         print(f"  {Colors.OKGREEN}erase <name>{Colors.ENDC}")
         print("      Fast metadata wipe for re-provisioning (wipefs + zap GPT/MBR metadata) on disk/part.")
         print("      Whole-disk erase wipes partition signatures/metadata, GPT headers, protective MBR metadata,")
@@ -3934,53 +3934,30 @@ class DiskMgrShell(cmd.Cmd):
             log(f"Scrub failed: {e}", 'ERROR')
 
     def do_format(self, arg):
-        '''Format a superfloppy or single-partition volume: format <name> [options]
+        '''Format a superfloppy disk/partition volume: format <name> [options]
         
         Note: You must 'map' a disk first to give it a name before initializing it.
         
         NUANCES & SCOPE:
         1. Running format on a Partition (e.g., sda2)
-           The Result: Container-in-a-Box.
-           The script treats the existing partition as its "entire world."
-           - Partitioning: It skips the GPT/MBR step because you've already given it a partition.
-           - Encryption: It sets up LUKS directly inside the sda2 boundary.
-           - Filesystem: It formats the area inside sda2.
-           - The Big Picture: The rest of your disk (like sda1 or sda3) is untouched. 
-             You are simply replacing whatever was inside partition #2 with a new encrypted volume.
+           - Formats inside the existing partition boundary (plain or LUKS + payload FS).
+           - Other partitions on the disk are untouched.
 
-            2. Running format on a Whole Disk (e.g., sda)
-               The Result: New Volume (Superfloppy or Single-Partition), but non-destructive by default.
-               - If you don't use --gpt or --mbr:
-                     * Creates a "superfloppy" volume directly on the disk (plain or LUKS).
-                     * This would overwrite any existing partition table, so diskmgr will refuse unless the disk
-                       is unpartitioned and not in use.
-               - If you use --gpt or --mbr:
-                     * Creates a partition table of that type (if missing) and creates ONE partition spanning
-                       the whole disk, then puts plain/LUKS + filesystem inside that.
-                     * diskmgr will refuse if the disk already has partitions (to avoid destroying existing data).
-                   - To wipe an existing disk quickly before provisioning, use: erase <name>
-
-            3. Using --plain with --gpt or --mbr
-               The Result: Standard Unencrypted Disk.
-               - Partitioning: Creates a fresh GPT/MBR table and one primary partition.
-           - Encryption: Skipped entirely.
-           - Mapping: The friendly name in diskmap.tsv points directly to the 
-             raw hardware partition (e.g., /dev/disk/by-id/...-part1).
-           - The Big Picture: You get a standard unencrypted partitioned volume 
-             manageable via diskmgr's persistent naming.
+        2. Running format on a Whole Disk (e.g., sda)
+           - Creates a superfloppy-style volume directly on the disk (plain or LUKS + payload FS).
+           - Refuses if the disk already has a partition table (non-destructive policy).
+           - To wipe partition metadata first, use: erase <name>
         
         Options:
           --fs <ext4|xfs|btrfs>   Filesystem type (default: ext4)
           --label <label>   Set a different internal filesystem label (other than <name>)
           --plain           Create a non-encrypted disk (skips LUKS)
-          --gpt             Create GPT partition table + 1 partition (Whole disk only)
-          --mbr             Create MBR partition table + 1 partition (Whole disk only)
         
         UNDER THE HOOD:
         1.  Safety: Refuses to run if anything is mounted on the target device tree.
-        2.  Partitioning (Optional):
-            - --gpt: create GPT + one partition (whole disk only, and only if disk has no existing partitions)
-            - --mbr: create MBR + one partition (whole disk only, and only if disk has no existing partitions)
+        2.  Disk Type Policy:
+            - If target is a whole disk, it must be unpartitioned (no GPT/MBR table present).
+            - If target is a partition, format is applied directly within that partition.
         3.  LUKS Format (Default):
             - Uses 'passgen' to generate a master key.
             - Runs 'cryptsetup luksFormat' with LUKS2 encryption.
@@ -3996,8 +3973,6 @@ class DiskMgrShell(cmd.Cmd):
         parser.add_argument('--fs', default='ext4', choices=['ext4', 'xfs', 'btrfs'])
         parser.add_argument('--label', help='Filesystem label')
         parser.add_argument('--plain', action='store_true', help='No LUKS encryption')
-        parser.add_argument('--gpt', action='store_true')
-        parser.add_argument('--mbr', action='store_true')
 
         try:
             split_args = shlex.split(arg)
@@ -4045,99 +4020,22 @@ class DiskMgrShell(cmd.Cmd):
 
         crypt_target = real_target
         dev_type = _lsblk_type(real_target)
-        
-        # Partitioning
-        if args.gpt:
-            if dev_type != 'disk':
-                log("--gpt is only valid when the mapping points to a whole disk.", 'ERROR')
-                return
 
-            # Non-destructive policy: refuse if the disk already has partitions.
-            try:
-                res_p = run_command(['lsblk', '-nr', '-o', 'NAME,TYPE', real_target], check=False)
-                parts = [ln for ln in (getattr(res_p, 'stdout', '') or '').splitlines() if ln.strip().split()[-1] == 'part']
-                if parts:
-                    log(f"OPERATION BLOCKED: {real_target} already has partitions. Refusing to overwrite the partition table.", 'ERROR')
-                    log("If you intend to wipe the disk quickly: erase <name>", 'ERROR')
-                    return
-            except Exception:
-                pass
+        if dev_type not in ('disk', 'part'):
+            log(f"Unsupported target type for format: {dev_type or 'unknown'}. Map a disk or partition.", 'ERROR')
+            return
 
-            log("Creating GPT partition...")
-            # Create a new GPT only if one doesn't already exist.
+        # Superfloppy mode only: whole disks must be unpartitioned.
+        if dev_type == 'disk':
             try:
                 res_pt = run_command(['lsblk', '-no', 'PTTYPE', real_target], check=False)
                 pttype = (getattr(res_pt, 'stdout', '') or '').strip().lower()
             except Exception:
                 pttype = ""
-            if pttype and pttype != 'gpt':
-                log(f"OPERATION BLOCKED: {real_target} has partition table type '{pttype}'. Refusing to overwrite.", 'ERROR')
-                log("If you intend to wipe the disk quickly: erase <name>", 'ERROR')
+            if pttype:
+                log(f"OPERATION BLOCKED: {real_target} is partitioned ({pttype}). Refusing to format a whole-disk superfloppy over an existing partition table.", 'ERROR')
+                log("Use erase <name> first to wipe partition metadata, then run format again.", 'ERROR')
                 return
-
-            sgdisk_bin = _find_tool_or_common_paths('sgdisk', [
-                '/usr/sbin/sgdisk',
-                '/sbin/sgdisk',
-                '/usr/bin/sgdisk',
-                '/bin/sgdisk',
-            ]) or 'sgdisk'
-            if not pttype:
-                run_command([sgdisk_bin, '-o', real_target], sudo=True)
-            run_command([sgdisk_bin, '-n', '1:0:0', '-t', '1:8300', '-c', f'1:{name}', real_target], sudo=True)
-            run_command(['udevadm', 'settle'], sudo=True)
-            # Guess partition name
-            if 'nvme' in real_target:
-                crypt_target = f"{real_target}p1"
-            else:
-                crypt_target = f"{real_target}1"
-        elif args.mbr:
-            if dev_type != 'disk':
-                log("--mbr is only valid when the mapping points to a whole disk.", 'ERROR')
-                return
-
-            # Non-destructive policy: refuse if the disk already has partitions.
-            try:
-                res_p = run_command(['lsblk', '-nr', '-o', 'NAME,TYPE', real_target], check=False)
-                parts = [ln for ln in (getattr(res_p, 'stdout', '') or '').splitlines() if ln.strip().split()[-1] == 'part']
-                if parts:
-                    log(f"OPERATION BLOCKED: {real_target} already has partitions. Refusing to overwrite the partition table.", 'ERROR')
-                    log("If you intend to wipe the disk quickly: erase <name>", 'ERROR')
-                    return
-            except Exception:
-                pass
-
-            log("Creating MBR partition...")
-            try:
-                res_pt = run_command(['lsblk', '-no', 'PTTYPE', real_target], check=False)
-                pttype = (getattr(res_pt, 'stdout', '') or '').strip().lower()
-            except Exception:
-                pttype = ""
-            if pttype and pttype not in ('dos', 'msdos'):
-                log(f"OPERATION BLOCKED: {real_target} has partition table type '{pttype}'. Refusing to overwrite.", 'ERROR')
-                log("If you intend to wipe the disk quickly: erase <name>", 'ERROR')
-                return
-            # using sfdisk scripting
-            sfdisk_script = f"label: dos\n{real_target}1 : start=2048, type=83"
-            run_command(['sfdisk', '--wipe', 'always', '--wipe-partitions', 'always', real_target],
-                       input_str=sfdisk_script, sudo=True)
-            run_command(['udevadm', 'settle'], sudo=True)
-             # Guess partition name
-            if 'nvme' in real_target:
-                crypt_target = f"{real_target}p1"
-            else:
-                crypt_target = f"{real_target}1"
-        else:
-            # Superfloppy mode on whole disks can overwrite an existing partition table.
-            if dev_type == 'disk':
-                try:
-                    res_pt = run_command(['lsblk', '-no', 'PTTYPE', real_target], check=False)
-                    pttype = (getattr(res_pt, 'stdout', '') or '').strip().lower()
-                except Exception:
-                    pttype = ""
-                if pttype:
-                    log(f"OPERATION BLOCKED: {real_target} is partitioned ({pttype}). Refusing to create a superfloppy over an existing partition table.", 'ERROR')
-                    log("Use format --gpt/--mbr for a single-partition volume, or erase <name> to wipe the disk first.", 'ERROR')
-                    return
 
         if not args.plain:
             # LUKS Format
