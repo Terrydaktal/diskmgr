@@ -48,8 +48,9 @@ def clean_diskmgr_output(raw_content):
 
 def main():
     commands = [
-        'list', 'layout', 'boot', 'map', 'unmap', 'open', 'close', 'label', 'remount', 'luks',
-        'health', 'selftest', 'defrag', 'fshealth', 'scrub', 'erase', 'create', 'clone', 'sync'
+        'list', 'boot', 'map', 'unmap', 'create', 'format', 'erase', 'nuke',
+        'selftest', 'health', 'clone', 'open', 'close', 'luks', 'label',
+        'remount', 'sync', 'defrag', 'fshealth', 'scrub'
     ]
     
     readme_content = "# Disk Manager (diskmgr)\n\n"
@@ -91,8 +92,8 @@ def main():
         if help_text:
             readme_content += f"## Command Reference: `{cmd}`\n\n```text\n" + help_text + "\n```\n\n"
             
-            # Add Example for list, layout, and boot
-            if cmd in ['list', 'layout', 'boot']:
+            # Add Example for list and boot
+            if cmd in ['list', 'boot']:
                 example_raw = get_example(cmd)
                 if example_raw:
                     # Filter example to show only the relevant table/layout data
@@ -100,7 +101,6 @@ def main():
                     final_ex = []
                     
                     if cmd == 'list': trigger = "--- Disk Management"
-                    elif cmd == 'layout': trigger = "Disk: /dev/"
                     elif cmd == 'boot': trigger = "--- System Boot"
                     
                     saving = False
