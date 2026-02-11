@@ -891,10 +891,8 @@ class DiskMgrShell(cmd.Cmd):
         print(f"  {Colors.OKGREEN}selftest <name/id>{Colors.ENDC}")
         print("      Starts a SMART long self-test (smartctl -t long) for the underlying disk")
         print("      (USB uses -d sat).")
-        print(f"  {Colors.OKGREEN}health <name/id>{Colors.ENDC}")
+        print(f"  {Colors.OKGREEN}health <name/id>{Colors.ENDC} {Colors.BOLD}(smart){Colors.ENDC}")
         print("      Shows SMART health (smartctl -a) for the underlying disk (USB uses -d sat).")
-        print(f"  {Colors.OKGREEN}smart <name/id>{Colors.ENDC}")
-        print("      Alias for health.")
         print(f"  {Colors.OKGREEN}clone <src_name/id> <dst_name/id>{Colors.ENDC}")
         print("      Clones one disk/partition to another (requires target >= source size).")
 
