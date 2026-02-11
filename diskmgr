@@ -3000,6 +3000,103 @@ class DiskMgrShell(cmd.Cmd):
             or ('NVMe Version' in out)
         )
         if is_nvme:
+            def _nv_field(label_patterns):
+                for p in label_patterns:
+                    m = re.search(p, out, re.MULTILINE)
+                    if m:
+                        return m.group(1).strip()
+                return None
+
+            def _nv_int(v, base=10):
+                if v is None:
+                    return None
+                s = str(v).strip()
+                try:
+                    if base == 16:
+                        return int(s, 16)
+                    return int(s.replace(',', ''), 10)
+                except Exception:
+                    return _first_int_from_text(s)
+
+            def _ok_watch_bad(val, ok_when=None, watch_when=None, bad_when=None, default_color=Colors.OKGREEN):
+                if val is None:
+                    return "-"
+                text = str(val)
+                ival = _nv_int(val)
+                if ival is None:
+                    return text
+                if bad_when is not None and bad_when(ival):
+                    return f"{Colors.FAIL}{text}{Colors.ENDC}"
+                if watch_when is not None and watch_when(ival):
+                    return f"{Colors.WARNING}{text}{Colors.ENDC}"
+                if ok_when is not None:
+                    if ok_when(ival):
+                        return f"{Colors.OKGREEN}{text}{Colors.ENDC}"
+                    return f"{Colors.WARNING}{text}{Colors.ENDC}"
+                return f"{default_color}{text}{Colors.ENDC}"
+
+            nv_critical_warning_raw = _nv_field([r"^Critical Warning:\s*(0x[0-9a-fA-F]+|[0-9]+)\s*$"])
+            nv_media_err_raw = _nv_field([r"^Media and Data Integrity Errors:\s*([0-9,]+)\s*$"])
+            nv_avail_spare_raw = _nv_field([r"^Available Spare:\s*([0-9]+)%\s*$", r"^Available Spare:\s*([0-9,]+)\s*$"])
+            nv_pct_used_raw = _nv_field([r"^Percentage Used:\s*([0-9]+)%\s*$", r"^Percentage Used:\s*([0-9,]+)\s*$"])
+            nv_errlog_raw = _nv_field([r"^Error Information Log Entries:\s*([0-9,]+)\s*$"])
+            nv_unsafe_raw = _nv_field([r"^Unsafe Shutdowns:\s*([0-9,]+)\s*$"])
+            nv_temp_crit_time_raw = _nv_field([r"^Critical Comp\.\s+Temperature Time:\s*([0-9,]+)\s*$"])
+            nv_temp_warn_time_raw = _nv_field([r"^Warning\s+Comp\.\s+Temperature Time:\s*([0-9,]+)\s*$"])
+            nv_temp_raw = _nv_field([r"^Temperature:\s*([0-9]+)\s+Celsius\s*$", r"^Temperature:\s*([0-9]+)\s*C\s*$"])
+            nv_duw_raw = _nv_field([r"^Data Units Written:\s*(.+)$"])
+            nv_poh_raw = _nv_field([r"^Power On Hours:\s*([0-9,]+)\s*$"])
+            nv_pcycles_raw = _nv_field([r"^Power Cycles:\s*([0-9,]+)\s*$"])
+            nv_dur_raw = _nv_field([r"^Data Units Read:\s*(.+)$"])
+            nv_busy_raw = _nv_field([r"^Controller Busy Time:\s*([0-9,]+)\s*$"])
+
+            nv_unsafe_int = _nv_int(nv_unsafe_raw)
+            nv_pcycles_int = _nv_int(nv_pcycles_raw)
+
+            unsafe_ratio = None
+            if nv_unsafe_int is not None and nv_pcycles_int not in (None, 0):
+                unsafe_ratio = float(nv_unsafe_int) / float(nv_pcycles_int)
+
+            print(f"\n{Colors.BOLD}NVMe attributes ranked by severity (Tier 1 -> Tier 4):{Colors.ENDC}")
+            print(f"\n{Colors.BOLD}Tier 1: Replace Immediately Zone{Colors.ENDC}")
+            cw_text = nv_critical_warning_raw if nv_critical_warning_raw is not None else "-"
+            print(f"  Critical Warning: {_ok_watch_bad(cw_text, ok_when=lambda v: v == 0, bad_when=lambda v: v != 0)} - Master alarm; non-zero indicates controller-level fault/overheat/read-only condition.")
+            me_text = nv_media_err_raw if nv_media_err_raw is not None else "-"
+            print(f"  Media and Data Integrity Errors: {_ok_watch_bad(me_text, ok_when=lambda v: v == 0, bad_when=lambda v: v > 0)} - Counts real data-integrity failures.")
+            as_text = f"{nv_avail_spare_raw}%" if nv_avail_spare_raw is not None else "-"
+            print(f"  Available Spare: {_ok_watch_bad(as_text, ok_when=lambda v: v >= 10, watch_when=lambda v: 10 <= v < 20, bad_when=lambda v: v < 10)} - Spare block reserve; low values are critical.")
+
+            print(f"\n{Colors.BOLD}Tier 2: Wear and Tear Zone{Colors.ENDC}")
+            pu_text = f"{nv_pct_used_raw}%" if nv_pct_used_raw is not None else "-"
+            print(f"  Percentage Used: {_ok_watch_bad(pu_text, watch_when=lambda v: 70 <= v < 100, bad_when=lambda v: v >= 100)} - Wear-life consumed.")
+            el_text = nv_errlog_raw if nv_errlog_raw is not None else "-"
+            print(f"  Error Information Log Entries: {_ok_watch_bad(el_text, ok_when=lambda v: v == 0, watch_when=lambda v: 0 < v < 100, bad_when=lambda v: v >= 100)} - Internal error history (controller stability signal).")
+            us_text = nv_unsafe_raw if nv_unsafe_raw is not None else "-"
+            if unsafe_ratio is not None:
+                us_text = f"{us_text} ({unsafe_ratio*100:.1f}% of power cycles)"
+            us_col = Colors.OKGREEN
+            if nv_unsafe_int is not None and nv_unsafe_int > 0:
+                us_col = Colors.WARNING
+            if unsafe_ratio is not None and unsafe_ratio >= 0.5:
+                us_col = Colors.FAIL
+            print(f"  Unsafe Shutdowns: {us_col}{us_text}{Colors.ENDC} - High counts increase corruption risk.")
+
+            print(f"\n{Colors.BOLD}Tier 3: Abuse History Zone{Colors.ENDC}")
+            ctt_text = nv_temp_crit_time_raw if nv_temp_crit_time_raw is not None else "-"
+            print(f"  Critical Composite Temperature Time: {_ok_watch_bad(ctt_text, ok_when=lambda v: v == 0, bad_when=lambda v: v > 0)} - Time spent at critical thermal level.")
+            wtt_text = nv_temp_warn_time_raw if nv_temp_warn_time_raw is not None else "-"
+            print(f"  Warning Composite Temperature Time: {_ok_watch_bad(wtt_text, ok_when=lambda v: v == 0, watch_when=lambda v: v > 0)} - Time spent in warning thermal range.")
+            t_text = f"{nv_temp_raw} C" if nv_temp_raw is not None else "-"
+            print(f"  Temperature: {_ok_watch_bad(t_text, ok_when=lambda v: v < 70, watch_when=lambda v: 70 <= v < 80, bad_when=lambda v: v >= 80)} - Current temperature status.")
+
+            print(f"\n{Colors.BOLD}Tier 4: Biography Zone (Informational){Colors.ENDC}")
+            print(f"  Data Units Written: {Colors.OKCYAN}{nv_duw_raw or '-'}{Colors.ENDC} - Total data written (wear context).")
+            print(f"  Power On Hours: {Colors.OKCYAN}{nv_poh_raw or '-'}{Colors.ENDC} - Device age in hours.")
+            print(f"  Power Cycles: {Colors.OKCYAN}{nv_pcycles_raw or '-'}{Colors.ENDC} - Number of power cycles.")
+            print(f"  Data Units Read: {Colors.OKCYAN}{nv_dur_raw or '-'}{Colors.ENDC} - Total data read (informational).")
+            print(f"  Controller Busy Time: {Colors.OKCYAN}{nv_busy_raw or '-'}{Colors.ENDC} - Controller active time (informational).")
+
+            print("")
             if out.strip():
                 print(out.rstrip())
             if err.strip():
