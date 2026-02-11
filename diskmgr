@@ -1544,16 +1544,23 @@ class DiskMgrShell(cmd.Cmd):
 
     def resolve_target(self, target_str, allow_id=True):
         '''Resolves a target string to a physical path.
-        Only supports Discovery IDs (U1, [U1]) or existing mapping names.
+        Supports Discovery IDs (#1, [#1], and legacy U1/[U1]) or existing mapping names.
         '''
         clean = target_str.strip('[]')
         
         # 1. Check Discovery ID
-        if allow_id and clean.startswith('U') and clean[1:].isdigit():
-            idx = int(clean[1:]) - 1
-            if 0 <= idx < len(self.unmapped_cache):
-                return self.unmapped_cache[idx]['pdp']
-            return None
+        if allow_id:
+            idx = None
+            if clean.startswith('#') and clean[1:].isdigit():
+                idx = int(clean[1:]) - 1
+            elif clean.startswith('U') and clean[1:].isdigit():
+                # Backward-compatible legacy ID format.
+                idx = int(clean[1:]) - 1
+
+            if idx is not None:
+                if 0 <= idx < len(self.unmapped_cache):
+                    return self.unmapped_cache[idx]['pdp']
+                return None
             
         # 2. Check Mapping Name
         self.mappings = read_luks_map()
@@ -1648,14 +1655,14 @@ class DiskMgrShell(cmd.Cmd):
         '''Create or modify a persistent mapping: map <name/id> <name>
         
         Usage:
-          map [U1] backup    Assigns friendly name to discovery ID (e.g., map U1 backup)
+          map [#1] backup    Assigns friendly name to discovery ID (e.g., map #1 backup)
           map 1a backup      Renames an existing mapping (e.g., map 1a backup)
         
         Note: Raw device paths (e.g., /dev/sdb) are NOT allowed.
         
         UNDER THE HOOD:
         1.  Input Resolution: 
-            - discovery ID (e.g., [U1]): Resolves the temporary device to its Persistent Device Path (PDP).
+            - discovery ID (e.g., [#1]): Resolves the temporary device to its Persistent Device Path (PDP).
             - mapping name (e.g., 1a): Selects an existing mapping for RENAME operations.
         2.  PDP Linking: Extracts the /dev/disk/by-id/ path for the target hardware.
         3.  Conflict Check: Ensures the new friendly name is not already in use.
@@ -1680,7 +1687,7 @@ class DiskMgrShell(cmd.Cmd):
             # 2. Check for New Map (target is a discovery ID)
             real_target = self.resolve_target(target)
             if not real_target:
-                log(f"Invalid target: '{target}'. Use a Discovery ID (e.g., [U1]) or an existing name.", 'ERROR')
+                log(f"Invalid target: '{target}'. Use a Discovery ID (e.g., [#1]) or an existing name.", 'ERROR')
                 return
             log(f"Resolved {target} -> {real_target}")
         
@@ -1690,8 +1697,12 @@ class DiskMgrShell(cmd.Cmd):
 
         # Collision Prevention: Prevent names that look like IDs
         clean_name = name.strip('[]')
-        if (clean_name.startswith('U') and clean_name[1:].isdigit()) or clean_name.isdigit():
-            log(f"Invalid name: '{name}'. Names cannot be simple numbers or match the 'U1' ID format.", 'ERROR')
+        if (
+            (clean_name.startswith('#') and clean_name[1:].isdigit()) or
+            (clean_name.startswith('U') and clean_name[1:].isdigit()) or
+            clean_name.isdigit()
+        ):
+            log(f"Invalid name: '{name}'. Names cannot be simple numbers or match discovery ID formats like '#1'.", 'ERROR')
             return
 
         self.mappings[name] = real_target
