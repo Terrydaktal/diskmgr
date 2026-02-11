@@ -1030,13 +1030,13 @@ class DiskMgrShell(cmd.Cmd):
             except Exception:
                 disk_rows[d_name] = []
 
-        # Assign a single global index across all disks/partitions, in print order.
-        # Only number real kernel disk/partition nodes; dm-crypt /dev/mapper nodes get "-".
+        # Assign a single global index in print order.
+        # Number disk/part and open dm-crypt rows (TYPE=crypt). Keep all other virtual rows as "-".
         idx = 1
         for d in disks:
             d_name = d.get('name', '')
             for r in disk_rows.get(d_name, []):
-                if (r.get('TYPE') or '') in ('disk', 'part'):
+                if (r.get('TYPE') or '') in ('disk', 'part', 'crypt'):
                     r['#'] = str(idx)
                     idx += 1
                 else:
