@@ -874,8 +874,8 @@ class DiskMgrShell(cmd.Cmd):
         print("      Discovery IDs use #N format (example: map #1 backup).")
         print(f"  {Colors.OKGREEN}unmap <name>{Colors.ENDC}")
         print("      Removes an existing mapping for a disk/partition from the configuration.")
-        print(f"  {Colors.OKGREEN}create <name> (--gpt|--mbr) [--partition]{Colors.ENDC}")
-        print("      Creates a new GPT/MBR partition table on a mapped whole disk.")
+        print(f"  {Colors.OKGREEN}create <name/id> (--gpt|--mbr) [--partition]{Colors.ENDC}")
+        print("      Creates a new GPT/MBR partition table on a whole disk (mapping name or discovery ID).")
         print("      Optional: add --partition to create one full-disk primary partition.")
         print("      Safety policy: disk must be erased first (run: erase <name>).")
         print(f"  {Colors.OKGREEN}format <name> [options]{Colors.ENDC}")
@@ -4184,7 +4184,7 @@ class DiskMgrShell(cmd.Cmd):
         log("Disk initialization complete.")
 
     def do_create(self, arg):
-        '''Create partition table/partition on an erased whole disk: create <name> (--gpt|--mbr) [--partition]
+        '''Create partition table/partition on an erased whole disk: create <name/id> (--gpt|--mbr) [--partition]
 
         Scope:
           - Whole disks only (not partitions).
@@ -4199,9 +4199,10 @@ class DiskMgrShell(cmd.Cmd):
           erase 1b
           create 1b --gpt
           create 1b --gpt --partition
+          create #4 --mbr --partition
         '''
         parser = CmdArgumentParser(prog='create', add_help=False)
-        parser.add_argument('target', help='Mapped whole-disk target name')
+        parser.add_argument('target', help='Whole-disk target mapping name or discovery ID (#N)')
         group = parser.add_mutually_exclusive_group(required=True)
         group.add_argument('--gpt', action='store_true', help='Create GPT partition table')
         group.add_argument('--mbr', action='store_true', help='Create MBR (msdos) partition table')
@@ -4217,10 +4218,11 @@ class DiskMgrShell(cmd.Cmd):
             return
 
         name = args.target
-        real_target = self.resolve_target(name, allow_id=False)
+        real_target = self.resolve_target(name, allow_id=True)
 
         if not real_target:
-            log(f"Unknown mapping: '{name}'. You must 'map' a disk before you can create a partition table.", 'ERROR')
+            log(f"Unknown target: '{name}'. Use a mapping name or discovery ID (#N).", 'ERROR')
+            log("Tip: run 'list' first to refresh discovery IDs.", 'ERROR')
             return
 
         if not os.path.exists(real_target):
