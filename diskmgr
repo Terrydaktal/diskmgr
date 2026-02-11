@@ -878,22 +878,22 @@ class DiskMgrShell(cmd.Cmd):
         print("      Creates a new GPT/MBR partition table on a whole disk (mapping name or discovery ID).")
         print("      Optional: add --partition to create one full-disk primary partition.")
         print("      Safety policy: disk must be erased first (run: erase <name>).")
-        print(f"  {Colors.OKGREEN}format <name> [options]{Colors.ENDC}")
+        print(f"  {Colors.OKGREEN}format <name/id> [options]{Colors.ENDC}")
         print("      Formats a mapped disk/partition as a superfloppy-style volume and mounts it.")
         print("      Whole disks must be unpartitioned. Existing partitions are never created/modified by format.")
         print("      Use: erase <name> first if the disk is currently partitioned.")
-        print(f"  {Colors.OKGREEN}erase <name>{Colors.ENDC}")
+        print(f"  {Colors.OKGREEN}erase <name/id>{Colors.ENDC}")
         print("      Fast metadata wipe for re-provisioning (wipefs + zap GPT/MBR metadata) on disk/part.")
         print("      Whole-disk erase wipes partition signatures/metadata, GPT headers, protective MBR metadata,")
         print("      and rewrites an empty MBR table in MBR mode.")
-        print(f"  {Colors.OKGREEN}nuke <name>{Colors.ENDC}")
+        print(f"  {Colors.OKGREEN}nuke <name/id>{Colors.ENDC}")
         print("      Secure erase (multi-step hardware-aware wipe) on disk/part.")
-        print(f"  {Colors.OKGREEN}selftest <name>{Colors.ENDC}")
+        print(f"  {Colors.OKGREEN}selftest <name/id>{Colors.ENDC}")
         print("      Starts a SMART long self-test (smartctl -t long) for the underlying disk")
         print("      (USB uses -d sat).")
-        print(f"  {Colors.OKGREEN}health <name>{Colors.ENDC}")
+        print(f"  {Colors.OKGREEN}health <name/id>{Colors.ENDC}")
         print("      Shows SMART health (smartctl -a) for the underlying disk (USB uses -d sat).")
-        print(f"  {Colors.OKGREEN}clone <src_name> <dst_name>{Colors.ENDC}")
+        print(f"  {Colors.OKGREEN}clone <src_name/id> <dst_name/id>{Colors.ENDC}")
         print("      Clones one disk/partition to another (requires target >= source size).")
 
         print(f"\n{Colors.BOLD}file system (applied to disk/part entries with mountable FSTYPE):{Colors.ENDC}")
@@ -2521,7 +2521,7 @@ class DiskMgrShell(cmd.Cmd):
         return (True, "")
 
     def do_erase(self, arg):
-        '''Fast metadata wipe (soft erase): erase <name> [--soft]
+        '''Fast metadata wipe (soft erase): erase <name/id> [--soft]
         
         This is a fast "re-provisioning" wipe. It removes recognizable signatures and zaps GPT/MBR metadata
         (when the target is a whole disk). It is NOT a secure wipe.
@@ -2547,10 +2547,11 @@ class DiskMgrShell(cmd.Cmd):
             return
 
         name = args.target
-        real_target = self.resolve_target(name, allow_id=False)
+        real_target = self.resolve_target(name, allow_id=True)
 
         if not real_target:
-            log(f"Unknown mapping: '{name}'. You must 'map' a disk before you can erase it.", 'ERROR')
+            log(f"Unknown target: '{name}'. Use a mapping name or discovery ID (#N).", 'ERROR')
+            log("Tip: run 'list' first to refresh discovery IDs.", 'ERROR')
             return
 
         if not os.path.exists(real_target):
@@ -2585,7 +2586,7 @@ class DiskMgrShell(cmd.Cmd):
         self._soft_erase_target(real_target)
 
     def do_nuke(self, arg):
-        '''Securely erase a disk: nuke <name>
+        '''Securely erase a disk: nuke <name/id>
         
         Note: You must 'map' a disk first to give it a name before erasing it.
 
@@ -2628,10 +2629,11 @@ class DiskMgrShell(cmd.Cmd):
             return
 
         name = args.target
-        real_target = self.resolve_target(name, allow_id=False)
+        real_target = self.resolve_target(name, allow_id=True)
         
         if not real_target:
-            log(f"Unknown mapping: '{name}'. You must 'map' a disk before you can erase it.", 'ERROR')
+            log(f"Unknown target: '{name}'. Use a mapping name or discovery ID (#N).", 'ERROR')
+            log("Tip: run 'list' first to refresh discovery IDs.", 'ERROR')
             return
         
         if not os.path.exists(real_target):
@@ -2666,7 +2668,7 @@ class DiskMgrShell(cmd.Cmd):
             log("Secure erase failed.", 'ERROR')
 
     def do_clone(self, arg):
-        '''Clone one disk or partition to another: clone <src_name> <dst_name>
+        '''Clone one disk or partition to another: clone <src_name/id> <dst_name/id>
         
         WARNING (DATA DESTRUCTION):
         - This command writes directly to the destination block device (like running ddrescue/dd).
@@ -2724,18 +2726,18 @@ class DiskMgrShell(cmd.Cmd):
         '''
         args = arg.split()
         if len(args) != 2:
-            log("Usage: clone <src_name> <dst_name>", 'ERROR')
+            log("Usage: clone <src_name/id> <dst_name/id>", 'ERROR')
             return
 
         src_name, dst_name = args
-        src_path = self.resolve_target(src_name, allow_id=False)
-        dst_path = self.resolve_target(dst_name, allow_id=False)
+        src_path = self.resolve_target(src_name, allow_id=True)
+        dst_path = self.resolve_target(dst_name, allow_id=True)
 
         if not src_path:
-            log(f"Unknown source mapping: '{src_name}'", 'ERROR')
+            log(f"Unknown source target: '{src_name}'. Use mapping name or discovery ID (#N).", 'ERROR')
             return
         if not dst_path:
-            log(f"Unknown target mapping: '{dst_name}'", 'ERROR')
+            log(f"Unknown destination target: '{dst_name}'. Use mapping name or discovery ID (#N).", 'ERROR')
             return
 
         src_real = os.path.realpath(src_path)
@@ -2841,7 +2843,7 @@ class DiskMgrShell(cmd.Cmd):
             log(f"Cloning failed: {e}", 'ERROR')
 
     def do_health(self, arg):
-        '''Display SMART health for a mapped disk: health <name>
+        '''Display SMART health for a mapped disk: health <name/id>
 
         Runs smartctl against the underlying DISK device for the mapping.
         - If the mapping points to a partition, diskmgr automatically targets the parent disk.
@@ -2851,13 +2853,14 @@ class DiskMgrShell(cmd.Cmd):
         '''
         args = arg.split()
         if len(args) != 1:
-            log("Usage: health <name>", 'ERROR')
+            log("Usage: health <name/id>", 'ERROR')
             return
 
         name = args[0]
-        src = self.resolve_target(name, allow_id=False)
+        src = self.resolve_target(name, allow_id=True)
         if not src:
-            log(f"Unknown mapping: '{name}'", 'ERROR')
+            log(f"Unknown target: '{name}'. Use a mapping name or discovery ID (#N).", 'ERROR')
+            log("Tip: run 'list' first to refresh discovery IDs.", 'ERROR')
             return
 
         smartctl_bin = _find_tool_or_common_paths('smartctl', [
@@ -3335,7 +3338,7 @@ class DiskMgrShell(cmd.Cmd):
             log(f"smartctl exit status: {res.returncode} (non-zero may indicate SMART warnings).", 'WARN')
 
     def do_selftest(self, arg):
-        '''Start a SMART long self-test: selftest <name>
+        '''Start a SMART long self-test: selftest <name/id>
 
         Runs smartctl long test against the underlying DISK device for the mapping.
         - If the mapping points to a partition, diskmgr targets the parent disk.
@@ -3345,13 +3348,14 @@ class DiskMgrShell(cmd.Cmd):
         '''
         args = arg.split()
         if len(args) != 1:
-            log("Usage: selftest <name>", 'ERROR')
+            log("Usage: selftest <name/id>", 'ERROR')
             return
 
         name = args[0]
-        src = self.resolve_target(name, allow_id=False)
+        src = self.resolve_target(name, allow_id=True)
         if not src:
-            log(f"Unknown mapping: '{name}'", 'ERROR')
+            log(f"Unknown target: '{name}'. Use a mapping name or discovery ID (#N).", 'ERROR')
+            log("Tip: run 'list' first to refresh discovery IDs.", 'ERROR')
             return
 
         smartctl_bin = _find_tool_or_common_paths('smartctl', [
@@ -4002,7 +4006,7 @@ class DiskMgrShell(cmd.Cmd):
             log(f"Scrub failed: {e}", 'ERROR')
 
     def do_format(self, arg):
-        '''Format a superfloppy disk/partition volume: format <name> [options]
+        '''Format a superfloppy disk/partition volume: format <name/id> [options]
         
         Note: You must 'map' a disk first to give it a name before initializing it.
         
@@ -4052,9 +4056,10 @@ class DiskMgrShell(cmd.Cmd):
             return
 
         name = args.args[0]
-        target = self.resolve_target(name, allow_id=False)
+        target = self.resolve_target(name, allow_id=True)
         if not target:
-            log(f"Unknown mapping: '{name}'. You must 'map' a disk before you can initialize it.", 'ERROR')
+            log(f"Unknown target: '{name}'. Use a mapping name or discovery ID (#N).", 'ERROR')
+            log("Tip: run 'list' first to refresh discovery IDs.", 'ERROR')
             return
 
         # Wait/Verify target existence
