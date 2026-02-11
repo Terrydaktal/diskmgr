@@ -903,9 +903,9 @@ class DiskMgrShell(cmd.Cmd):
         print("      Mounts to /media/$USER/<label> (prefers filesystem label over mapping name).")
         print(f"  {Colors.OKGREEN}close <name>{Colors.ENDC}")
         print("      Unmounts filesystem(s) for this mapping; if a /dev/mapper/<name> exists, closes it too.")
-        print(f"  {Colors.OKGREEN}luks <passwd|backup|restore>{Colors.ENDC}")
+        print(f"  {Colors.OKGREEN}luks <passwd|backup|restore|header>{Colors.ENDC}")
         print("      LUKS management for mapped containers (grouped under filesystem workflows):")
-        print("      password change, header backup, and header restore.")
+        print("      password change, header backup/print, and header restore.")
         print(f"  {Colors.OKGREEN}label <name> [new_label]{Colors.ENDC}")
         print("      Get or set the filesystem label of an OPEN disk.")
         print("      For LUKS: acts on payload filesystem when open; errors if locked.")
@@ -2301,12 +2301,13 @@ class DiskMgrShell(cmd.Cmd):
             log(f"Failed to mount at {new_mountpoint}: {e}", 'ERROR')
 
     def do_luks(self, arg):
-        '''LUKS encryption management: luks <passwd|backup|restore> [options]
+        '''LUKS encryption management: luks <passwd|backup|restore|header> [options]
         
         Subcommands:
           passwd <name>           Change the LUKS passphrase.
           backup <name> [file]    Save the LUKS header to a file.
           restore <name> <file>   Restore the LUKS header from a file (Destructive).
+          header <name>           Print the current LUKS header (cryptsetup luksDump).
         '''
         args = arg.split()
         if not args:
@@ -2387,6 +2388,28 @@ class DiskMgrShell(cmd.Cmd):
                 log("Header restore completed successfully.")
             except Exception as e:
                 log(f"Restore failed: {e}", 'ERROR')
+        elif subcmd == 'header':
+            if not sub_args:
+                log("Usage: luks header <name>", 'ERROR')
+                return
+            name = sub_args[0]
+            src = self.resolve_target(name)
+            if not src:
+                log(f"Unknown target: '{name}'", 'ERROR')
+                return
+            devnode = os.path.realpath(src)
+            if self._block_if_root_drive(devnode, f"luks header {name}"):
+                return
+            res = run_command(['cryptsetup', 'isLuks', devnode], sudo=True, check=False)
+            if res.returncode != 0:
+                log(f"Device {devnode} is not a valid LUKS device.", 'ERROR')
+                return
+            log(f"Printing LUKS header for {name} ({devnode})...")
+            try:
+                dump = run_command(['cryptsetup', 'luksDump', devnode], sudo=True, capture_output=True)
+                print(getattr(dump, 'stdout', '') or "")
+            except Exception as e:
+                log(f"Failed to print LUKS header: {e}", 'ERROR')
         else:
             log(f"Unknown LUKS subcommand: {subcmd}", 'ERROR')
             self.do_help('luks')
