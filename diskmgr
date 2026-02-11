@@ -868,16 +868,23 @@ class DiskMgrShell(cmd.Cmd):
         print(f"  {Colors.OKGREEN}boot{Colors.ENDC}")
         print("      Displays all boot entries and submenus from GRUB.")
 
+        print(f"\n{Colors.BOLD}disk:{Colors.ENDC}")
+        print(f"  {Colors.OKGREEN}create <name/id> (--gpt|--mbr) [--partition]{Colors.ENDC}")
+        print("      Creates a new GPT/MBR partition table on a whole disk (mapping name or discovery ID).")
+        print("      Optional: add --partition to create one full-disk primary partition.")
+        print("      Safety policy: disk must be erased first (run: erase <name>).")
+        print(f"  {Colors.OKGREEN}selftest <name/id>{Colors.ENDC}")
+        print("      Starts a SMART long self-test (smartctl -t long) for the underlying disk")
+        print("      (USB uses -d sat).")
+        print(f"  {Colors.OKGREEN}health <name/id> [alias: smart]{Colors.ENDC}")
+        print("      Shows SMART health (smartctl -a) for the underlying disk (USB uses -d sat).")
+
         print(f"\n{Colors.BOLD}disk/part (applied to mapped disk/partition targets):{Colors.ENDC}")
         print(f"  {Colors.OKGREEN}map <name/id> <name>{Colors.ENDC}")
         print("      Assigns a friendly name to a disk/partition or renames an existing mapping.")
         print("      Discovery IDs use #N format (example: map #1 backup).")
         print(f"  {Colors.OKGREEN}unmap <name/id>{Colors.ENDC}")
         print("      Removes an existing mapping by name, or by discovery ID (#N).")
-        print(f"  {Colors.OKGREEN}create <name/id> (--gpt|--mbr) [--partition]{Colors.ENDC}")
-        print("      Creates a new GPT/MBR partition table on a whole disk (mapping name or discovery ID).")
-        print("      Optional: add --partition to create one full-disk primary partition.")
-        print("      Safety policy: disk must be erased first (run: erase <name>).")
         print(f"  {Colors.OKGREEN}format <name/id> [options]{Colors.ENDC}")
         print("      Formats a mapped disk/partition as a superfloppy-style volume and mounts it.")
         print("      Whole disks must be unpartitioned. Existing partitions are never created/modified by format.")
@@ -888,11 +895,6 @@ class DiskMgrShell(cmd.Cmd):
         print("      and rewrites an empty MBR table in MBR mode.")
         print(f"  {Colors.OKGREEN}nuke <name/id>{Colors.ENDC}")
         print("      Secure erase (multi-step hardware-aware wipe) on disk/part.")
-        print(f"  {Colors.OKGREEN}selftest <name/id>{Colors.ENDC}")
-        print("      Starts a SMART long self-test (smartctl -t long) for the underlying disk")
-        print("      (USB uses -d sat).")
-        print(f"  {Colors.OKGREEN}health <name/id>{Colors.ENDC} {Colors.OKGREEN}[alias: smart]{Colors.ENDC}")
-        print("      Shows SMART health (smartctl -a) for the underlying disk (USB uses -d sat).")
         print(f"  {Colors.OKGREEN}clone <src_name/id> <dst_name/id>{Colors.ENDC}")
         print("      Clones one disk/partition to another (requires target >= source size).")
 
@@ -929,8 +931,6 @@ class DiskMgrShell(cmd.Cmd):
         print(f"\n{Colors.BOLD}shell:{Colors.ENDC}")
         print(f"  {Colors.OKGREEN}exit / quit / Ctrl+D{Colors.ENDC}")
         print("      Exit the application.")
-
-        print("\nType 'help <command>' for command-specific details.")
 
     def do_exit(self, arg):
         'Exit the application'
