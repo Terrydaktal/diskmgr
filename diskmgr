@@ -1045,6 +1045,23 @@ class DiskMgrShell(cmd.Cmd):
             d_name = d.get('name', '')
             all_rows.extend(disk_rows.get(d_name, []))
 
+        # Discovery cache for map #N:
+        # keep only unmapped disk/partition entries and bind to displayed "#" IDs.
+        self.unmapped_cache = []
+        for r in all_rows:
+            try:
+                if (r.get('TYPE') or '') not in ('disk', 'part'):
+                    continue
+                if (r.get('NAME') or '') != '-':
+                    continue
+                rid = str(r.get('#') or '').strip()
+                pdp = str(r.get('PERSISTENT PATH (IEEE)') or '').strip()
+                if not rid or rid == '-' or not pdp or pdp == '-':
+                    continue
+                self.unmapped_cache.append({'id': rid, 'pdp': pdp})
+            except Exception:
+                continue
+
         widths_global = None
         if render_mode == 'table':
             widths_global = self._lsblk_col_widths(all_rows, cols=selected_cols)
@@ -1550,7 +1567,16 @@ class DiskMgrShell(cmd.Cmd):
         if allow_id:
             idx = None
             if clean.startswith('#') and clean[1:].isdigit():
-                idx = int(clean[1:]) - 1
+                wanted = clean[1:]
+                # Primary lookup: exact display ID from the last `list` run (e.g. "#7").
+                for entry in (self.unmapped_cache or []):
+                    try:
+                        if str(entry.get('id', '')).strip() == wanted:
+                            return entry.get('pdp')
+                    except Exception:
+                        continue
+                # Backward-compatible fallback: positional index in cache.
+                idx = int(wanted) - 1
             elif clean.startswith('U') and clean[1:].isdigit():
                 # Backward-compatible legacy ID format.
                 idx = int(clean[1:]) - 1
