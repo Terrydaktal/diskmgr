@@ -106,6 +106,8 @@ file system (applied to disk/part entries with mountable FSTYPE):
       For LUKS: resolves to payload filesystem when open; errors if locked/not mounted.
 
 shell:
+  version
+      Print diskmgr version.
   exit / quit / Ctrl+D
       Exit the application.
 ```
@@ -157,7 +159,7 @@ Disk: /dev/nvme0n1 (WD_BLACK SN8100 2000GB) [msdos] [Sector: L512/P512] [Total S
 
  #   NAME  DEVICE           TYPE   SIZE    FSTYPE       FSLABEL  FSUUID                                FSAVAIL  FSMOUNTPOINTS       PERSISTENT PATH (IEEE)
  7   -     nvme0n1          disk   1.8T                                                                                             /dev/disk/by-id/nvme-eui.e8238fa6bf530001001b448b42d60852
- 8   -     └─nvme0n1p1      part   1.8T    ext4                  88f1dad3-95c6-418e-bea8-f5f3e072ea29  765.2G   /                   /dev/disk/by-id/nvme-eui.e8238fa6bf530001001b448b42d60852-part1
+ 8   os    └─nvme0n1p1      part   1.8T    ext4                  88f1dad3-95c6-418e-bea8-f5f3e072ea29  765.3G   /                   /dev/disk/by-id/nvme-eui.e8238fa6bf530001001b448b42d60852-part1
 ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 Disk: /dev/nvme1n1 (WD Blue SN570 1TB) [msdos] [Sector: L512/P512] [Total Sectors: 1953525168]
@@ -165,7 +167,7 @@ Disk: /dev/nvme1n1 (WD Blue SN570 1TB) [msdos] [Sector: L512/P512] [Total Sector
 
  #   NAME  DEVICE           TYPE   SIZE    FSTYPE       FSLABEL  FSUUID                                FSAVAIL  FSMOUNTPOINTS       PERSISTENT PATH (IEEE)
  9   -     nvme1n1          disk   931.5G                                                                                           /dev/disk/by-id/nvme-eui.e8238fa6bf530001001b444a49598af9
- 10  data  └─nvme1n1p1      part   931.5G  ext4         data     72c22012-b161-4e2a-a762-94ff7fda47f9  194.4G   /media/lewis/data1  /dev/disk/by-id/nvme-eui.e8238fa6bf530001001b444a49598af9-part1
+ 10  data  └─nvme1n1p1      part   931.5G  ext4         data     72c22012-b161-4e2a-a762-94ff7fda47f9  175.5G   /media/lewis/data1  /dev/disk/by-id/nvme-eui.e8238fa6bf530001001b444a49598af9-part1
 ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 ```
 
@@ -635,6 +637,12 @@ Scrub a mounted btrfs filesystem: scrub <name> [--no-watch]
           to resolve those to paths via:
             btrfs inspect-internal logical-resolve <logical> <mountpoint>
             btrfs inspect-internal inode-resolve <ino> <mountpoint>
+```
+
+## Command Reference: `version`
+
+```text
+Print diskmgr version
 ```
 
 ## Configuration
