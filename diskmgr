@@ -17,6 +17,7 @@ from pathlib import Path
 # Configuration
 MAP_FILENAME = 'diskmap.tsv'
 PASSGEN_BIN = 'passgen'
+VERSION = '2.0.0'
 
 # ANSI Colors
 class Colors:
@@ -933,8 +934,14 @@ class DiskMgrShell(cmd.Cmd):
         print("      For LUKS: resolves to payload filesystem when open; errors if locked/not mounted.")
 
         print(f"\n{Colors.BOLD}shell:{Colors.ENDC}")
+        print(f"  {Colors.OKGREEN}version{Colors.ENDC}")
+        print("      Print diskmgr version.")
         print(f"  {Colors.OKGREEN}exit / quit / Ctrl+D{Colors.ENDC}")
         print("      Exit the application.")
+
+    def do_version(self, arg):
+        'Print diskmgr version'
+        print(f"diskmgr {VERSION}")
 
     def do_exit(self, arg):
         'Exit the application'
