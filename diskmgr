@@ -903,6 +903,9 @@ class DiskMgrShell(cmd.Cmd):
         print("      Mounts to /media/$USER/<label> (prefers filesystem label over mapping name).")
         print(f"  {Colors.OKGREEN}close <name>{Colors.ENDC}")
         print("      Unmounts filesystem(s) for this mapping; if a /dev/mapper/<name> exists, closes it too.")
+        print(f"  {Colors.OKGREEN}luks <passwd|backup|restore>{Colors.ENDC}")
+        print("      LUKS management for mapped containers (grouped under filesystem workflows):")
+        print("      password change, header backup, and header restore.")
         print(f"  {Colors.OKGREEN}label <name> [new_label]{Colors.ENDC}")
         print("      Get or set the filesystem label of an OPEN disk.")
         print("      For LUKS: acts on payload filesystem when open; errors if locked.")
@@ -922,8 +925,6 @@ class DiskMgrShell(cmd.Cmd):
         print("      Runs a blocking btrfs scrub on a mounted filesystem and records user.last_scrub xattr.")
         print("      By default tails kernel checksum/error logs and resolves paths when possible.")
         print("      For LUKS: resolves to payload filesystem when open; errors if locked/not mounted.")
-        print(f"  {Colors.OKGREEN}luks <passwd|backup|restore>{Colors.ENDC}")
-        print("      LUKS management for mapped LUKS containers: password change, header backup, header restore.")
 
         print(f"\n{Colors.BOLD}shell:{Colors.ENDC}")
         print(f"  {Colors.OKGREEN}exit / quit / Ctrl+D{Colors.ENDC}")
