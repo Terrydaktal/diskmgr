@@ -863,8 +863,8 @@ class DiskMgrShell(cmd.Cmd):
         print("that disks are recognized reliably even if device nodes change.\n")
         
         print(f"{Colors.BOLD}COMMANDS:{Colors.ENDC}")
-        print(f"  {Colors.OKGREEN}list [concise|verbose]{Colors.ENDC}")
-        print("      Displays disk layout and filesystem table (verbose by default; use concise for fewer columns).")
+        print(f"  {Colors.OKGREEN}list [concise|verbose] [list]{Colors.ENDC}")
+        print("      Displays disk layout (verbose table by default). Use concise for fewer columns, or list mode for key/value entries.")
 
         print(f"  {Colors.OKGREEN}boot{Colors.ENDC}")
         print("      Displays all boot entries and submenus from GRUB.")
@@ -948,6 +948,7 @@ class DiskMgrShell(cmd.Cmd):
           list            -> verbose table (default)
           list verbose    -> explicit verbose table
           list concise    -> compact table (#, NAME, DEVICE, TYPE, MOUNTPOINT, PERSISTENT PATH)
+          list list       -> list-style entries (key/value) instead of a table
         
         UNDER THE HOOD:
         1.  Hardware Scan: Identifies all physical 'disk' devices (excluding partitions).
@@ -962,14 +963,19 @@ class DiskMgrShell(cmd.Cmd):
         '''
         argv = shlex.split(arg) if arg else []
         mode = 'verbose'
+        render_mode = 'table'
         for token in argv:
             t = token.strip().lower()
             if t in ('concise', '--concise', '-c'):
                 mode = 'concise'
             elif t in ('verbose', '--verbose', '-v'):
                 mode = 'verbose'
+            elif t in ('list', '--list', '-l'):
+                render_mode = 'list'
+            elif t in ('table', '--table', '-t'):
+                render_mode = 'table'
             else:
-                log(f"Unknown list option: {token}. Use: list [concise|verbose]", 'ERROR')
+                log(f"Unknown list option: {token}. Use: list [concise|verbose] [list]", 'ERROR')
                 return
 
         selected_cols = self._lsblk_concise_cols() if mode == 'concise' else self._lsblk_verbose_cols()
@@ -1041,8 +1047,12 @@ class DiskMgrShell(cmd.Cmd):
             d_name = d.get('name', '')
             all_rows.extend(disk_rows.get(d_name, []))
 
-        widths_global = self._lsblk_col_widths(all_rows, cols=selected_cols)
-        separator_width = max(1, self._lsblk_rendered_width(all_rows, widths=widths_global, cols=selected_cols))
+        widths_global = None
+        if render_mode == 'table':
+            widths_global = self._lsblk_col_widths(all_rows, cols=selected_cols)
+            separator_width = max(1, self._lsblk_rendered_width(all_rows, widths=widths_global, cols=selected_cols))
+        else:
+            separator_width = max(1, self._lsblk_rendered_list_width(all_rows, cols=selected_cols))
         separator_line = "-" * separator_width
 
         for disk in disks:
@@ -1079,7 +1089,10 @@ class DiskMgrShell(cmd.Cmd):
                     rows = disk_rows.get(d_name, [])
                     if rows:
                         print("")
-                        self._print_lsblk_rows(rows, widths=widths_global, cols=selected_cols)
+                        if render_mode == 'list':
+                            self._print_lsblk_rows_list(rows, cols=selected_cols)
+                        else:
+                            self._print_lsblk_rows(rows, widths=widths_global, cols=selected_cols)
                     print(separator_line)
                     continue
 
@@ -1165,7 +1178,10 @@ class DiskMgrShell(cmd.Cmd):
                 try:
                     rows = disk_rows.get(d_name, [])
                     if rows:
-                        self._print_lsblk_rows(rows, widths=widths_global, cols=selected_cols)
+                        if render_mode == 'list':
+                            self._print_lsblk_rows_list(rows, cols=selected_cols)
+                        else:
+                            self._print_lsblk_rows(rows, widths=widths_global, cols=selected_cols)
                 except Exception as e:
                     log(f"Could not render lsblk tree: {e}", 'DEBUG')
                 print(separator_line)
@@ -1278,6 +1294,18 @@ class DiskMgrShell(cmd.Cmd):
             max_len = max(max_len, len(_line_for(r)))
         return max_len
 
+    def _lsblk_rendered_list_width(self, rows, cols=None):
+        """Return max visible width for list-style lsblk rendering."""
+        if cols is None:
+            cols = self._lsblk_verbose_cols()
+        max_len = len("Entry 1")
+        for i, r in enumerate(rows, start=1):
+            max_len = max(max_len, len(f"Entry {i}"))
+            for c in cols:
+                v = str(r.get(c, '') or '')
+                max_len = max(max_len, len(f"  {c}: {v}"))
+        return max_len
+
     def _collect_lsblk_rows(self, devices, indent="", is_root=True, parent_wwn="", friendly_map=None):
         """
         Collect an lsblk JSON tree into flat rows, while preserving the tree glyphs in NAME.
@@ -1377,6 +1405,17 @@ class DiskMgrShell(cmd.Cmd):
         for r in rows:
             line = "".join([_cell(str(r.get(c, '') or ''), widths[c]) for c in cols]).rstrip()
             print(line)
+
+    def _print_lsblk_rows_list(self, rows, cols=None):
+        """Print rows as list-style key/value entries."""
+        if cols is None:
+            cols = self._lsblk_verbose_cols()
+        for i, r in enumerate(rows, start=1):
+            print(f"{Colors.BOLD}Entry {i}{Colors.ENDC}")
+            for c in cols:
+                print(f"  {c}: {str(r.get(c, '') or '')}")
+            if i != len(rows):
+                print("")
 
     def resolve_uuid_to_dev(self, uuid):
         '''Resolves a UUID to a short device name like sda1 or nvme0n1p1.'''
