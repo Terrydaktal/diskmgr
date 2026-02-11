@@ -872,8 +872,8 @@ class DiskMgrShell(cmd.Cmd):
         print(f"  {Colors.OKGREEN}map <name/id> <name>{Colors.ENDC}")
         print("      Assigns a friendly name to a disk/partition or renames an existing mapping.")
         print("      Discovery IDs use #N format (example: map #1 backup).")
-        print(f"  {Colors.OKGREEN}unmap <name>{Colors.ENDC}")
-        print("      Removes an existing mapping for a disk/partition from the configuration.")
+        print(f"  {Colors.OKGREEN}unmap <name/id>{Colors.ENDC}")
+        print("      Removes an existing mapping by name, or by discovery ID (#N).")
         print(f"  {Colors.OKGREEN}create <name/id> (--gpt|--mbr) [--partition]{Colors.ENDC}")
         print("      Creates a new GPT/MBR partition table on a whole disk (mapping name or discovery ID).")
         print("      Optional: add --partition to create one full-disk primary partition.")
@@ -1739,26 +1739,54 @@ class DiskMgrShell(cmd.Cmd):
         log(f"Mapping saved: {name} -> {real_target}")
 
     def do_unmap(self, arg):
-        '''Remove a persistent mapping: unmap <name>
+        '''Remove a persistent mapping: unmap <name/id>
         
         UNDER THE HOOD:
-        1.  Resolution: Verifies the mapping exists in diskmap.tsv.
-        2.  Removal: Deletes the [Name <TAB> PDP] pair from the internal dictionary.
-        3.  Persistence: Re-writes diskmap.tsv with the mapping removed.
+        1.  Resolution:
+            - Name mode: removes the exact mapping name.
+            - ID mode (#N): resolves to a device and removes mapping(s) pointing to that device.
+        2.  Removal: Deletes the [Name <TAB> PDP] pair(s) from the internal dictionary.
+        3.  Persistence: Re-writes diskmap.tsv with the mapping(s) removed.
         '''
-        name = arg.strip()
-        if not name:
-            log("Usage: unmap <name>", 'ERROR')
+        target = arg.strip()
+        if not target:
+            log("Usage: unmap <name/id>", 'ERROR')
             return
 
         self.mappings = read_luks_map()
-        if name not in self.mappings:
-            log(f"Unknown mapping: '{name}'", 'ERROR')
+        if target in self.mappings:
+            del self.mappings[target]
+            save_luks_map(self.mappings)
+            log(f"Mapping '{target}' removed successfully.")
             return
 
-        del self.mappings[name]
+        # ID path: resolve target and remove any mapping(s) that point to that same real device.
+        resolved = self.resolve_target(target, allow_id=True)
+        if not resolved:
+            log(f"Unknown target: '{target}'. Use a mapping name or discovery ID (#N).", 'ERROR')
+            log("Tip: run 'list' first to refresh discovery IDs.", 'ERROR')
+            return
+
+        resolved_real = os.path.realpath(resolved)
+        to_remove = []
+        for name, path in list(self.mappings.items()):
+            try:
+                if os.path.realpath(path) == resolved_real:
+                    to_remove.append(name)
+            except Exception:
+                continue
+
+        if not to_remove:
+            log(f"No mapping found for target: '{target}' ({resolved_real})", 'ERROR')
+            return
+
+        for name in to_remove:
+            del self.mappings[name]
         save_luks_map(self.mappings)
-        log(f"Mapping '{name}' removed successfully.")
+        if len(to_remove) == 1:
+            log(f"Mapping '{to_remove[0]}' removed successfully.")
+        else:
+            log(f"Removed {len(to_remove)} mappings for {resolved_real}: {', '.join(to_remove)}")
 
     def do_open(self, arg):
         '''Unlock (if encrypted) and mount a disk: open <name>
@@ -2745,6 +2773,25 @@ class DiskMgrShell(cmd.Cmd):
 
         if src_real == dst_real:
             log("Source and target are the same device!", 'ERROR')
+            return
+
+        # Also block cloning within the same physical disk (e.g. name for disk + #N resolving to same disk).
+        def _top_level_disk(dev_path):
+            try:
+                mapped_name = _sysfs_block_name(dev_path)
+                disk_name = _sysfs_to_parent_disk_name(mapped_name)
+                candidate = os.path.realpath(f"/dev/{disk_name}")
+                if os.path.exists(candidate):
+                    return candidate
+            except Exception:
+                pass
+            return None
+
+        src_disk = _top_level_disk(src_real)
+        dst_disk = _top_level_disk(dst_real)
+        if src_disk and dst_disk and src_disk == dst_disk:
+            log(f"OPERATION BLOCKED: source ({src_real}) and target ({dst_real}) are on the same physical disk ({src_disk}).", 'ERROR')
+            log("Choose a destination on a different physical disk.", 'ERROR')
             return
 
         if self.is_root_disk(dst_real):
