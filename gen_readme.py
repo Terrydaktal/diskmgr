@@ -100,7 +100,7 @@ def main():
                     ex_lines = clean_diskmgr_output(example_raw).splitlines()
                     final_ex = []
                     
-                    if cmd == 'list': trigger = "--- Disk Management"
+                    if cmd == 'list': trigger = "Disk: "
                     elif cmd == 'boot': trigger = "--- System Boot"
                     
                     saving = False
