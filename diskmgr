@@ -1042,6 +1042,8 @@ class DiskMgrShell(cmd.Cmd):
             all_rows.extend(disk_rows.get(d_name, []))
 
         widths_global = self._lsblk_col_widths(all_rows, cols=selected_cols)
+        separator_width = max(1, self._lsblk_rendered_width(all_rows, widths=widths_global, cols=selected_cols))
+        separator_line = "-" * separator_width
 
         for disk in disks:
             d_name = disk['name']
@@ -1078,7 +1080,7 @@ class DiskMgrShell(cmd.Cmd):
                     if rows:
                         print("")
                         self._print_lsblk_rows(rows, widths=widths_global, cols=selected_cols)
-                    print("-" * 155)
+                    print(separator_line)
                     continue
 
                 lines = res.stdout.strip().splitlines()
@@ -1166,7 +1168,7 @@ class DiskMgrShell(cmd.Cmd):
                         self._print_lsblk_rows(rows, widths=widths_global, cols=selected_cols)
                 except Exception as e:
                     log(f"Could not render lsblk tree: {e}", 'DEBUG')
-                print("-" * 155)
+                print(separator_line)
             except Exception as e:
                 print(f"\n{Colors.BOLD}Disk: {dev_path} ({model}){Colors.ENDC}")
                 log(f"Could not read layout for {dev_path}: {e}", 'WARN')
@@ -1253,6 +1255,28 @@ class DiskMgrShell(cmd.Cmd):
         for c in cols:
             widths[c] += 2
         return widths
+
+    def _lsblk_rendered_width(self, rows, widths=None, cols=None):
+        """
+        Return the maximum visible width for the rendered lsblk table (header + rows)
+        using the same formatting logic as _print_lsblk_rows().
+        """
+        if cols is None:
+            cols = self._lsblk_verbose_cols()
+        if widths is None:
+            widths = self._lsblk_col_widths(rows, cols=cols)
+
+        def _line_for(values):
+            parts = []
+            for c in cols:
+                inner = max(widths[c] - 2, 0)
+                parts.append(f" {str(values.get(c, '') or ''):<{inner}} ")
+            return "".join(parts).rstrip()
+
+        max_len = len(_line_for({c: c for c in cols}))
+        for r in rows:
+            max_len = max(max_len, len(_line_for(r)))
+        return max_len
 
     def _collect_lsblk_rows(self, devices, indent="", is_root=True, parent_wwn="", friendly_map=None):
         """
