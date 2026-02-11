@@ -893,6 +893,8 @@ class DiskMgrShell(cmd.Cmd):
         print("      (USB uses -d sat).")
         print(f"  {Colors.OKGREEN}health <name/id>{Colors.ENDC}")
         print("      Shows SMART health (smartctl -a) for the underlying disk (USB uses -d sat).")
+        print(f"  {Colors.OKGREEN}smart <name/id>{Colors.ENDC}")
+        print("      Alias for health.")
         print(f"  {Colors.OKGREEN}clone <src_name/id> <dst_name/id>{Colors.ENDC}")
         print("      Clones one disk/partition to another (requires target >= source size).")
 
@@ -3480,6 +3482,10 @@ class DiskMgrShell(cmd.Cmd):
         # smartctl uses a bitmask exit code; non-zero can mean "drive has issues" and is still useful output.
         if getattr(res, 'returncode', 0) != 0:
             log(f"smartctl exit status: {res.returncode} (non-zero may indicate SMART warnings).", 'WARN')
+
+    def do_smart(self, arg):
+        '''Alias for health: smart <name/id>'''
+        return self.do_health(arg)
 
     def do_selftest(self, arg):
         '''Start a SMART long self-test: selftest <name/id>
