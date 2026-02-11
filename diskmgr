@@ -863,8 +863,8 @@ class DiskMgrShell(cmd.Cmd):
         print("that disks are recognized reliably even if device nodes change.\n")
         
         print(f"{Colors.BOLD}COMMANDS:{Colors.ENDC}")
-        print(f"  {Colors.OKGREEN}list{Colors.ENDC}")
-        print("      Displays the physical partition layout and free space for all disks.")
+        print(f"  {Colors.OKGREEN}list [concise|verbose]{Colors.ENDC}")
+        print("      Displays disk layout and filesystem table (verbose by default; use concise for fewer columns).")
 
         print(f"  {Colors.OKGREEN}boot{Colors.ENDC}")
         print("      Displays all boot entries and submenus from GRUB.")
@@ -944,6 +944,10 @@ class DiskMgrShell(cmd.Cmd):
 
     def do_list(self, arg):
         '''Display the physical partition layout and free space for all plugged-in disks.
+        Usage:
+          list            -> verbose table (default)
+          list verbose    -> explicit verbose table
+          list concise    -> compact table (#, NAME, DEVICE, TYPE, MOUNTPOINT, PERSISTENT PATH)
         
         UNDER THE HOOD:
         1.  Hardware Scan: Identifies all physical 'disk' devices (excluding partitions).
@@ -956,6 +960,20 @@ class DiskMgrShell(cmd.Cmd):
             - Identifies 'free' space segments.
             - Calculates MiB and GiB values from sector counts.
         '''
+        argv = shlex.split(arg) if arg else []
+        mode = 'verbose'
+        for token in argv:
+            t = token.strip().lower()
+            if t in ('concise', '--concise', '-c'):
+                mode = 'concise'
+            elif t in ('verbose', '--verbose', '-v'):
+                mode = 'verbose'
+            else:
+                log(f"Unknown list option: {token}. Use: list [concise|verbose]", 'ERROR')
+                return
+
+        selected_cols = self._lsblk_concise_cols() if mode == 'concise' else self._lsblk_verbose_cols()
+
         all_devs = self.get_disk_info()
         disks = [d for d in all_devs if d.get('type') == 'disk']
         
@@ -1023,7 +1041,7 @@ class DiskMgrShell(cmd.Cmd):
             d_name = d.get('name', '')
             all_rows.extend(disk_rows.get(d_name, []))
 
-        widths_global = self._lsblk_col_widths(all_rows)
+        widths_global = self._lsblk_col_widths(all_rows, cols=selected_cols)
 
         for disk in disks:
             d_name = disk['name']
@@ -1059,7 +1077,7 @@ class DiskMgrShell(cmd.Cmd):
                     rows = disk_rows.get(d_name, [])
                     if rows:
                         print("")
-                        self._print_lsblk_rows(rows, widths=widths_global)
+                        self._print_lsblk_rows(rows, widths=widths_global, cols=selected_cols)
                     print("-" * 155)
                     continue
 
@@ -1145,7 +1163,7 @@ class DiskMgrShell(cmd.Cmd):
                 try:
                     rows = disk_rows.get(d_name, [])
                     if rows:
-                        self._print_lsblk_rows(rows, widths=widths_global)
+                        self._print_lsblk_rows(rows, widths=widths_global, cols=selected_cols)
                 except Exception as e:
                     log(f"Could not render lsblk tree: {e}", 'DEBUG')
                 print("-" * 155)
@@ -1195,8 +1213,8 @@ class DiskMgrShell(cmd.Cmd):
                 print(line)
             print("")
 
-    def _lsblk_col_widths(self, rows):
-        cols = [
+    def _lsblk_verbose_cols(self):
+        return [
             "#",
             "NAME",
             "DEVICE",
@@ -1209,6 +1227,20 @@ class DiskMgrShell(cmd.Cmd):
             "FSMOUNTPOINTS",
             "PERSISTENT PATH (IEEE)",
         ]
+
+    def _lsblk_concise_cols(self):
+        return [
+            "#",
+            "NAME",
+            "DEVICE",
+            "TYPE",
+            "MOUNTPOINT",
+            "PERSISTENT PATH (IEEE)",
+        ]
+
+    def _lsblk_col_widths(self, rows, cols=None):
+        if cols is None:
+            cols = self._lsblk_verbose_cols()
         widths = {}
         for c in cols:
             widths[c] = len(c)
@@ -1295,32 +1327,22 @@ class DiskMgrShell(cmd.Cmd):
                 "FSUUID": uuid,
                 "FSUSE%": fsuse,
                 "FSMOUNTPOINTS": mounts,
+                "MOUNTPOINT": mounts,
             })
 
             if 'children' in dev:
                 rows.extend(self._collect_lsblk_rows(dev['children'], next_indent, is_root=False, parent_wwn=wwn, friendly_map=friendly_map))
         return rows
 
-    def _print_lsblk_rows(self, rows, widths=None):
+    def _print_lsblk_rows(self, rows, widths=None, cols=None):
         """
         Print a column-aligned table where each cell is padded with one space on each side.
         Persistent path is printed immediately after NAME.
         """
-        cols = [
-            "#",
-            "NAME",
-            "DEVICE",
-            "TYPE",
-            "SIZE",
-            "FSTYPE",
-            "FSLABEL",
-            "FSUUID",
-            "FSUSE%",
-            "FSMOUNTPOINTS",
-            "PERSISTENT PATH (IEEE)",
-        ]
+        if cols is None:
+            cols = self._lsblk_verbose_cols()
         if widths is None:
-            widths = self._lsblk_col_widths(rows)
+            widths = self._lsblk_col_widths(rows, cols=cols)
 
         def _cell(text, width):
             inner = max(width - 2, 0)
