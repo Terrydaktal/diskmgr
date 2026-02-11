@@ -874,6 +874,10 @@ class DiskMgrShell(cmd.Cmd):
         print("      Discovery IDs use #N format (example: map #1 backup).")
         print(f"  {Colors.OKGREEN}unmap <name>{Colors.ENDC}")
         print("      Removes an existing mapping for a disk/partition from the configuration.")
+        print(f"  {Colors.OKGREEN}create <name> (--gpt|--mbr) [--partition]{Colors.ENDC}")
+        print("      Creates a new GPT/MBR partition table on a mapped whole disk.")
+        print("      Optional: add --partition to create one full-disk primary partition.")
+        print("      Safety policy: disk must be erased first (run: erase <name>).")
         print(f"  {Colors.OKGREEN}format <name> [options]{Colors.ENDC}")
         print("      Formats a mapped disk/partition as a superfloppy-style volume and mounts it.")
         print("      Whole disks must be unpartitioned. Existing partitions are never created/modified by format.")
@@ -2451,6 +2455,46 @@ class DiskMgrShell(cmd.Cmd):
             run_command(['udevadm', 'settle'], sudo=True, check=False)
 
         log("Soft erase completed.")
+
+    def _disk_looks_erased_for_create(self, real_target):
+        """Best-effort precheck used by create: disk must look erased."""
+        if _lsblk_type(real_target) != 'disk':
+            return (False, "target is not a whole disk")
+
+        # Must have no child partitions.
+        try:
+            res_p = run_command(['lsblk', '-nr', '-o', 'NAME,TYPE', real_target], check=False)
+            parts = []
+            for line in (getattr(res_p, 'stdout', '') or '').splitlines():
+                cols = line.strip().split()
+                if len(cols) >= 2 and cols[1] == 'part':
+                    parts.append(cols[0])
+            if parts:
+                return (False, f"disk still has partition(s): {', '.join(parts)}")
+        except Exception:
+            pass
+
+        # Must not currently report a partition table type.
+        try:
+            res_pt = run_command(['lsblk', '-no', 'PTTYPE', real_target], check=False)
+            pttype = (getattr(res_pt, 'stdout', '') or '').strip().lower()
+            if pttype:
+                return (False, f"disk still has partition-table metadata ({pttype})")
+        except Exception:
+            pass
+
+        # Must not have a probe-detectable signature on the whole-disk node.
+        try:
+            res_b = run_command(['blkid', '-p', real_target], check=False)
+            if getattr(res_b, 'returncode', 1) == 0:
+                sig = (getattr(res_b, 'stdout', '') or '').strip() or (getattr(res_b, 'stderr', '') or '').strip()
+                if sig:
+                    return (False, f"disk still has metadata/signature: {sig}")
+                return (False, "disk still has metadata/signature")
+        except Exception:
+            pass
+
+        return (True, "")
 
     def do_erase(self, arg):
         '''Fast metadata wipe (soft erase): erase <name> [--soft]
@@ -4116,12 +4160,108 @@ class DiskMgrShell(cmd.Cmd):
         log("Disk initialization complete.")
 
     def do_create(self, arg):
-        '''(Deprecated) Alias for format: create <name> [options]
+        '''Create partition table/partition on an erased whole disk: create <name> (--gpt|--mbr) [--partition]
 
-        This command was renamed to 'format'. Prefer: format <name> [options]
+        Scope:
+          - Whole disks only (not partitions).
+          - Requires prior erase: the target must look erased (no partitions, no PT metadata, no signatures).
+
+        Actions:
+          - --gpt: create GPT partition table
+          - --mbr: create MBR (msdos) partition table
+          - --partition: after creating the table, create one primary partition (1MiB..100%)
+
+        Examples:
+          erase 1b
+          create 1b --gpt
+          create 1b --gpt --partition
         '''
-        log("create was renamed to format; running format ...", 'WARN')
-        return self.do_format(arg)
+        parser = CmdArgumentParser(prog='create', add_help=False)
+        parser.add_argument('target', help='Mapped whole-disk target name')
+        group = parser.add_mutually_exclusive_group(required=True)
+        group.add_argument('--gpt', action='store_true', help='Create GPT partition table')
+        group.add_argument('--mbr', action='store_true', help='Create MBR (msdos) partition table')
+        parser.add_argument('--partition', action='store_true', help='Create one full-disk primary partition after creating table')
+
+        try:
+            split_args = shlex.split(arg)
+            args = parser.parse_args(split_args)
+        except argparse.ArgumentError as e:
+            log(str(e), 'ERROR')
+            return
+        except SystemExit:
+            return
+
+        name = args.target
+        real_target = self.resolve_target(name, allow_id=False)
+
+        if not real_target:
+            log(f"Unknown mapping: '{name}'. You must 'map' a disk before you can create a partition table.", 'ERROR')
+            return
+
+        if not os.path.exists(real_target):
+            log(f"Target not found: {real_target}", 'ERROR')
+            return
+
+        real_target = os.path.realpath(real_target)
+        if self._block_if_root_drive(real_target, f"create {name}"):
+            return
+
+        if _lsblk_type(real_target) != 'disk':
+            log(f"create only supports whole-disk targets. '{name}' resolved to {real_target} ({_lsblk_type(real_target) or 'unknown'}).", 'ERROR')
+            return
+
+        # Refuse to operate on mounted devices.
+        try:
+            res_m = run_command(['lsblk', '-nr', '-o', 'MOUNTPOINT', real_target], check=False)
+            mounts = [ln.strip() for ln in (getattr(res_m, 'stdout', '') or '').splitlines() if ln.strip()]
+            if mounts:
+                log(f"OPERATION BLOCKED: {real_target} has mounted filesystems ({', '.join(mounts)}). Unmount/close it first.", 'ERROR')
+                return
+        except Exception:
+            pass
+
+        erased_ok, erased_reason = self._disk_looks_erased_for_create(real_target)
+        if not erased_ok:
+            log(f"OPERATION BLOCKED: create requires erase first; {erased_reason}.", 'ERROR')
+            log(f"Run: erase {name}", 'ERROR')
+            return
+
+        table = 'gpt' if args.gpt else 'msdos'
+        action = f"create {table} table"
+        if args.partition:
+            action += " + one partition"
+        log(f"Planned action on {real_target}: {action}")
+
+        if not self.extensive_confirm(real_target):
+            return
+
+        run_command(['sudo', '-v'])
+        run_command(['parted', '-s', real_target, 'mklabel', table], sudo=True)
+
+        if args.partition:
+            run_command(['parted', '-s', real_target, 'mkpart', 'primary', '1MiB', '100%'], sudo=True)
+
+        run_command(['udevadm', 'settle'], sudo=True, check=False)
+        run_command(['partprobe', real_target], sudo=True, check=False)
+
+        if args.partition:
+            created_parts = []
+            try:
+                res_p = run_command(['lsblk', '-nr', '-o', 'NAME,TYPE', real_target], check=False)
+                for line in (getattr(res_p, 'stdout', '') or '').splitlines():
+                    cols = line.strip().split()
+                    if len(cols) >= 2 and cols[1] == 'part':
+                        created_parts.append(f"/dev/{cols[0]}")
+            except Exception:
+                created_parts = []
+
+            if created_parts:
+                log(f"Created partition table ({table}) and partition(s): {', '.join(created_parts)}")
+            else:
+                log(f"Created partition table ({table}) and requested one partition.", 'WARN')
+        else:
+            log(f"Created empty partition table: {table} on {real_target}")
 
 
 if __name__ == '__main__':
