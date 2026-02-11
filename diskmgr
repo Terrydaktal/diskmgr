@@ -872,6 +872,8 @@ class DiskMgrShell(cmd.Cmd):
         print(f"  {Colors.OKGREEN}create <name/id> [--gpt|--mbr] [--partition] [--start X] [--end Y]{Colors.ENDC}")
         print("      Creates a new GPT/MBR partition table on a whole disk (mapping name or discovery ID).")
         print("      Also supports adding another partition to an existing partitioned disk via --partition.")
+        print("      If --start/--end are omitted in partition-only mode, uses the largest free extent.")
+        print("      Overlapping ranges are rejected by parted; existing partitions are not overwritten.")
         print("      Safety policy for table creation: disk must be erased first (run: erase <name>).")
         print(f"  {Colors.OKGREEN}selftest <name/id>{Colors.ENDC}")
         print("      Starts a SMART long self-test (smartctl -t long) for the underlying disk")
@@ -4392,6 +4394,8 @@ class DiskMgrShell(cmd.Cmd):
           - --partition:
               * with --gpt/--mbr: create first partition after table creation
               * without --gpt/--mbr: create an additional partition on existing table
+              * when --start/--end are omitted, the largest free extent is selected automatically
+              * overlapping ranges are rejected; existing partitions are not overwritten
 
         Examples:
           erase 1b
