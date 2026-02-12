@@ -17,7 +17,7 @@ from pathlib import Path
 # Configuration
 MAP_FILENAME = 'diskmap.tsv'
 PASSGEN_BIN = 'passgen'
-VERSION = '2.2.6'
+VERSION = '2.2.9'
 
 # ANSI Colors
 class Colors:
@@ -936,7 +936,7 @@ class DiskMgrShell(cmd.Cmd):
         print("      For LUKS: resolves to payload filesystem when open; errors if locked/not mounted.")
         print(f"  {Colors.OKGREEN}fshealth <name>{Colors.ENDC}")
         print("      Shows filesystem diagnostics, last_defrag/last_scrub xattrs, ext4 fragmentation score,")
-        print("      and btrfs fragmentation amount via compsize.")
+        print("      and btrfs fragmentation amount via compsize with an estimated ext4-like score.")
         print("      For LUKS: resolves to payload filesystem when open; errors if locked/not mounted.")
         print(f"  {Colors.OKGREEN}convert <name/id>{Colors.ENDC}")
         print("      Converts an UNMOUNTED ext4 filesystem to btrfs in place (btrfs-convert).")
@@ -3943,7 +3943,7 @@ class DiskMgrShell(cmd.Cmd):
         - ext4:  sudo tune2fs -l <device>
                 sudo e4defrag -c <mountpoint>   (fragmentation score)
         - btrfs: sudo btrfs filesystem usage <mountpoint>
-                sudo compsize <mountpoint>  (fragmentation amount)
+                sudo compsize <mountpoint>  (fragmentation amount + ext4-like score estimate)
         - xfs:   xfs_info <mountpoint>
 
         Also reads xattrs from the mountpoint root:
@@ -4009,6 +4009,32 @@ class DiskMgrShell(cmd.Cmd):
         compsize_bin = None
         compsize_out = ""
         compsize_err = ""
+        def _lerp(x, x0, x1, y0, y1):
+            if x1 <= x0:
+                return y1
+            return y0 + ((x - x0) / (x1 - x0)) * (y1 - y0)
+
+        def _btrfs_ext4_like_score(epf):
+            """
+            Convert btrfs extents/file into an ext4-like 0-100 score using the user rubric:
+              <1.0 => pristine, 1.0-1.2 => healthy, 2.0-10 => warning, >=50 => critical.
+            Gaps are bridged linearly for continuity.
+            """
+            if epf < 1.0:
+                score = _lerp(epf, 0.0, 1.0, 0.0, 5.0)
+            elif epf <= 1.2:
+                score = _lerp(epf, 1.0, 1.2, 5.0, 20.0)
+            elif epf < 2.0:
+                score = _lerp(epf, 1.2, 2.0, 20.0, 30.0)
+            elif epf <= 10.0:
+                score = _lerp(epf, 2.0, 10.0, 31.0, 55.0)
+            elif epf < 50.0:
+                score = _lerp(epf, 10.0, 50.0, 56.0, 79.0)
+            else:
+                capped = min(epf, 200.0)
+                score = _lerp(capped, 50.0, 200.0, 80.0, 100.0)
+            return max(0, min(100, int(round(score))))
+
         if fstype == 'ext4':
             e4defrag_bin = _find_tool_or_common_paths('e4defrag', [
                 '/usr/sbin/e4defrag',
@@ -4067,10 +4093,17 @@ class DiskMgrShell(cmd.Cmd):
                         extents = None
                     if files is not None and extents is not None and files > 0:
                         epf = extents / float(files)
+                        score = _btrfs_ext4_like_score(epf)
+                        if score <= 30:
+                            state = f"{Colors.OKGREEN}GOOD{Colors.ENDC}"
+                        elif score <= 55:
+                            state = f"{Colors.WARNING}MEDIUM{Colors.ENDC}"
+                        else:
+                            state = f"{Colors.FAIL}BAD{Colors.ENDC}"
                         print(
                             f"{Colors.BOLD}Defragmentation state:{Colors.ENDC} "
-                            f"btrfs fragmentation amount {extents} extents / {files} files "
-                            f"(~{epf:.2f} extents/file; via compsize)"
+                            f"{state} (btrfs est. ext4-like score {score}; "
+                            f"{extents} extents / {files} files, ~{epf:.2f} extents/file; via compsize)"
                         )
                     else:
                         print(f"{Colors.BOLD}Defragmentation state:{Colors.ENDC} - (could not parse compsize counters)")
