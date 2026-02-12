@@ -17,7 +17,7 @@ from pathlib import Path
 # Configuration
 MAP_FILENAME = 'diskmap.tsv'
 PASSGEN_BIN = 'passgen'
-VERSION = '2.3.3'
+VERSION = '2.3.4'
 
 # ANSI Colors
 class Colors:
@@ -4147,12 +4147,13 @@ class DiskMgrShell(cmd.Cmd):
                         extents = None
                     if files is not None and extents is not None and files > 0:
                         epf = extents / float(files)
-                        state, rubric_hit = _ratio_state_btrfs(epf)
+                        state, _ = _ratio_state_btrfs(epf)
                         print(
                             f"{Colors.BOLD}Defragmentation state:{Colors.ENDC} "
-                            f"{state} (btrfs ratio ~{epf:.2f} extents/file, {rubric_hit})"
+                            f"{state} (btrfs ratio ~{epf:.2f} extents/file; thresholds: "
+                            f"<1 good, >5 bad, >20 critical; "
+                            f"{extents} extents/{files} files; via compsize)"
                         )
-                        print(f"{Colors.BOLD}Extents/files ratio:{Colors.ENDC} {epf:.2f} ({extents} extents / {files} files; via compsize)")
                     else:
                         print(f"{Colors.BOLD}Defragmentation state:{Colors.ENDC} - (could not parse compsize counters)")
                 else:
