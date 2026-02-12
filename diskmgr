@@ -940,6 +940,7 @@ class DiskMgrShell(cmd.Cmd):
         print("      Dry-run filesystem diff (rsync pri -> sec): shows create/modify/delete counts+bytes,")
         print("      then a per-folder subtree summary (+new, ~updated, -deleted regular files).")
         print("      Depth default: 2.")
+        print("      Endpoints may be mapped names/IDs or absolute directory paths.")
         print("      For LUKS: resolves to payload filesystem when open; errors if locked/not mounted.")
         print(f"  {Colors.OKGREEN}defrag <name>{Colors.ENDC}")
         print("      Defragments a mounted filesystem and records user.last_defrag xattr.")
@@ -3840,6 +3841,7 @@ class DiskMgrShell(cmd.Cmd):
     def do_diff(self, arg):
         '''Preview differences between two mounted filesystems: diff <primary_name> <secondary_name> [--depth N]
 
+        Endpoints may be mapping names/IDs (must be mounted) or absolute directory paths.
         Uses rsync dry-run itemized output (primary -> secondary) and prints:
         1) Change counts and byte estimates (created/modified/deleted, net change).
         2) Folder summary by subtree up to --depth levels.
@@ -3865,13 +3867,28 @@ class DiskMgrShell(cmd.Cmd):
         secondary = args.secondary_name
         depth = args.depth
 
-        sec_mnt = self.get_mountpoint(secondary)
-        pri_mnt = self.get_mountpoint(primary)
-        if not sec_mnt:
-            log(f"Secondary disk '{secondary}' is not mounted.", 'ERROR')
-            return
+        def _resolve_diff_endpoint(value, role_label):
+            if os.path.isabs(value):
+                p = os.path.realpath(value)
+                if not os.path.exists(p):
+                    log(f"{role_label} path does not exist: {value}", 'ERROR')
+                    return None
+                if not os.path.isdir(p):
+                    log(f"{role_label} path must be a directory: {value}", 'ERROR')
+                    return None
+                return p
+
+            mp = self.get_mountpoint(value)
+            if not mp:
+                log(f"{role_label} disk '{value}' is not mounted.", 'ERROR')
+                return None
+            return mp
+
+        pri_mnt = _resolve_diff_endpoint(primary, "Primary")
         if not pri_mnt:
-            log(f"Primary disk '{primary}' is not mounted.", 'ERROR')
+            return
+        sec_mnt = _resolve_diff_endpoint(secondary, "Secondary")
+        if not sec_mnt:
             return
 
         src_path = pri_mnt.rstrip('/') + '/'
