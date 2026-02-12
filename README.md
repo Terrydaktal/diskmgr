@@ -76,12 +76,14 @@ disk/part (applied to mapped disk/partition targets):
       Clones one disk/partition to another (requires target >= source size).
 
 file system (applied to disk/part entries with mountable FSTYPE):
-  open <name>
+  open <name/id>
       Opens and mounts a plain or encrypted superfloppy disk/partition.
       For encrypted targets, unlocks LUKS then mounts payload filesystem.
       Mounts to /media/$USER/<label> (prefers filesystem label over mapping name).
-  close <name>
-      Unmounts filesystem(s) for this mapping; if a /dev/mapper/<name> exists, closes it too.
+  close <name/id>
+      close <name>: unmounts filesystem(s) and closes /dev/mapper/<name> when present (locks LUKS).
+      close #id (example: close #6): unmount-only for that discovered row; does NOT run cryptsetup close.
+      Use #id if you want to close only the payload filesystem and keep the LUKS container open.
   luks <passwd|backup|restore|header>
       LUKS management for mapped containers (grouped under filesystem workflows):
       password change, header backup/print, and header restore.
@@ -96,10 +98,17 @@ file system (applied to disk/part entries with mountable FSTYPE):
       For LUKS: resolves to payload filesystem when open; errors if locked/not mounted.
   defrag <name>
       Defragments a mounted filesystem and records user.last_defrag xattr.
+      On btrfs, runs defragment -r, then balance start -dusage=50.
       For LUKS: resolves to payload filesystem when open; errors if locked/not mounted.
   fshealth <name>
-      Shows filesystem diagnostics, last_defrag/last_scrub xattrs, and ext4 fragmentation score.
+      Shows filesystem diagnostics, last_defrag/last_scrub xattrs, and extents/files ratios.
+      ext4: <1.1 healthy, >1.5 bad, >5 critical. btrfs: <1 good, >5 bad, >20 critical.
+      For btrfs, also shows filesystem/device stats and scrub status.
       For LUKS: resolves to payload filesystem when open; errors if locked/not mounted.
+  convert <name/id>
+      Converts an UNMOUNTED ext4 filesystem to btrfs in place (btrfs-convert).
+      Preserves data, supports plain ext4 and open LUKS payload ext4 when resolvable.
+      For safety, target must be unmounted/closed before conversion.
   scrub <name> [--no-watch]
       Runs a blocking btrfs scrub on a mounted filesystem and records user.last_scrub xattr.
       By default tails kernel checksum/error logs and resolves paths when possible.
@@ -138,36 +147,37 @@ Display the physical partition layout and free space for all plugged-in disks.
 
 ```text
 Disk: /dev/sda (ST1000LM035-1RK172) [gpt] [Sector: L512/P4096] [Total Sectors: 1953525168]
-[ GPT Primary 34s (17408.00B) ] [ free 2014s (1007.00KiB) ] [ sda1 - 262144s (128.00MiB) (msftres, no_automount) ] [ sda2 - 1953259520s (953740.00MiB ≈ 931.4GiB) (msftdata) ] [ free 1423s (711.50KiB) ] [ GPT Backup 33s (16896.00B) ]
+[ GPT Primary 34s (17408.00B) ] [ free 2014s (1007.00KiB) ] [ sda1 - 262144s (128.00MiB) (msftres, no_automount) ] [ sda2 crypto_LUKS 1953259520s (953740.00MiB ≈ 931.4GiB) (msftdata) ] [ free 1423s (711.50KiB) ] [ GPT Backup 33s (16896.00B) ]
 
- #   NAME  DEVICE           TYPE   SIZE    FSTYPE       FSLABEL  FSUUID                                FSAVAIL  FSMOUNTPOINTS       PERSISTENT PATH (IEEE)
- 1   -     sda              disk   931.5G                                                                                           /dev/disk/by-id/wwn-0x5000c500a89d6e44
- 2   -     ├─sda1           part   128M                                                                                             /dev/disk/by-id/wwn-0x5000c500a89d6e44-part1
- 3   1a    └─sda2           part   931.4G  crypto_LUKS           e038a8b5-d3a7-4bbb-bbea-5bed8cc07a04                               /dev/disk/by-id/wwn-0x5000c500a89d6e44-part2
- 4   -         └─dm-0 (1a)  crypt  931.4G  ext4         1a       5933d845-1098-4f16-ad7f-ff1f4a4a2105  18.3G    /media/lewis/1a     -
+ #   NAME  DEVICE           TYPE   FSTYPE       FSLABEL  FSUUID                                SIZE    FSAVAIL  FSMOUNTPOINTS       PERSISTENT PATH (IEEE)
+ 1   -     sda              disk                                                               931.5G                               /dev/disk/by-id/wwn-0x5000c500a89d6e44
+ 2   -     ├─sda1           part                                                               128M                                 /dev/disk/by-id/wwn-0x5000c500a89d6e44-part1
+ 3   1a    └─sda2           part   crypto_LUKS           e038a8b5-d3a7-4bbb-bbea-5bed8cc07a04  931.4G                               /dev/disk/by-id/wwn-0x5000c500a89d6e44-part2
+ 4   -         └─dm-0 (1a)  crypt  ext4         1a       5933d845-1098-4f16-ad7f-ff1f4a4a2105  931.4G  18.3G    /media/lewis/1a     -
 ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 Disk: /dev/sdb (ST2000DM008-2FR102) [none] [Sector: L512/P4096] [Total Sectors: 3907029168]
+[ sdb crypto_LUKS 3907029168s (1907729.09MiB ≈ 1863.0GiB) ]
 
- #   NAME  DEVICE           TYPE   SIZE    FSTYPE       FSLABEL  FSUUID                                FSAVAIL  FSMOUNTPOINTS       PERSISTENT PATH (IEEE)
- 5   1b    sdb              disk   1.8T    crypto_LUKS           885a66c1-6d5f-4d24-adfd-e7c7975dfe65                               /dev/disk/by-id/wwn-0x5000c500e31e6cb2
- 6   -     └─dm-1 (1b)      crypt  1.8T    ext4         1b       7b6531c9-459f-4b44-a286-0cc25fbe3ab7  875.1G   /media/lewis/1b     -
+ #   NAME  DEVICE           TYPE   FSTYPE       FSLABEL  FSUUID                                SIZE    FSAVAIL  FSMOUNTPOINTS       PERSISTENT PATH (IEEE)
+ 5   1b    sdb              disk   crypto_LUKS           885a66c1-6d5f-4d24-adfd-e7c7975dfe65  1.8T                                 /dev/disk/by-id/wwn-0x5000c500e31e6cb2
+ 6   -     └─dm-1 (1b)      crypt  btrfs        1b       08aad883-1143-4d5d-84b9-d715665e332a  1.8T    966.8G   /media/lewis/1b     -
 ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 Disk: /dev/nvme0n1 (WD_BLACK SN8100 2000GB) [msdos] [Sector: L512/P512] [Total Sectors: 3907029168]
 [ MBR 2s (1024.00B) ] [ free 2046s (1023.00KiB) ] [ nvme0n1p1 ext4 3907026944s (1907728.00MiB ≈ 1863.0GiB) (boot) ] [ free 176s (88.00KiB) ]
 
- #   NAME  DEVICE           TYPE   SIZE    FSTYPE       FSLABEL  FSUUID                                FSAVAIL  FSMOUNTPOINTS       PERSISTENT PATH (IEEE)
- 7   -     nvme0n1          disk   1.8T                                                                                             /dev/disk/by-id/nvme-eui.e8238fa6bf530001001b448b42d60852
- 8   os    └─nvme0n1p1      part   1.8T    ext4                  88f1dad3-95c6-418e-bea8-f5f3e072ea29  765.3G   /                   /dev/disk/by-id/nvme-eui.e8238fa6bf530001001b448b42d60852-part1
+ #   NAME  DEVICE           TYPE   FSTYPE       FSLABEL  FSUUID                                SIZE    FSAVAIL  FSMOUNTPOINTS       PERSISTENT PATH (IEEE)
+ 7   -     nvme0n1          disk                                                               1.8T                                 /dev/disk/by-id/nvme-eui.e8238fa6bf530001001b448b42d60852
+ 8   os    └─nvme0n1p1      part   ext4                  88f1dad3-95c6-418e-bea8-f5f3e072ea29  1.8T    765.4G   /                   /dev/disk/by-id/nvme-eui.e8238fa6bf530001001b448b42d60852-part1
 ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 Disk: /dev/nvme1n1 (WD Blue SN570 1TB) [msdos] [Sector: L512/P512] [Total Sectors: 1953525168]
 [ MBR 2s (1024.00B) ] [ free 2046s (1023.00KiB) ] [ nvme1n1p1 ext4 1953523120s (953868.71MiB ≈ 931.5GiB) ]
 
- #   NAME  DEVICE           TYPE   SIZE    FSTYPE       FSLABEL  FSUUID                                FSAVAIL  FSMOUNTPOINTS       PERSISTENT PATH (IEEE)
- 9   -     nvme1n1          disk   931.5G                                                                                           /dev/disk/by-id/nvme-eui.e8238fa6bf530001001b444a49598af9
- 10  data  └─nvme1n1p1      part   931.5G  ext4         data     72c22012-b161-4e2a-a762-94ff7fda47f9  175.5G   /media/lewis/data1  /dev/disk/by-id/nvme-eui.e8238fa6bf530001001b444a49598af9-part1
+ #   NAME  DEVICE           TYPE   FSTYPE       FSLABEL  FSUUID                                SIZE    FSAVAIL  FSMOUNTPOINTS       PERSISTENT PATH (IEEE)
+ 9   -     nvme1n1          disk                                                               931.5G                               /dev/disk/by-id/nvme-eui.e8238fa6bf530001001b444a49598af9
+ 10  data  └─nvme1n1p1      part   ext4         data     72c22012-b161-4e2a-a762-94ff7fda47f9  931.5G  194.5G   /media/lewis/data1  /dev/disk/by-id/nvme-eui.e8238fa6bf530001001b444a49598af9-part1
 ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 ```
 
@@ -198,7 +208,7 @@ Device: /dev/dm-0 (ext4)
   Result: Mounted at /media/lewis/1a, but no GRUB configuration found.
 ------------------------------------------------------------
 
-Device: /dev/dm-1 (ext4)
+Device: /dev/dm-1 (btrfs)
   Result: Mounted at /media/lewis/1b, but no GRUB configuration found.
 ------------------------------------------------------------
 
@@ -476,7 +486,7 @@ Clone one disk or partition to another: clone <src_name/id> <dst_name/id>
 ## Command Reference: `open`
 
 ```text
-Unlock (if encrypted) and mount a disk: open <name>
+Unlock (if encrypted) and mount a disk: open <name/id>
 
         UNDER THE HOOD:
         1.  Identity Resolution: Looks up the friendly name in diskmap.tsv.
@@ -509,7 +519,7 @@ Unlock (if encrypted) and mount a disk: open <name>
 ## Command Reference: `close`
 
 ```text
-Unmount and lock (if encrypted) a disk: close <name>
+Unmount and lock (if encrypted) a disk: close <name/id>
 
         UNDER THE HOOD:
         1.  Unmounting (Encrypted & Plain):
@@ -598,6 +608,7 @@ Defragment a mounted filesystem: defrag <name>
         3.  Execution:
             - ext4:  runs 'sudo e4defrag <mountpoint>'
             - btrfs: runs 'sudo btrfs filesystem defragment -r <mountpoint>'
+                     then 'sudo btrfs balance start -dusage=50 <mountpoint>'
         4.  Recording: Stores a timestamp on the mountpoint root via:
               sudo setfattr -n user.last_defrag -v "<date>" <mountpoint>
 ```
@@ -610,8 +621,13 @@ Filesystem health/diagnostics: fshealth <name>
         Shows filesystem-specific diagnostic output and local "maintenance" timestamps.
 
         - ext4:  sudo tune2fs -l <device>
-                sudo e4defrag -c <mountpoint>   (fragmentation score)
+                sudo e4defrag -c <mountpoint>   (fragmentation score + extents/files ratio)
         - btrfs: sudo btrfs filesystem usage <mountpoint>
+                sudo btrfs filesystem show <mountpoint>
+                sudo btrfs filesystem df <mountpoint>
+                sudo btrfs device stats <mountpoint>
+                sudo btrfs scrub status <mountpoint>
+                sudo compsize <mountpoint>  (extents/files ratio)
         - xfs:   xfs_info <mountpoint>
 
         Also reads xattrs from the mountpoint root:
@@ -643,6 +659,17 @@ Scrub a mounted btrfs filesystem: scrub <name> [--no-watch]
 
 ```text
 Print diskmgr version
+```
+
+## Command Reference: `convert`
+
+```text
+Convert ext4 -> btrfs in place (no data copy): convert <name/id>
+
+        Uses btrfs-convert on an UNMOUNTED ext4 filesystem.
+        - Plain ext4 targets are supported directly.
+        - If target is crypto_LUKS, diskmgr tries to resolve the open payload device
+          (e.g. /dev/mapper/<name> or a crypt child) and convert that.
 ```
 
 ## Configuration
