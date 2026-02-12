@@ -2104,27 +2104,14 @@ class DiskMgrShell(cmd.Cmd):
             for mp in unmounted_targets:
                 cleanup_mountpoint_dir(mp)
 
-            # If the ID points directly at a crypt mapper node, attempt to close it.
+            # For ID-targeted close, do not implicitly lock LUKS.
+            # This path is used heavily for payload/embedded filesystem rows; keep it as unmount-only.
             d_type = (_lsblk_type(dev_from_id) or '').strip().lower()
             if d_type == 'crypt':
-                close_name = os.path.basename(dev_from_id)
-                # cryptsetup close expects the mapper NAME (e.g. "1b"), not the dm-* kernel node.
-                if close_name.startswith('dm-'):
-                    try:
-                        dm_name_file = f"/sys/class/block/{close_name}/dm/name"
-                        if os.path.exists(dm_name_file):
-                            with open(dm_name_file, 'r', encoding='utf-8', errors='replace') as f:
-                                dm_name = f.read().strip()
-                                if dm_name:
-                                    close_name = dm_name
-                    except Exception:
-                        pass
-                log(f"Closing mapping {close_name}...")
-                res = run_command(['cryptsetup', 'close', close_name], sudo=True, check=False)
-                if getattr(res, 'returncode', 1) == 0:
-                    log("Closed.")
+                if unmounted_targets:
+                    log("Unmounted target filesystem. LUKS mapping left open (ID close is unmount-only).")
                 else:
-                    log(f"Could not close crypt mapping {close_name}. It may already be closed or busy.", 'WARN')
+                    log("Target is a crypt mapping but nothing was mounted. LUKS mapping left open (ID close is unmount-only).")
             elif not unmounted_targets:
                 log("Target is not mounted and has no closable crypt mapping.")
             return
