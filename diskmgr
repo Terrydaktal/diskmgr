@@ -17,7 +17,7 @@ from pathlib import Path
 # Configuration
 MAP_FILENAME = 'diskmap.tsv'
 PASSGEN_BIN = 'passgen'
-VERSION = '2.3.4'
+VERSION = '2.3.5'
 
 # ANSI Colors
 class Colors:
@@ -917,7 +917,8 @@ class DiskMgrShell(cmd.Cmd):
         print("      Mounts to /media/$USER/<label> (prefers filesystem label over mapping name).")
         print(f"  {Colors.OKGREEN}close <name/id>{Colors.ENDC}")
         print("      close <name>: unmounts filesystem(s) and closes /dev/mapper/<name> when present (locks LUKS).")
-        print("      close #id: unmount-only for that discovered row; does NOT run cryptsetup close.")
+        print("      close #id (example: close #6): unmount-only for that discovered row; does NOT run cryptsetup close.")
+        print("      Use #id if you want to close only the payload filesystem and keep the LUKS container open.")
         print(f"  {Colors.OKGREEN}luks <passwd|backup|restore|header>{Colors.ENDC}")
         print("      LUKS management for mapped containers (grouped under filesystem workflows):")
         print("      password change, header backup/print, and header restore.")
