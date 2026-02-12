@@ -17,7 +17,7 @@ from pathlib import Path
 # Configuration
 MAP_FILENAME = 'diskmap.tsv'
 PASSGEN_BIN = 'passgen'
-VERSION = '2.4.6'
+VERSION = '2.4.7'
 
 # ANSI Colors
 class Colors:
@@ -896,9 +896,10 @@ class DiskMgrShell(cmd.Cmd):
         print(f"  {Colors.OKGREEN}unmap <name/id>{Colors.ENDC}")
         print("      Removes an existing mapping by name, or by discovery ID (#N).")
         print(f"  {Colors.OKGREEN}format <name/id> [options]{Colors.ENDC}")
-        print("      Formats a mapped disk/partition as a superfloppy-style volume and mounts it.")
+        print("      Whole disk target: creates a superfloppy-style volume and mounts it (plain or LUKS + payload FS).")
+        print("      Partition target: formats inside that partition boundary (not a superfloppy), then mounts it.")
         print("      Whole disks must be unpartitioned. Existing partitions are never created/modified by format.")
-        print("      Use: erase <name> first if the disk is currently partitioned.")
+        print("      Use: erase <name> first if the whole disk is currently partitioned.")
         print(f"  {Colors.OKGREEN}erase <name/id>{Colors.ENDC}")
         print("      Fast metadata wipe for re-provisioning (wipefs + zap GPT/MBR metadata) on disk/part.")
         print("      Whole-disk erase wipes partition signatures/metadata, GPT headers, protective MBR metadata,")
