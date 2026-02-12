@@ -50,8 +50,8 @@ def main():
     commands = [
         'list', 'boot', 'map', 'unmap', 'create', 'format', 'erase', 'nuke',
         'remove', 'selftest', 'health', 'clone', 'open', 'close', 'luks',
-        'label', 'remount', 'sync', 'defrag', 'fshealth', 'scrub', 'version',
-        'convert'
+        'label', 'remount', 'sync', 'diff', 'defrag', 'fshealth', 'scrub',
+        'version', 'convert'
     ]
     
     readme_content = "# Disk Manager (diskmgr)\n\n"

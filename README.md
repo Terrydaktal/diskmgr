@@ -96,6 +96,11 @@ file system (applied to disk/part entries with mountable FSTYPE):
   sync <sec_name> <pri_name>
       Syncs two mounted filesystems (rsync pri -> sec).
       For LUKS: resolves to payload filesystem when open; errors if locked/not mounted.
+  diff <sec_name> <pri_name> [--depth N]
+      Dry-run filesystem diff (rsync pri -> sec): shows create/modify/delete counts+bytes,
+      then a per-folder subtree summary (+new, ~updated, -deleted regular files).
+      Depth default: 2.
+      For LUKS: resolves to payload filesystem when open; errors if locked/not mounted.
   defrag <name>
       Defragments a mounted filesystem and records user.last_defrag xattr.
       On btrfs, runs defragment -r, then balance start -dusage=50.
@@ -141,44 +146,6 @@ Display the physical partition layout and free space for all plugged-in disks.
             - Adds GPT metadata blocks (Primary/Backup) if applicable.
             - Identifies 'free' space segments.
             - Calculates MiB and GiB values from sector counts.
-```
-
-### Example Output
-
-```text
-Disk: /dev/sda (ST1000LM035-1RK172) [gpt] [Sector: L512/P4096] [Total Sectors: 1953525168]
-[ GPT Primary 34s (17408.00B) ] [ free 2014s (1007.00KiB) ] [ sda1 - 262144s (128.00MiB) (msftres, no_automount) ] [ sda2 crypto_LUKS 1953259520s (953740.00MiB ≈ 931.4GiB) (msftdata) ] [ free 1423s (711.50KiB) ] [ GPT Backup 33s (16896.00B) ]
-
- #   NAME  DEVICE           TYPE   FSTYPE       FSLABEL  FSUUID                                SIZE    FSAVAIL  FSMOUNTPOINTS       PERSISTENT PATH (IEEE)
- 1   -     sda              disk                                                               931.5G                               /dev/disk/by-id/wwn-0x5000c500a89d6e44
- 2   -     ├─sda1           part                                                               128M                                 /dev/disk/by-id/wwn-0x5000c500a89d6e44-part1
- 3   1a    └─sda2           part   crypto_LUKS           e038a8b5-d3a7-4bbb-bbea-5bed8cc07a04  931.4G                               /dev/disk/by-id/wwn-0x5000c500a89d6e44-part2
- 4   -         └─dm-0 (1a)  crypt  ext4         1a       5933d845-1098-4f16-ad7f-ff1f4a4a2105  931.4G  18.3G    /media/lewis/1a     -
----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-
-Disk: /dev/sdb (ST2000DM008-2FR102) [none] [Sector: L512/P4096] [Total Sectors: 3907029168]
-[ sdb crypto_LUKS 3907029168s (1907729.09MiB ≈ 1863.0GiB) ]
-
- #   NAME  DEVICE           TYPE   FSTYPE       FSLABEL  FSUUID                                SIZE    FSAVAIL  FSMOUNTPOINTS       PERSISTENT PATH (IEEE)
- 5   1b    sdb              disk   crypto_LUKS           885a66c1-6d5f-4d24-adfd-e7c7975dfe65  1.8T                                 /dev/disk/by-id/wwn-0x5000c500e31e6cb2
- 6   -     └─dm-1 (1b)      crypt  btrfs        1b       08aad883-1143-4d5d-84b9-d715665e332a  1.8T    966.8G   /media/lewis/1b     -
----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-
-Disk: /dev/nvme0n1 (WD_BLACK SN8100 2000GB) [msdos] [Sector: L512/P512] [Total Sectors: 3907029168]
-[ MBR 2s (1024.00B) ] [ free 2046s (1023.00KiB) ] [ nvme0n1p1 ext4 3907026944s (1907728.00MiB ≈ 1863.0GiB) (boot) ] [ free 176s (88.00KiB) ]
-
- #   NAME  DEVICE           TYPE   FSTYPE       FSLABEL  FSUUID                                SIZE    FSAVAIL  FSMOUNTPOINTS       PERSISTENT PATH (IEEE)
- 7   -     nvme0n1          disk                                                               1.8T                                 /dev/disk/by-id/nvme-eui.e8238fa6bf530001001b448b42d60852
- 8   os    └─nvme0n1p1      part   ext4                  88f1dad3-95c6-418e-bea8-f5f3e072ea29  1.8T    765.4G   /                   /dev/disk/by-id/nvme-eui.e8238fa6bf530001001b448b42d60852-part1
----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-
-Disk: /dev/nvme1n1 (WD Blue SN570 1TB) [msdos] [Sector: L512/P512] [Total Sectors: 1953525168]
-[ MBR 2s (1024.00B) ] [ free 2046s (1023.00KiB) ] [ nvme1n1p1 ext4 1953523120s (953868.71MiB ≈ 931.5GiB) ]
-
- #   NAME  DEVICE           TYPE   FSTYPE       FSLABEL  FSUUID                                SIZE    FSAVAIL  FSMOUNTPOINTS       PERSISTENT PATH (IEEE)
- 9   -     nvme1n1          disk                                                               931.5G                               /dev/disk/by-id/nvme-eui.e8238fa6bf530001001b444a49598af9
- 10  data  └─nvme1n1p1      part   ext4         data     72c22012-b161-4e2a-a762-94ff7fda47f9  931.5G  194.5G   /media/lewis/data1  /dev/disk/by-id/nvme-eui.e8238fa6bf530001001b444a49598af9-part1
----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 ```
 
 ## Command Reference: `boot`
@@ -595,6 +562,16 @@ Synchronize two mounted disks: sync <secondary_name> <primary_name>
 
         Note: The SECONDARY disk will be modified to match the PRIMARY disk.
         All files on the secondary that do not exist on the primary will be DELETED.
+```
+
+## Command Reference: `diff`
+
+```text
+Preview differences between two mounted filesystems: diff <secondary_name> <primary_name> [--depth N]
+
+        Uses rsync dry-run itemized output (primary -> secondary) and prints:
+        1) Change counts and byte estimates (created/modified/deleted, net change).
+        2) Folder summary by subtree up to --depth levels.
 ```
 
 ## Command Reference: `defrag`
