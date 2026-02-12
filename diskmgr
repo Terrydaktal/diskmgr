@@ -784,6 +784,7 @@ class DiskMgrShell(cmd.Cmd):
         super().__init__()
         self.mappings = read_luks_map()
         self.unmapped_cache = []
+        self.id_cache = {}
 
     def get_disk_info(self):
         # Use lsblk -J for JSON output
@@ -1074,13 +1075,20 @@ class DiskMgrShell(cmd.Cmd):
         # Discovery cache for map #N:
         # keep only unmapped disk/partition entries and bind to displayed "#" IDs.
         self.unmapped_cache = []
+        # Full ID cache for commands that support #N on displayed rows (disk/part/crypt).
+        self.id_cache = {}
         for r in all_rows:
             try:
+                rid = str(r.get('#') or '').strip()
+                kname = str(r.get('KNAME') or '').strip()
+                rtype = str(r.get('TYPE') or '').strip()
+                if rid and rid != '-' and kname and rtype in ('disk', 'part', 'crypt'):
+                    self.id_cache[rid] = os.path.realpath(f"/dev/{kname}")
+
                 if (r.get('TYPE') or '') not in ('disk', 'part'):
                     continue
                 if (r.get('NAME') or '') != '-':
                     continue
-                rid = str(r.get('#') or '').strip()
                 pdp = str(r.get('PERSISTENT PATH (IEEE)') or '').strip()
                 if not rid or rid == '-' or not pdp or pdp == '-':
                     continue
@@ -2041,7 +2049,7 @@ class DiskMgrShell(cmd.Cmd):
                 log(f"Failed to override mount: {e}. It may be in use.", 'WARN')
 
     def do_close(self, arg):
-        '''Unmount and lock (if encrypted) a disk: close <name>
+        '''Unmount and lock (if encrypted) a disk: close <name/id>
         
         UNDER THE HOOD:
         1.  Unmounting (Encrypted & Plain): 
@@ -2053,10 +2061,64 @@ class DiskMgrShell(cmd.Cmd):
             - Removes the virtual cleartext device from /dev/mapper/.
         3.  Audit: Checks and displays remaining active mappings for security awareness.
         '''
-        name = arg.strip()
-        if not name:
-            log("Usage: close <name>", 'ERROR')
+        target = arg.strip()
+        if not target:
+            log("Usage: close <name/id>", 'ERROR')
             return
+
+        # Support discovery IDs (#N) from the latest `list` output.
+        if target.startswith('#') and target[1:].isdigit():
+            rid = target[1:]
+            dev_from_id = self.id_cache.get(rid)
+            if not dev_from_id:
+                log(f"Unknown discovery ID: {target}. Run 'list' first to refresh IDs.", 'ERROR')
+                return
+            dev_from_id = os.path.realpath(dev_from_id)
+
+            # If this ID corresponds to an existing friendly mapping, delegate to close <name>
+            # so LUKS mapper-name semantics (cryptsetup close <name>) are preserved.
+            self.mappings = read_luks_map()
+            mapped_name = None
+            for n, p in self.mappings.items():
+                try:
+                    if os.path.realpath(p) == dev_from_id:
+                        mapped_name = n
+                        break
+                except Exception:
+                    continue
+            if mapped_name:
+                return self.do_close(mapped_name)
+
+            # Otherwise perform a direct close by device path.
+            if self._block_if_root_drive(dev_from_id, f"close {target}"):
+                return
+
+            run_command(['sudo', '-v'])  # Refresh sudo
+
+            targets = find_mount_targets(dev_from_id)
+            unmounted_targets = []
+            for mp in targets:
+                log(f"Unmounting {mp}...")
+                run_command(['umount', mp], sudo=True)
+                unmounted_targets.append(mp)
+            for mp in unmounted_targets:
+                cleanup_mountpoint_dir(mp)
+
+            # If the ID points directly at a crypt mapper node, attempt to close it.
+            d_type = (_lsblk_type(dev_from_id) or '').strip().lower()
+            if d_type == 'crypt':
+                close_name = os.path.basename(dev_from_id)
+                log(f"Closing mapping {close_name}...")
+                res = run_command(['cryptsetup', 'close', close_name], sudo=True, check=False)
+                if getattr(res, 'returncode', 1) == 0:
+                    log("Closed.")
+                else:
+                    log(f"Could not close crypt mapping {close_name}. It may already be closed or busy.", 'WARN')
+            elif not unmounted_targets:
+                log("Target is not mounted and has no closable crypt mapping.")
+            return
+
+        name = target
 
         # Never attempt unmount/close operations on the system root drive.
         self.mappings = read_luks_map()
