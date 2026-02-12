@@ -4047,6 +4047,14 @@ class DiskMgrShell(cmd.Cmd):
                 res_f = run_command([e4defrag_bin, '-c', mnt], sudo=True, capture_output=True, check=False)
                 frag_out = (getattr(res_f, 'stdout', '') or '') + (getattr(res_f, 'stderr', '') or '')
                 m = re.search(r"(?im)Fragmentation score(?: is)?\s*([0-9]+)\b", frag_out)
+                m_tb = re.search(
+                    r"(?im)^\s*Total/best\s+extents\s*:?\s*([0-9][0-9,]*)\s*/\s*([0-9][0-9,]*)\s*$",
+                    frag_out,
+                )
+                m_avg = re.search(
+                    r"(?im)^\s*Average\s+size\s+per\s+extent\s*:?\s*(.+?)\s*$",
+                    frag_out,
+                )
                 if m:
                     try:
                         score = int(m.group(1), 10)
@@ -4056,11 +4064,37 @@ class DiskMgrShell(cmd.Cmd):
                         # e4defrag convention: 0-30: no problem, 31-55: a little, 56+: should defrag.
                         if score <= 30:
                             state = f"{Colors.OKGREEN}GOOD{Colors.ENDC}"
+                            recommendation = "No defragmentation needed."
                         elif score <= 55:
                             state = f"{Colors.WARNING}MEDIUM{Colors.ENDC}"
+                            recommendation = "Defragmentation optional; run if you see slowdown."
                         else:
                             state = f"{Colors.FAIL}BAD{Colors.ENDC}"
-                        print(f"{Colors.BOLD}Defragmentation state:{Colors.ENDC} {state} (ext4 fragmentation score {score})")
+                            recommendation = "Defragmentation recommended."
+
+                        extra_details = ""
+                        if m_tb:
+                            try:
+                                total_extents = int(m_tb.group(1).replace(",", ""), 10)
+                                best_extents = int(m_tb.group(2).replace(",", ""), 10)
+                                extra_extents = max(total_extents - best_extents, 0)
+                                overhead_pct = (extra_extents / float(best_extents) * 100.0) if best_extents > 0 else 0.0
+                                extra_details += (
+                                    f"; extents {total_extents}/{best_extents} "
+                                    f"(+{extra_extents}, {overhead_pct:.2f}% overhead)"
+                                )
+                            except ValueError:
+                                pass
+                        if m_avg:
+                            avg_extent = (m_avg.group(1) or "").strip()
+                            if avg_extent:
+                                extra_details += f"; avg extent size {avg_extent}"
+
+                        print(
+                            f"{Colors.BOLD}Defragmentation state:{Colors.ENDC} "
+                            f"{state} (ext4 fragmentation score {score}{extra_details})"
+                        )
+                        print(f"{Colors.BOLD}Defragmentation note:{Colors.ENDC} {recommendation}")
                 else:
                     print(f"{Colors.BOLD}Defragmentation state:{Colors.ENDC} - (could not parse e4defrag score)")
             else:
