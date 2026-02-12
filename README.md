@@ -61,9 +61,13 @@ disk/part (applied to mapped disk/partition targets):
   unmap <name/id>
       Removes an existing mapping by name, or by discovery ID (#N).
   format <name/id> [options]
-      Formats a mapped disk/partition as a superfloppy-style volume and mounts it.
-      Whole disks must be unpartitioned. Existing partitions are never created/modified by format.
-      Use: erase <name> first if the disk is currently partitioned.
+      Whole disk target: creates a superfloppy-style volume and mounts it.
+      Partition target: formats inside that partition boundary (not a superfloppy), then mounts it.
+      Default is plain format. Use --luks to run cryptsetup luksFormat, open a mapper,
+      then mkfs the decrypted payload filesystem inside the LUKS container.
+      Whole disks must be unpartitioned. format never creates, deletes, resizes, or moves partitions;
+      it only writes a filesystem/LUKS+filesystem inside the selected disk or partition target.
+      Use: erase <name> first if the whole disk is currently partitioned.
   erase <name/id>
       Fast metadata wipe for re-provisioning (wipefs + zap GPT/MBR metadata) on disk/part.
       Whole-disk erase wipes partition signatures/metadata, GPT headers, protective MBR metadata,
@@ -94,10 +98,10 @@ file system (applied to disk/part entries with mountable FSTYPE):
   remount <name>
       Move an OPEN disk's mount to /media/$USER/<label> and clean old empty mountpoint dirs.
       For LUKS: acts on payload filesystem when open; errors if locked.
-  sync <sec_name> <pri_name>
+  sync <pri_name> <sec_name>
       Syncs two mounted filesystems (rsync pri -> sec).
       For LUKS: resolves to payload filesystem when open; errors if locked/not mounted.
-  diff <sec_name> <pri_name> [--depth N]
+  diff <pri_name> <sec_name> [--depth N]
       Dry-run filesystem diff (rsync pri -> sec): shows create/modify/delete counts+bytes,
       then a per-folder subtree summary (+new, ~updated, -deleted regular files).
       Depth default: 2.
@@ -327,18 +331,20 @@ Format a superfloppy disk/partition volume: format <name/id> [options]
         Options:
           --fs <ext4|xfs|btrfs>   Filesystem type (default: ext4)
           --label <label>   Set a different internal filesystem label (other than <name>)
-          --plain           Create a non-encrypted disk (skips LUKS)
+          --luks            Encrypt target first with LUKS2, then format payload filesystem
 
         UNDER THE HOOD:
         1.  Safety: Refuses to run if anything is mounted on the target device tree.
         2.  Disk Type Policy:
             - If target is a whole disk, it must be unpartitioned (no GPT/MBR table present).
             - If target is a partition, format is applied directly within that partition.
-        3.  LUKS Format (Default):
+        3.  LUKS Format (only when --luks is used):
             - Uses 'passgen' to generate a master key.
             - Runs 'cryptsetup luksFormat' with LUKS2 encryption.
+            - Opens the container as /dev/mapper/<name>.
         4.  Filesystem:
-            - Formats the cleartext device with ext4, xfs, or btrfs.
+            - Plain mode (default): formats target directly with ext4, xfs, or btrfs.
+            - --luks mode: formats the opened mapper payload with ext4, xfs, or btrfs.
             - (ext4 only): Reclaims the 5% reserved space for root using 'tune2fs -m 0'.
         5.  Persistence: Adds the new disk's PDP to diskmap.tsv automatically (best-effort).
 
@@ -592,7 +598,7 @@ Remount an OPEN disk to its label mountpoint: remount <name>
 ## Command Reference: `sync`
 
 ```text
-Synchronize two mounted disks: sync <secondary_name> <primary_name>
+Synchronize two mounted disks: sync <primary_name> <secondary_name>
 
         UNDER THE HOOD:
         1.  Validation: Verifies both disks are mapped and currently mounted.
@@ -606,7 +612,7 @@ Synchronize two mounted disks: sync <secondary_name> <primary_name>
 ## Command Reference: `diff`
 
 ```text
-Preview differences between two mounted filesystems: diff <secondary_name> <primary_name> [--depth N]
+Preview differences between two mounted filesystems: diff <primary_name> <secondary_name> [--depth N]
 
         Uses rsync dry-run itemized output (primary -> secondary) and prints:
         1) Change counts and byte estimates (created/modified/deleted, net change).
