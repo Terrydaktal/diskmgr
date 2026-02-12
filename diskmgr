@@ -911,7 +911,7 @@ class DiskMgrShell(cmd.Cmd):
         print("      Clones one disk/partition to another (requires target >= source size).")
 
         print(f"\n{Colors.BOLD}file system (applied to disk/part entries with mountable FSTYPE):{Colors.ENDC}")
-        print(f"  {Colors.OKGREEN}open <name>{Colors.ENDC}")
+        print(f"  {Colors.OKGREEN}open <name/id>{Colors.ENDC}")
         print("      Opens and mounts a plain or encrypted superfloppy disk/partition.")
         print("      For encrypted targets, unlocks LUKS then mounts payload filesystem.")
         print("      Mounts to /media/$USER/<label> (prefers filesystem label over mapping name).")
@@ -1850,7 +1850,7 @@ class DiskMgrShell(cmd.Cmd):
             log(f"Removed {len(to_remove)} mappings for {resolved_real}: {', '.join(to_remove)}")
 
     def do_open(self, arg):
-        '''Unlock (if encrypted) and mount a disk: open <name>
+        '''Unlock (if encrypted) and mount a disk: open <name/id>
         
         UNDER THE HOOD:
         1.  Identity Resolution: Looks up the friendly name in diskmap.tsv.
@@ -1879,17 +1879,38 @@ class DiskMgrShell(cmd.Cmd):
           it is unambiguous (exactly one candidate). Otherwise it will refuse and ask you to map
           the correct partition explicitly.
         '''
-        name = arg.strip()
-        if not name:
-             log("Usage: open <name>", 'ERROR')
+        target = arg.strip()
+        if not target:
+             log("Usage: open <name/id>", 'ERROR')
              return
-             
+
         self.mappings = read_luks_map()
-        if name not in self.mappings:
-            log(f"Unknown mapping: {name}. Use 'list' to find Discovery IDs and 'map' them first.", 'ERROR')
-            return
-            
-        src = self.mappings[name]
+        mapping_name = None
+        src = None
+
+        if target.startswith('#') and target[1:].isdigit():
+            rid = target[1:]
+            src = self.id_cache.get(rid)
+            if not src:
+                # Backward-compatible fallback (unmapped discovery subset).
+                src = self.resolve_target(target, allow_id=True)
+            if not src:
+                log(f"Unknown discovery ID: {target}. Run 'list' first to refresh IDs.", 'ERROR')
+                return
+            src_real = os.path.realpath(src)
+            for n, p in self.mappings.items():
+                try:
+                    if os.path.realpath(p) == src_real:
+                        mapping_name = n
+                        break
+                except Exception:
+                    continue
+        else:
+            mapping_name = target
+            if mapping_name not in self.mappings:
+                log(f"Unknown mapping: {mapping_name}. Use 'list' to find Discovery IDs and 'map' them first.", 'ERROR')
+                return
+            src = self.mappings[mapping_name]
         
         # Wait for device
         log(f"Waiting for device {src}...")
@@ -1903,7 +1924,8 @@ class DiskMgrShell(cmd.Cmd):
             return
             
         mapped_devnode = os.path.realpath(src)
-        if self._block_if_root_drive(mapped_devnode, f"open {name}"):
+        op_ref = mapping_name or target
+        if self._block_if_root_drive(mapped_devnode, f"open {op_ref}"):
             return
         devnode = mapped_devnode
 
@@ -1931,21 +1953,21 @@ class DiskMgrShell(cmd.Cmd):
 
                     if len(luks_parts) == 1:
                         part_path = os.path.realpath(f"/dev/{luks_parts[0]['name']}")
-                        log(f"Mapping '{name}' points to disk {mapped_devnode}, but LUKS was detected on {part_path}. Using the partition for open.")
+                        log(f"Target '{op_ref}' points to disk {mapped_devnode}, but LUKS was detected on {part_path}. Using the partition for open.")
                         devnode = part_path
                         is_luks = True
                     elif len(luks_parts) > 1:
-                        log(f"Mapping '{name}' points to disk {mapped_devnode}, but multiple LUKS partitions were found.", 'ERROR')
+                        log(f"Target '{op_ref}' points to disk {mapped_devnode}, but multiple LUKS partitions were found.", 'ERROR')
                         for p in luks_parts:
                             log(f"  candidate: /dev/{p['name']} (fstype={p.get('fstype')})", 'ERROR')
-                        log(f"Please map the correct partition (e.g. map <id> {name}_part) and open that mapping.", 'ERROR')
+                        log("Please map the correct partition explicitly and open that mapping.", 'ERROR')
                         return
                     elif len(fs_parts) == 1:
                         part_path = os.path.realpath(f"/dev/{fs_parts[0]['name']}")
-                        log(f"Mapping '{name}' points to disk {mapped_devnode}, but a filesystem was detected on {part_path} ({fs_parts[0].get('fstype')}). Using the partition for open.")
+                        log(f"Target '{op_ref}' points to disk {mapped_devnode}, but a filesystem was detected on {part_path} ({fs_parts[0].get('fstype')}). Using the partition for open.")
                         devnode = part_path
                     elif len(fs_parts) > 1:
-                        log(f"Mapping '{name}' points to disk {mapped_devnode}, but multiple filesystem partitions were found.", 'ERROR')
+                        log(f"Target '{op_ref}' points to disk {mapped_devnode}, but multiple filesystem partitions were found.", 'ERROR')
                         for p in fs_parts:
                             log(f"  candidate: /dev/{p['name']} (fstype={p.get('fstype')})", 'ERROR')
                         log("Please map the correct partition explicitly and open that mapping.", 'ERROR')
@@ -1971,18 +1993,21 @@ class DiskMgrShell(cmd.Cmd):
                     return
                 log(f"Device {devnode} is not LUKS, but has a filesystem ({fs}). Proceeding with plain mount.")
 
-        mapper_path = f"/dev/mapper/{name}"
-        target_to_mount = mapper_path
+        mapper_path = f"/dev/mapper/{mapping_name}" if mapping_name else None
+        target_to_mount = mapper_path if mapper_path else devnode
 
         if is_luks:
+            if not mapping_name:
+                log("ID target points to a LUKS container. Map it first (map #N <name>) and run open <name>.", 'ERROR')
+                return
             if not os.path.exists(mapper_path):
-                log(f"Opening LUKS mapping {name}...")
+                log(f"Opening LUKS mapping {mapping_name}...")
                 # Use passgen
                 pg_cmd = subprocess.Popen([PASSGEN_BIN], stdout=subprocess.PIPE, text=True)
                 # Pipe to cryptsetup
                 try:
                     run_command(
-                        ['cryptsetup', 'open', '--key-file', '-', src, name],
+                        ['cryptsetup', 'open', '--key-file', '-', src, mapping_name],
                         input_str=pg_cmd.communicate()[0],
                         sudo=True,
                         check=True
@@ -1998,7 +2023,7 @@ class DiskMgrShell(cmd.Cmd):
             target_to_mount = devnode
 
         # Detect label for mountpoint
-        mount_name = name
+        mount_name = mapping_name if mapping_name else os.path.basename(devnode)
         try:
             res_b = run_command(['blkid', '-o', 'value', '-s', 'LABEL', target_to_mount], sudo=True, check=False)
             if res_b.stdout.strip():
