@@ -17,7 +17,7 @@ from pathlib import Path
 # Configuration
 MAP_FILENAME = 'diskmap.tsv'
 PASSGEN_BIN = 'passgen'
-VERSION = '2.4.3'
+VERSION = '2.4.5'
 
 # ANSI Colors
 class Colors:
@@ -908,7 +908,8 @@ class DiskMgrShell(cmd.Cmd):
         print(f"  {Colors.OKGREEN}remove <name/id>{Colors.ENDC}")
         print("      Removes a partition from its parent disk (partition targets only).")
         print(f"  {Colors.OKGREEN}clone <src_name/id> <dst_name/id>{Colors.ENDC}")
-        print("      Clones one disk/partition to another (requires target >= source size).")
+        print("      Bit-perfect block-level clone using ddrescue (requires target >= source size).")
+        print("      Includes a multi-pass rescue phase to recover data from failing sectors.")
 
         print(f"\n{Colors.BOLD}file system (applied to disk/part entries with mountable FSTYPE):{Colors.ENDC}")
         print(f"  {Colors.OKGREEN}open <name/id>{Colors.ENDC}")

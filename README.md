@@ -73,7 +73,8 @@ disk/part (applied to mapped disk/partition targets):
   remove <name/id>
       Removes a partition from its parent disk (partition targets only).
   clone <src_name/id> <dst_name/id>
-      Clones one disk/partition to another (requires target >= source size).
+      Bit-perfect block-level clone using ddrescue (requires target >= source size).
+      Includes a multi-pass rescue phase to recover data from failing sectors.
 
 file system (applied to disk/part entries with mountable FSTYPE):
   open <name/id>
@@ -148,6 +149,44 @@ Display the physical partition layout and free space for all plugged-in disks.
             - Calculates MiB and GiB values from sector counts.
 ```
 
+### Example Output
+
+```text
+Disk: /dev/sda (ST1000LM035-1RK172) [gpt] [Sector: L512/P4096] [Total Sectors: 1953525168]
+[ GPT Primary 34s (17408.00B) ] [ free 2014s (1007.00KiB) ] [ sda1 - 262144s (128.00MiB) (msftres, no_automount) ] [ sda2 crypto_LUKS 1953259520s (953740.00MiB ≈ 931.4GiB) (msftdata) ] [ free 1423s (711.50KiB) ] [ GPT Backup 33s (16896.00B) ]
+
+ #   NAME  DEVICE           TYPE   FSTYPE       FSLABEL  FSUUID                                SIZE    FSAVAIL  FSMOUNTPOINTS       PERSISTENT PATH (IEEE)
+ 1   -     sda              disk                                                               931.5G                               /dev/disk/by-id/wwn-0x5000c500a89d6e44
+ 2   -     ├─sda1           part                                                               128M                                 /dev/disk/by-id/wwn-0x5000c500a89d6e44-part1
+ 3   1a    └─sda2           part   crypto_LUKS           e038a8b5-d3a7-4bbb-bbea-5bed8cc07a04  931.4G                               /dev/disk/by-id/wwn-0x5000c500a89d6e44-part2
+ 4   -         └─dm-0 (1a)  crypt  ext4         1a       5933d845-1098-4f16-ad7f-ff1f4a4a2105  931.4G  18.3G    /media/lewis/1a     -
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+Disk: /dev/sdb (ST2000DM008-2FR102) [none] [Sector: L512/P4096] [Total Sectors: 3907029168]
+[ sdb crypto_LUKS 3907029168s (1907729.09MiB ≈ 1863.0GiB) ]
+
+ #   NAME  DEVICE           TYPE   FSTYPE       FSLABEL  FSUUID                                SIZE    FSAVAIL  FSMOUNTPOINTS       PERSISTENT PATH (IEEE)
+ 5   1b    sdb              disk   crypto_LUKS           885a66c1-6d5f-4d24-adfd-e7c7975dfe65  1.8T                                 /dev/disk/by-id/wwn-0x5000c500e31e6cb2
+ 6   -     └─dm-1 (1b)      crypt  btrfs        1b       08aad883-1143-4d5d-84b9-d715665e332a  1.8T    966.8G   /media/lewis/1b     -
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+Disk: /dev/nvme0n1 (WD_BLACK SN8100 2000GB) [msdos] [Sector: L512/P512] [Total Sectors: 3907029168]
+[ MBR 2s (1024.00B) ] [ free 2046s (1023.00KiB) ] [ nvme0n1p1 ext4 3907026944s (1907728.00MiB ≈ 1863.0GiB) (boot) ] [ free 176s (88.00KiB) ]
+
+ #   NAME  DEVICE           TYPE   FSTYPE       FSLABEL  FSUUID                                SIZE    FSAVAIL  FSMOUNTPOINTS       PERSISTENT PATH (IEEE)
+ 7   -     nvme0n1          disk                                                               1.8T                                 /dev/disk/by-id/nvme-eui.e8238fa6bf530001001b448b42d60852
+ 8   os    └─nvme0n1p1      part   ext4                  88f1dad3-95c6-418e-bea8-f5f3e072ea29  1.8T    765.4G   /                   /dev/disk/by-id/nvme-eui.e8238fa6bf530001001b448b42d60852-part1
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+Disk: /dev/nvme1n1 (WD Blue SN570 1TB) [msdos] [Sector: L512/P512] [Total Sectors: 1953525168]
+[ MBR 2s (1024.00B) ] [ free 2046s (1023.00KiB) ] [ nvme1n1p1 ext4 1953523120s (953868.71MiB ≈ 931.5GiB) ]
+
+ #   NAME  DEVICE           TYPE   FSTYPE       FSLABEL  FSUUID                                SIZE    FSAVAIL  FSMOUNTPOINTS       PERSISTENT PATH (IEEE)
+ 9   -     nvme1n1          disk                                                               931.5G                               /dev/disk/by-id/nvme-eui.e8238fa6bf530001001b444a49598af9
+ 10  data  └─nvme1n1p1      part   ext4         data     72c22012-b161-4e2a-a762-94ff7fda47f9  931.5G  194.5G   /media/lewis/data1  /dev/disk/by-id/nvme-eui.e8238fa6bf530001001b444a49598af9-part1
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+```
+
 ## Command Reference: `boot`
 
 ```text
@@ -156,6 +195,54 @@ Display boot entries from the GRUB configuration of all disks.
         UNDER THE HOOD:
         Scans all block devices. If mounted, it parses /boot/grub/grub.cfg.
         If unmounted or encrypted, it explains why it cannot yet read the config.
+```
+
+### Example Output
+
+```text
+--- System Boot Configuration Scan ---
+
+Device: /dev/sda1 (unknown FS)
+  Result: No recognizable filesystem found.
+------------------------------------------------------------
+
+Device: /dev/sda2 (crypto_LUKS)
+  Result: LUKS container is LOCKED. Please 'open' this disk to scan for boot entries.
+------------------------------------------------------------
+
+Device: /dev/dm-0 (ext4)
+  Result: Mounted at /media/lewis/1a, but no GRUB configuration found.
+------------------------------------------------------------
+
+Device: /dev/dm-1 (btrfs)
+  Result: Mounted at /media/lewis/1b, but no GRUB configuration found.
+------------------------------------------------------------
+
+Device: /dev/nvme0n1p1 (ext4)
+  Result: Found GRUB config at /boot/grub/grub.cfg
+
+Top-level
+  └─ Linux Mint 22.1 Xfce                                                      SEARCH=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]  ROOT=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]
+
+Advanced options for Linux Mint 22.1 Xfce
+  ├─ Linux Mint 22.1 Xfce, with Linux 6.17.9-061709-generic                    SEARCH=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]  ROOT=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]
+  ├─ Linux Mint 22.1 Xfce, with Linux 6.17.9-061709-generic (recovery mode)    SEARCH=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]  ROOT=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]
+  ├─ Linux Mint 22.1 Xfce, with Linux 6.16.12-061612-generic                   SEARCH=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]  ROOT=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]
+  ├─ Linux Mint 22.1 Xfce, with Linux 6.16.12-061612-generic (recovery mode)   SEARCH=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]  ROOT=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]
+  ├─ Linux Mint 22.1 Xfce, with Linux 6.16.0-061600-generic                    SEARCH=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]  ROOT=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]
+  ├─ Linux Mint 22.1 Xfce, with Linux 6.16.0-061600-generic (recovery mode)    SEARCH=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]  ROOT=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]
+  ├─ Linux Mint 22.1 Xfce, with Linux 6.8.0-100-generic                        SEARCH=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]  ROOT=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]
+  ├─ Linux Mint 22.1 Xfce, with Linux 6.8.0-100-generic (recovery mode)        SEARCH=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]  ROOT=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]
+  ├─ Linux Mint 22.1 Xfce, with Linux 6.8.0-88-generic                         SEARCH=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]  ROOT=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]
+  ├─ Linux Mint 22.1 Xfce, with Linux 6.8.0-88-generic (recovery mode)         SEARCH=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]  ROOT=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]
+  ├─ Linux Mint 22.1 Xfce, with Linux 6.8.0-51-generic                         SEARCH=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]  ROOT=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]
+  ├─ Linux Mint 22.1 Xfce, with Linux 6.8.0-51-generic (recovery mode)         SEARCH=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]  ROOT=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]
+  └─ UEFI Firmware Settings                                                    SEARCH=(firmware)                           [-]  ROOT=(firmware)                           [-]
+------------------------------------------------------------
+
+Device: /dev/nvme1n1p1 (ext4)
+  Result: Mounted at /media/lewis/data1, but no GRUB configuration found.
+------------------------------------------------------------
 ```
 
 ## Command Reference: `map`
