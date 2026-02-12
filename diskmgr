@@ -461,7 +461,13 @@ def _lsblk_type(dev_path):
 
 def _lsblk_fstype(dev_path):
     res = run_command(['lsblk', '-no', 'FSTYPE', dev_path], check=False)
-    return (getattr(res, 'stdout', '') or '').strip()
+    out = (getattr(res, 'stdout', '') or '')
+    # lsblk may return multiple rows (device + children); use only the target's first row.
+    for line in out.splitlines():
+        line = line.strip()
+        if line:
+            return line
+    return ""
 
 def _lsblk_partitions(dev_path):
     """
