@@ -12,6 +12,7 @@ import random
 import re
 import shutil
 import datetime
+import threading
 from pathlib import Path
 
 # Configuration
@@ -3897,21 +3898,6 @@ class DiskMgrShell(cmd.Cmd):
 
         run_command(['sudo', '-v'])
 
-        cmd = [
-            'rsync', '-anH', '--delete', '--itemize-changes',
-            '--out-format=%i\t%l\t%n',
-            src_path, dst_path
-        ]
-        res = run_command(cmd, sudo=True, capture_output=True, check=False)
-
-        if getattr(res, 'returncode', 0) not in (0, 24):
-            log(f"rsync dry-run exited with status {res.returncode}. Output may be incomplete.", 'WARN')
-
-        out = (getattr(res, 'stdout', '') or '')
-        err = (getattr(res, 'stderr', '') or '')
-        if err.strip():
-            print(err.rstrip(), file=sys.stderr)
-
         def _parse_int(s):
             m = re.search(r"[0-9][0-9,]*", str(s or ""))
             if not m:
@@ -3946,6 +3932,55 @@ class DiskMgrShell(cmd.Cmd):
                 seen[k] = True
                 counts[(k, kind)] = counts.get((k, kind), 0) + 1
 
+        def _batch_stat_sizes(base_path, relpaths, chunk_size=512):
+            """
+            Resolve file sizes for many destination-relative paths using batched stat calls.
+            Falls back to os.stat for paths missing from batched output.
+            Returns: {relpath: size_bytes}
+            """
+            sizes = {}
+            if not relpaths:
+                return sizes
+
+            unique_relpaths = list(dict.fromkeys(relpaths))
+            for i in range(0, len(unique_relpaths), chunk_size):
+                chunk_rel = unique_relpaths[i:i + chunk_size]
+                abs_chunk = []
+                abs_to_rel = {}
+                for rel in chunk_rel:
+                    ap = os.path.join(base_path, rel)
+                    abs_chunk.append(ap)
+                    abs_to_rel[ap] = rel
+
+                seen_rel = set()
+                res_stat = run_command(
+                    ['stat', '-c', '%n\t%s', '--'] + abs_chunk,
+                    sudo=True,
+                    capture_output=True,
+                    check=False
+                )
+                out_stat = (getattr(res_stat, 'stdout', '') or '')
+                for line in out_stat.splitlines():
+                    line = (line or '').rstrip('\n')
+                    if '\t' not in line:
+                        continue
+                    out_path, out_size = line.rsplit('\t', 1)
+                    rel = abs_to_rel.get(out_path)
+                    if not rel:
+                        continue
+                    sizes[rel] = _parse_int(out_size)
+                    seen_rel.add(rel)
+
+                for rel in chunk_rel:
+                    if rel in seen_rel:
+                        continue
+                    ap = os.path.join(base_path, rel)
+                    try:
+                        st = os.stat(ap)
+                        sizes[rel] = int(st.st_size)
+                    except OSError:
+                        pass
+
         # Summary 1 counters
         new_files = 0
         mod_files = 0
@@ -3954,6 +3989,8 @@ class DiskMgrShell(cmd.Cmd):
         new_bytes = 0
         mod_bytes = 0
         del_bytes = 0
+        pending_delete_paths = []
+        modified_entries = []
 
         # Summary 2 counters (folder view)
         seen = {}
@@ -3962,7 +3999,31 @@ class DiskMgrShell(cmd.Cmd):
         total_upd = 0
         total_del = 0
 
-        for raw in out.splitlines():
+        cmd = [
+            'sudo', 'rsync', '-anH', '--delete', '--itemize-changes',
+            '--out-format=%i\t%l\t%n',
+            src_path, dst_path
+        ]
+        stderr_lines = []
+
+        def _drain_stderr(stream, sink):
+            try:
+                for line in stream:
+                    sink.append(line)
+            except Exception:
+                pass
+
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1
+        )
+        stderr_thread = threading.Thread(target=_drain_stderr, args=(proc.stderr, stderr_lines), daemon=True)
+        stderr_thread.start()
+
+        for raw in proc.stdout:
             line = (raw or "").rstrip()
             if not line:
                 continue
@@ -3990,14 +4051,8 @@ class DiskMgrShell(cmd.Cmd):
                     if del_size is not None and del_size > 0:
                         del_bytes += del_size
                     else:
-                        # Best-effort size lookup on destination for deleted files.
-                        # rsync delete lines often report 0 size; fall back to stat().
-                        try:
-                            dp = os.path.join(dst_path, p)
-                            if os.path.isfile(dp):
-                                del_bytes += os.path.getsize(dp)
-                        except Exception:
-                            pass
+                        # rsync delete lines often report 0 size; resolve after parse in batches.
+                        pending_delete_paths.append(p)
                 continue
 
             parts = line.split('\t', 2)
@@ -4020,9 +4075,31 @@ class DiskMgrShell(cmd.Cmd):
             if item.startswith('>f') and not item.startswith('>f+'):
                 mod_files += 1
                 total_upd += 1
-                mod_bytes += size_b
+                modified_entries.append((relp, size_b))
                 _add_subtree('upd', relp, seen, c)
                 continue
+
+        if proc.stdout:
+            proc.stdout.close()
+        rc = proc.wait()
+        stderr_thread.join(timeout=1.0)
+
+        if rc not in (0, 24):
+            log(f"rsync dry-run exited with status {rc}. Output may be incomplete.", 'WARN')
+        err = "".join(stderr_lines)
+        if err.strip():
+            print(err.rstrip(), file=sys.stderr)
+
+        # Batch-resolve file sizes for delete fallback and modified destination sizes.
+        if pending_delete_paths:
+            del_sizes = _batch_stat_sizes(dst_path, pending_delete_paths)
+            for rel in pending_delete_paths:
+                del_bytes += del_sizes.get(rel, 0)
+
+        if modified_entries:
+            mod_dst_sizes = _batch_stat_sizes(dst_path, [rel for rel, _ in modified_entries])
+            for rel, src_size in modified_entries:
+                mod_bytes += src_size - mod_dst_sizes.get(rel, 0)
 
         print(f"Created files:  {new_files}")
         print(f"Modified files: {mod_files}")
