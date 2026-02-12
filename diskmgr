@@ -17,7 +17,7 @@ from pathlib import Path
 # Configuration
 MAP_FILENAME = 'diskmap.tsv'
 PASSGEN_BIN = 'passgen'
-VERSION = '2.0.0'
+VERSION = '2.1.4'
 
 # ANSI Colors
 class Colors:
