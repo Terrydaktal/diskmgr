@@ -17,7 +17,7 @@ from pathlib import Path
 # Configuration
 MAP_FILENAME = 'diskmap.tsv'
 PASSGEN_BIN = 'passgen'
-VERSION = '2.1.4'
+VERSION = '2.1.5'
 
 # ANSI Colors
 class Colors:
@@ -1098,6 +1098,8 @@ class DiskMgrShell(cmd.Cmd):
                     # Common case: blank disk or missing/corrupt partition table.
                     # Avoid noisy "Command failed" logs and present a human-readable reason.
                     stderr = (getattr(res, 'stderr', '') or '').strip()
+                    disk_fstype = (_lsblk_fstype(dev_path) or "").strip()
+                    has_whole_disk_fs = bool(disk_fstype)
 
                     # Fall back to blockdev sector sizes for a useful header.
                     ls = run_command(['blockdev', '--getss', dev_path], sudo=True, check=False).stdout.strip()
@@ -1111,10 +1113,26 @@ class DiskMgrShell(cmd.Cmd):
 
                     print(f"\n{Colors.BOLD}Disk: {dev_path} ({model}) [none] [Sector: L{logical_sector}/P{physical_sector}] [Total Sectors: {total_logical_sectors}]{Colors.ENDC}")
                     if stderr:
-                        if "unrecognised disk label" in stderr.lower():
+                        if has_whole_disk_fs and "unrecognised disk label" in stderr.lower():
+                            # Superfloppy / whole-disk filesystem (including crypto_LUKS) is expected
+                            # to have no partition table; don't show this as a warning.
+                            pass
+                        elif "unrecognised disk label" in stderr.lower():
                             log(f"{dev_path}: no partition table (unrecognized disk label).", 'WARN')
                         else:
                             log(f"{dev_path}: could not read partition layout: {stderr}", 'WARN')
+
+                    if has_whole_disk_fs:
+                        size_bytes = total_logical_sectors * logical_sector
+                        if size_bytes < 1024:
+                            size_info = f"{size_bytes:.2f}B"
+                        elif size_bytes < 1024**2:
+                            size_info = f"{size_bytes/1024:.2f}KiB"
+                        elif size_bytes < 1024**3:
+                            size_info = f"{size_bytes/(1024**2):.2f}MiB"
+                        else:
+                            size_info = f"{size_bytes/(1024**2):.2f}MiB ≈ {size_bytes/(1024**3):.1f}GiB"
+                        print(f"{Colors.OKGREEN}[ {d_name} {disk_fstype} {total_logical_sectors}s ({size_info}) ]{Colors.ENDC}")
 
                     # Still show lsblk hierarchy so the user can see what's on the disk.
                     rows = disk_rows.get(d_name, [])
