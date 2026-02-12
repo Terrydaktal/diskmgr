@@ -3987,10 +3987,11 @@ class DiskMgrShell(cmd.Cmd):
                     del_files += 1
                     total_del += 1
                     _add_subtree('del', p, seen, c)
-                    if del_size is not None:
+                    if del_size is not None and del_size > 0:
                         del_bytes += del_size
                     else:
-                        # Best-effort size lookup on destination for deleted regular files.
+                        # Best-effort size lookup on destination for deleted files.
+                        # rsync delete lines often report 0 size; fall back to stat().
                         try:
                             dp = os.path.join(dst_path, p)
                             if os.path.isfile(dp):
@@ -4028,11 +4029,11 @@ class DiskMgrShell(cmd.Cmd):
         print(f"Deleted files:  {del_files}")
         print(f"Deleted dirs:   {del_dirs}")
         print("-----------------------")
-        print(f"New Data:       {new_bytes / 1024 / 1024 / 1024:.2f} GiB")
-        print(f"Updated Data:   {mod_bytes / 1024 / 1024 / 1024:.2f} GiB")
-        print(f"Deleted Data:   {del_bytes / 1024 / 1024 / 1024:.2f} GiB")
+        print(f"New Data:       {new_bytes:,} bytes")
+        print(f"Updated Data:   {mod_bytes:,} bytes")
+        print(f"Deleted Data:   {del_bytes:,} bytes")
         print("-----------------------")
-        print(f"Net Change:     {(new_bytes + mod_bytes - del_bytes) / 1024 / 1024 / 1024:.2f} GiB")
+        print(f"Net Change:     {new_bytes + mod_bytes - del_bytes:,} bytes")
         print("")
 
         print("Rsync dry-run change summary by folder (subtree counts)")
