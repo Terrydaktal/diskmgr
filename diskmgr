@@ -935,7 +935,8 @@ class DiskMgrShell(cmd.Cmd):
         print("      On btrfs, runs defragment -r, then balance start -dusage=50.")
         print("      For LUKS: resolves to payload filesystem when open; errors if locked/not mounted.")
         print(f"  {Colors.OKGREEN}fshealth <name>{Colors.ENDC}")
-        print("      Shows filesystem diagnostics, last_defrag/last_scrub xattrs, and ext4 fragmentation score.")
+        print("      Shows filesystem diagnostics, last_defrag/last_scrub xattrs, ext4 fragmentation score,")
+        print("      and btrfs fragmentation amount via compsize.")
         print("      For LUKS: resolves to payload filesystem when open; errors if locked/not mounted.")
         print(f"  {Colors.OKGREEN}convert <name/id>{Colors.ENDC}")
         print("      Converts an UNMOUNTED ext4 filesystem to btrfs in place (btrfs-convert).")
@@ -3942,6 +3943,7 @@ class DiskMgrShell(cmd.Cmd):
         - ext4:  sudo tune2fs -l <device>
                 sudo e4defrag -c <mountpoint>   (fragmentation score)
         - btrfs: sudo btrfs filesystem usage <mountpoint>
+                sudo compsize <mountpoint>  (fragmentation amount)
         - xfs:   xfs_info <mountpoint>
 
         Also reads xattrs from the mountpoint root:
@@ -4003,7 +4005,10 @@ class DiskMgrShell(cmd.Cmd):
 
         run_command(['sudo', '-v'])
 
-        # Compute/print "defragmentation state" (ext4 only, best-effort).
+        # Compute/print "defragmentation state" (best-effort).
+        compsize_bin = None
+        compsize_out = ""
+        compsize_err = ""
         if fstype == 'ext4':
             e4defrag_bin = _find_tool_or_common_paths('e4defrag', [
                 '/usr/sbin/e4defrag',
@@ -4034,6 +4039,43 @@ class DiskMgrShell(cmd.Cmd):
                     print(f"{Colors.BOLD}Defragmentation state:{Colors.ENDC} - (could not parse e4defrag score)")
             else:
                 print(f"{Colors.BOLD}Defragmentation state:{Colors.ENDC} - (e4defrag not found)")
+        elif fstype == 'btrfs':
+            compsize_bin = _find_tool_or_common_paths('compsize', [
+                '/usr/sbin/compsize',
+                '/sbin/compsize',
+                '/usr/local/sbin/compsize',
+                '/usr/bin/compsize',
+                '/bin/compsize',
+            ])
+            if compsize_bin is None:
+                print(f"{Colors.BOLD}Defragmentation state:{Colors.ENDC} - (compsize not found)")
+            else:
+                res_c = run_command([compsize_bin, mnt], sudo=True, capture_output=True, check=False)
+                compsize_out = (getattr(res_c, 'stdout', '') or '')
+                compsize_err = (getattr(res_c, 'stderr', '') or '')
+
+                m = re.search(
+                    r"(?im)^\s*Processed\s+([0-9][0-9,]*)\s+files,\s+([0-9][0-9,]*)\s+regular\s+extents\b",
+                    compsize_out + "\n" + compsize_err,
+                )
+                if m:
+                    try:
+                        files = int(m.group(1).replace(",", ""), 10)
+                        extents = int(m.group(2).replace(",", ""), 10)
+                    except ValueError:
+                        files = None
+                        extents = None
+                    if files is not None and extents is not None and files > 0:
+                        epf = extents / float(files)
+                        print(
+                            f"{Colors.BOLD}Defragmentation state:{Colors.ENDC} "
+                            f"btrfs fragmentation amount {extents} extents / {files} files "
+                            f"(~{epf:.2f} extents/file; via compsize)"
+                        )
+                    else:
+                        print(f"{Colors.BOLD}Defragmentation state:{Colors.ENDC} - (could not parse compsize counters)")
+                else:
+                    print(f"{Colors.BOLD}Defragmentation state:{Colors.ENDC} - (compsize did not report Processed counters)")
         else:
             print(f"{Colors.BOLD}Defragmentation state:{Colors.ENDC} - (no global defrag metric for {fstype or 'unknown'})")
 
@@ -4075,6 +4117,14 @@ class DiskMgrShell(cmd.Cmd):
                 print(res.stdout.rstrip())
             if (res.stderr or "").strip():
                 print(res.stderr.rstrip(), file=sys.stderr)
+            if compsize_bin is None:
+                log("compsize not found. Install 'compsize' to view btrfs fragmentation amount.", 'WARN')
+            else:
+                print(f"\n{Colors.HEADER}{Colors.BOLD}--- compsize {mnt} ---{Colors.ENDC}")
+                if compsize_out.strip():
+                    print(compsize_out.rstrip())
+                if compsize_err.strip():
+                    print(compsize_err.rstrip(), file=sys.stderr)
         elif fstype == 'xfs':
             xfs_info_bin = _find_tool_or_common_paths('xfs_info', [
                 '/usr/sbin/xfs_info',
