@@ -4052,8 +4052,16 @@ class DiskMgrShell(cmd.Cmd):
                 status = "deleted"
             else:
                 status = "modified"
+
+            if status == "created":
+                color = Colors.OKGREEN
+            elif status == "deleted":
+                color = Colors.FAIL
+            else:
+                color = Colors.WARNING
+            cname = f"{color}{name}{Colors.ENDC}"
             print(
-                f"{indent}{name}  "
+                f"{indent}{cname}  "
                 f"(+{n_new}  "
                 f"~{n_upd}  "
                 f"-{n_del}) [{status}]"
