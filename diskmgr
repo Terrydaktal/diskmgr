@@ -1167,6 +1167,14 @@ class DiskMgrShell(cmd.Cmd):
 
                 # 4. Parse Data Lines from parted for visual blocks
                 data_lines = [l for l in lines if l and not l.startswith('BYT') and not l.startswith('/')]
+                part_fstype_by_name = {}
+                try:
+                    for p in _lsblk_partitions(dev_path):
+                        n = (p.get('name') or '').strip()
+                        if n:
+                            part_fstype_by_name[n] = (p.get('fstype') or '').strip()
+                except Exception:
+                    part_fstype_by_name = {}
                 
                 segments = []
                 
@@ -1211,7 +1219,12 @@ class DiskMgrShell(cmd.Cmd):
                         if 'nvme' in d_name and not kname.startswith(f"{d_name}p"):
                             kname = f"{d_name}p{num}"
                         
-                        dtype = fs_or_type if fs_or_type else "-"
+                        dtype = (fs_or_type or '').strip()
+                        lsblk_fstype = (part_fstype_by_name.get(kname) or '').strip()
+                        if (not dtype or dtype in ('-', 'unknown')) and lsblk_fstype:
+                            dtype = lsblk_fstype
+                        if not dtype:
+                            dtype = "-"
                         flag_info = f" ({flags})" if flags else ""
                         segments.append(f"{Colors.OKGREEN}[ {kname} {dtype} {size_sectors}s ({size_info}){flag_info} ]{Colors.ENDC}")
                 
