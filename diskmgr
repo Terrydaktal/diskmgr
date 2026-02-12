@@ -4016,10 +4016,11 @@ class DiskMgrShell(cmd.Cmd):
         print(f"Source -> Dest: {src_path}  ->  {dst_path}")
         print(f"Depth shown: {depth} level(s)")
         print("")
-        print("Format: <folder>  (+N  ~U  -D)")
+        print("Format: <folder>  (+N  ~U  -D) [status]")
         print("  +N = regular files that would be CREATED under this folder")
         print("  ~U = regular files that would be MODIFIED/UPDATED under this folder")
         print("  -D = regular files that would be DELETED under this folder")
+        print("  status = created, deleted, modified, or mixed")
         print("Counts are inclusive of all descendants (subtree totals).")
         print("-----------------------------------------------")
 
@@ -4031,11 +4032,31 @@ class DiskMgrShell(cmd.Cmd):
                 name = "."
             else:
                 name = k.split('/')[-1]
+            n_new = c.get((k, 'new'), 0)
+            n_upd = c.get((k, 'upd'), 0)
+            n_del = c.get((k, 'del'), 0)
+
+            kinds = 0
+            if n_new > 0:
+                kinds += 1
+            if n_upd > 0:
+                kinds += 1
+            if n_del > 0:
+                kinds += 1
+
+            if kinds > 1:
+                status = "mixed"
+            elif n_new > 0:
+                status = "created"
+            elif n_del > 0:
+                status = "deleted"
+            else:
+                status = "modified"
             print(
                 f"{indent}{name}  "
-                f"(+{c.get((k, 'new'), 0)}  "
-                f"~{c.get((k, 'upd'), 0)}  "
-                f"-{c.get((k, 'del'), 0)})"
+                f"(+{n_new}  "
+                f"~{n_upd}  "
+                f"-{n_del}) [{status}]"
             )
 
         print("-----------------------------------------------")
