@@ -896,8 +896,10 @@ class DiskMgrShell(cmd.Cmd):
         print(f"  {Colors.OKGREEN}unmap <name/id>{Colors.ENDC}")
         print("      Removes an existing mapping by name, or by discovery ID (#N).")
         print(f"  {Colors.OKGREEN}format <name/id> [options]{Colors.ENDC}")
-        print("      Whole disk target: creates a superfloppy-style volume and mounts it (plain or LUKS + payload FS).")
+        print("      Whole disk target: creates a superfloppy-style volume and mounts it.")
         print("      Partition target: formats inside that partition boundary (not a superfloppy), then mounts it.")
+        print("      Default is plain format. Use --luks to run cryptsetup luksFormat, open a mapper,")
+        print("      then mkfs the decrypted payload filesystem inside the LUKS container.")
         print("      Whole disks must be unpartitioned. Existing partitions are never created/modified by format.")
         print("      Use: erase <name> first if the whole disk is currently partitioned.")
         print(f"  {Colors.OKGREEN}erase <name/id>{Colors.ENDC}")
@@ -4953,18 +4955,20 @@ class DiskMgrShell(cmd.Cmd):
         Options:
           --fs <ext4|xfs|btrfs>   Filesystem type (default: ext4)
           --label <label>   Set a different internal filesystem label (other than <name>)
-          --plain           Create a non-encrypted disk (skips LUKS)
-        
+          --luks            Encrypt target first with LUKS2, then format payload filesystem
+
         UNDER THE HOOD:
         1.  Safety: Refuses to run if anything is mounted on the target device tree.
         2.  Disk Type Policy:
             - If target is a whole disk, it must be unpartitioned (no GPT/MBR table present).
             - If target is a partition, format is applied directly within that partition.
-        3.  LUKS Format (Default):
+        3.  LUKS Format (only when --luks is used):
             - Uses 'passgen' to generate a master key.
             - Runs 'cryptsetup luksFormat' with LUKS2 encryption.
+            - Opens the container as /dev/mapper/<name>.
         4.  Filesystem:
-            - Formats the cleartext device with ext4, xfs, or btrfs.
+            - Plain mode (default): formats target directly with ext4, xfs, or btrfs.
+            - --luks mode: formats the opened mapper payload with ext4, xfs, or btrfs.
             - (ext4 only): Reclaims the 5% reserved space for root using 'tune2fs -m 0'.
         5.  Persistence: Adds the new disk's PDP to diskmap.tsv automatically (best-effort).
 
@@ -4974,7 +4978,7 @@ class DiskMgrShell(cmd.Cmd):
         parser.add_argument('args', nargs=1, help='<name>')
         parser.add_argument('--fs', default='ext4', choices=['ext4', 'xfs', 'btrfs'])
         parser.add_argument('--label', help='Filesystem label')
-        parser.add_argument('--plain', action='store_true', help='No LUKS encryption')
+        parser.add_argument('--luks', action='store_true', help='Encrypt target with LUKS2 before mkfs')
 
         try:
             split_args = shlex.split(arg)
@@ -5040,7 +5044,7 @@ class DiskMgrShell(cmd.Cmd):
                 log("Use erase <name> first to wipe partition metadata, then run format again.", 'ERROR')
                 return
 
-        if not args.plain:
+        if args.luks:
             # LUKS Format
             log(f"Formatting LUKS on {crypt_target}...")
             pg_cmd = subprocess.Popen([PASSGEN_BIN], stdout=subprocess.PIPE, text=True)
@@ -5066,6 +5070,7 @@ class DiskMgrShell(cmd.Cmd):
             )
             fs_target = f"/dev/mapper/{name}"
         else:
+            log("Using plain format mode (no LUKS).")
             fs_target = crypt_target
 
         # Mkfs
