@@ -17,7 +17,7 @@ from pathlib import Path
 # Configuration
 MAP_FILENAME = 'diskmap.tsv'
 PASSGEN_BIN = 'passgen'
-VERSION = '2.1.9'
+VERSION = '2.2.6'
 
 # ANSI Colors
 class Colors:
@@ -1318,10 +1318,10 @@ class DiskMgrShell(cmd.Cmd):
             "NAME",
             "DEVICE",
             "TYPE",
-            "SIZE",
             "FSTYPE",
             "FSLABEL",
             "FSUUID",
+            "SIZE",
             "FSAVAIL",
             "FSMOUNTPOINTS",
             "PERSISTENT PATH (IEEE)",
