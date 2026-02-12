@@ -17,7 +17,7 @@ from pathlib import Path
 # Configuration
 MAP_FILENAME = 'diskmap.tsv'
 PASSGEN_BIN = 'passgen'
-VERSION = '2.3.1'
+VERSION = '2.3.2'
 
 # ANSI Colors
 class Colors:
@@ -935,8 +935,8 @@ class DiskMgrShell(cmd.Cmd):
         print("      On btrfs, runs defragment -r, then balance start -dusage=50.")
         print("      For LUKS: resolves to payload filesystem when open; errors if locked/not mounted.")
         print(f"  {Colors.OKGREEN}fshealth <name>{Colors.ENDC}")
-        print("      Shows filesystem diagnostics, last_defrag/last_scrub xattrs, ext4 fragmentation score,")
-        print("      and btrfs fragmentation amount via compsize with an estimated ext4-like score.")
+        print("      Shows filesystem diagnostics, last_defrag/last_scrub xattrs, and extents/files ratios.")
+        print("      ext4: <1.1 healthy, >1.5 bad, >5 critical. btrfs: <1 good, >5 bad, >20 critical.")
         print("      For btrfs, also shows filesystem/device stats and scrub status.")
         print("      For LUKS: resolves to payload filesystem when open; errors if locked/not mounted.")
         print(f"  {Colors.OKGREEN}convert <name/id>{Colors.ENDC}")
@@ -3942,13 +3942,13 @@ class DiskMgrShell(cmd.Cmd):
         Shows filesystem-specific diagnostic output and local "maintenance" timestamps.
 
         - ext4:  sudo tune2fs -l <device>
-                sudo e4defrag -c <mountpoint>   (fragmentation score)
+                sudo e4defrag -c <mountpoint>   (fragmentation score + extents/files ratio)
         - btrfs: sudo btrfs filesystem usage <mountpoint>
                 sudo btrfs filesystem show <mountpoint>
                 sudo btrfs filesystem df <mountpoint>
                 sudo btrfs device stats <mountpoint>
                 sudo btrfs scrub status <mountpoint>
-                sudo compsize <mountpoint>  (fragmentation amount + ext4-like score estimate)
+                sudo compsize <mountpoint>  (extents/files ratio)
         - xfs:   xfs_info <mountpoint>
 
         Also reads xattrs from the mountpoint root:
@@ -4010,35 +4010,29 @@ class DiskMgrShell(cmd.Cmd):
 
         run_command(['sudo', '-v'])
 
-        # Compute/print "defragmentation state" (best-effort).
+        # Compute/print fragmentation state (best-effort).
         compsize_bin = None
         compsize_out = ""
         compsize_err = ""
-        def _lerp(x, x0, x1, y0, y1):
-            if x1 <= x0:
-                return y1
-            return y0 + ((x - x0) / (x1 - x0)) * (y1 - y0)
+        def _ratio_state_ext4(epf):
+            # Requested rubric: <1.1 healthy, >1.5 bad, >5 critical.
+            if epf < 1.1:
+                return (f"{Colors.OKGREEN}HEALTHY{Colors.ENDC}", "<1.1 healthy")
+            if epf > 5.0:
+                return (f"{Colors.FAIL}CRITICAL{Colors.ENDC}", ">5 critical")
+            if epf > 1.5:
+                return (f"{Colors.WARNING}BAD{Colors.ENDC}", ">1.5 bad")
+            return (f"{Colors.WARNING}WATCH{Colors.ENDC}", "between 1.1 and 1.5")
 
-        def _btrfs_ext4_like_score(epf):
-            """
-            Convert btrfs extents/file into an ext4-like 0-100 score using the user rubric:
-              <1.0 => pristine, 1.0-1.2 => healthy, 2.0-10 => warning, >=50 => critical.
-            Gaps are bridged linearly for continuity.
-            """
+        def _ratio_state_btrfs(epf):
+            # Requested rubric: <1 good, >5 bad, >20 critical.
             if epf < 1.0:
-                score = _lerp(epf, 0.0, 1.0, 0.0, 5.0)
-            elif epf <= 1.2:
-                score = _lerp(epf, 1.0, 1.2, 5.0, 20.0)
-            elif epf < 2.0:
-                score = _lerp(epf, 1.2, 2.0, 20.0, 30.0)
-            elif epf <= 10.0:
-                score = _lerp(epf, 2.0, 10.0, 31.0, 55.0)
-            elif epf < 50.0:
-                score = _lerp(epf, 10.0, 50.0, 56.0, 79.0)
-            else:
-                capped = min(epf, 200.0)
-                score = _lerp(capped, 50.0, 200.0, 80.0, 100.0)
-            return max(0, min(100, int(round(score))))
+                return (f"{Colors.OKGREEN}GOOD{Colors.ENDC}", "<1 good")
+            if epf > 20.0:
+                return (f"{Colors.FAIL}CRITICAL{Colors.ENDC}", ">20 critical")
+            if epf > 5.0:
+                return (f"{Colors.WARNING}BAD{Colors.ENDC}", ">5 bad")
+            return (f"{Colors.WARNING}WATCH{Colors.ENDC}", "between 1 and 5")
 
         if fstype == 'ext4':
             e4defrag_bin = _find_tool_or_common_paths('e4defrag', [
@@ -4060,48 +4054,68 @@ class DiskMgrShell(cmd.Cmd):
                     r"(?im)^\s*Average\s+size\s+per\s+extent\s*:?\s*(.+?)\s*$",
                     frag_out,
                 )
+                score = None
                 if m:
                     try:
                         score = int(m.group(1), 10)
                     except ValueError:
                         score = None
-                    if score is not None:
-                        # e4defrag convention: 0-30: no problem, 31-55: a little, 56+: should defrag.
-                        if score <= 30:
-                            state = f"{Colors.OKGREEN}GOOD{Colors.ENDC}"
-                            recommendation = "No defragmentation needed."
-                        elif score <= 55:
-                            state = f"{Colors.WARNING}MEDIUM{Colors.ENDC}"
-                            recommendation = "Defragmentation optional; run if you see slowdown."
-                        else:
-                            state = f"{Colors.FAIL}BAD{Colors.ENDC}"
-                            recommendation = "Defragmentation recommended."
 
-                        extra_details = ""
-                        if m_tb:
-                            try:
-                                total_extents = int(m_tb.group(1).replace(",", ""), 10)
-                                best_extents = int(m_tb.group(2).replace(",", ""), 10)
-                                extra_extents = max(total_extents - best_extents, 0)
-                                overhead_pct = (extra_extents / float(best_extents) * 100.0) if best_extents > 0 else 0.0
-                                extra_details += (
-                                    f"; extents {total_extents}/{best_extents} "
-                                    f"(+{extra_extents}, {overhead_pct:.2f}% overhead)"
-                                )
-                            except ValueError:
-                                pass
-                        if m_avg:
-                            avg_extent = (m_avg.group(1) or "").strip()
-                            if avg_extent:
-                                extra_details += f"; avg extent size {avg_extent}"
+                total_extents = None
+                best_extents = None
+                if m_tb:
+                    try:
+                        total_extents = int(m_tb.group(1).replace(",", ""), 10)
+                        best_extents = int(m_tb.group(2).replace(",", ""), 10)
+                    except ValueError:
+                        total_extents = None
+                        best_extents = None
 
-                        print(
-                            f"{Colors.BOLD}Defragmentation state:{Colors.ENDC} "
-                            f"{state} (ext4 fragmentation score {score}{extra_details})"
-                        )
-                        print(f"{Colors.BOLD}Defragmentation note:{Colors.ENDC} {recommendation}")
+                # Prefer a real file-count if e4defrag reports one; otherwise fall back to best_extents proxy.
+                total_files = None
+                m_files = re.search(
+                    r"(?im)^\s*Fragmented\s+files/Total\s+files\s*:?\s*([0-9][0-9,]*)\s*/\s*([0-9][0-9,]*)\s*$",
+                    frag_out,
+                )
+                if m_files:
+                    try:
+                        total_files = int(m_files.group(2).replace(",", ""), 10)
+                    except ValueError:
+                        total_files = None
+
+                epf = None
+                ratio_basis = ""
+                if total_extents is not None and total_files is not None and total_files > 0:
+                    epf = total_extents / float(total_files)
+                    ratio_basis = f"{total_extents} extents / {total_files} files"
+                elif total_extents is not None and best_extents is not None and best_extents > 0:
+                    epf = total_extents / float(best_extents)
+                    ratio_basis = f"{total_extents} extents / ~{best_extents} files (best-extents proxy)"
+
+                if epf is not None:
+                    state, rubric_hit = _ratio_state_ext4(epf)
+                    score_part = f"; e4defrag score {score}" if score is not None else ""
+                    print(
+                        f"{Colors.BOLD}Defragmentation state:{Colors.ENDC} "
+                        f"{state} (ext4 ratio ~{epf:.2f} extents/file, {rubric_hit}{score_part})"
+                    )
+                    print(f"{Colors.BOLD}Extents/files ratio:{Colors.ENDC} {epf:.2f} ({ratio_basis})")
+                elif score is not None:
+                    print(f"{Colors.BOLD}Defragmentation state:{Colors.ENDC} - (extents/files ratio unavailable; e4defrag score {score})")
                 else:
-                    print(f"{Colors.BOLD}Defragmentation state:{Colors.ENDC} - (could not parse e4defrag score)")
+                    print(f"{Colors.BOLD}Defragmentation state:{Colors.ENDC} - (could not parse e4defrag output)")
+
+                if total_extents is not None and best_extents is not None:
+                    extra_extents = max(total_extents - best_extents, 0)
+                    overhead_pct = (extra_extents / float(best_extents) * 100.0) if best_extents > 0 else 0.0
+                    print(
+                        f"{Colors.BOLD}Extent overhead:{Colors.ENDC} "
+                        f"{extra_extents} extra extents over ideal ({overhead_pct:.2f}%)"
+                    )
+                if m_avg:
+                    avg_extent = (m_avg.group(1) or "").strip()
+                    if avg_extent:
+                        print(f"{Colors.BOLD}Average extent size:{Colors.ENDC} {avg_extent}")
             else:
                 print(f"{Colors.BOLD}Defragmentation state:{Colors.ENDC} - (e4defrag not found)")
         elif fstype == 'btrfs':
@@ -4132,18 +4146,12 @@ class DiskMgrShell(cmd.Cmd):
                         extents = None
                     if files is not None and extents is not None and files > 0:
                         epf = extents / float(files)
-                        score = _btrfs_ext4_like_score(epf)
-                        if score <= 30:
-                            state = f"{Colors.OKGREEN}GOOD{Colors.ENDC}"
-                        elif score <= 55:
-                            state = f"{Colors.WARNING}MEDIUM{Colors.ENDC}"
-                        else:
-                            state = f"{Colors.FAIL}BAD{Colors.ENDC}"
+                        state, rubric_hit = _ratio_state_btrfs(epf)
                         print(
                             f"{Colors.BOLD}Defragmentation state:{Colors.ENDC} "
-                            f"{state} (btrfs est. ext4-like score {score}; "
-                            f"{extents} extents / {files} files, ~{epf:.2f} extents/file; via compsize)"
+                            f"{state} (btrfs ratio ~{epf:.2f} extents/file, {rubric_hit})"
                         )
+                        print(f"{Colors.BOLD}Extents/files ratio:{Colors.ENDC} {epf:.2f} ({extents} extents / {files} files; via compsize)")
                     else:
                         print(f"{Colors.BOLD}Defragmentation state:{Colors.ENDC} - (could not parse compsize counters)")
                 else:
