@@ -3946,20 +3946,34 @@ class DiskMgrShell(cmd.Cmd):
 
             # Delete lines do not reliably respect out-format.
             if line.startswith('*deleting'):
-                p = _norm_relpath(line[len('*deleting'):].strip())
+                body = line[len('*deleting'):].lstrip()
+                del_size = None
+                # With --out-format, rsync delete lines may appear as:
+                #   *deleting 0<TAB>path
+                # Strip the optional leading size field so it doesn't pollute folder names.
+                if '\t' in body:
+                    first, rest = body.split('\t', 1)
+                    if re.fullmatch(r"[0-9][0-9,]*", first.strip()):
+                        del_size = _parse_int(first)
+                        body = rest
+
+                p = _norm_relpath(body.strip())
                 if p.endswith('/'):
                     del_dirs += 1
                 else:
                     del_files += 1
                     total_del += 1
                     _add_subtree('del', p, seen, c)
-                    # Best-effort size lookup on destination for deleted regular files.
-                    try:
-                        dp = os.path.join(dst_path, p)
-                        if os.path.isfile(dp):
-                            del_bytes += os.path.getsize(dp)
-                    except Exception:
-                        pass
+                    if del_size is not None:
+                        del_bytes += del_size
+                    else:
+                        # Best-effort size lookup on destination for deleted regular files.
+                        try:
+                            dp = os.path.join(dst_path, p)
+                            if os.path.isfile(dp):
+                                del_bytes += os.path.getsize(dp)
+                        except Exception:
+                            pass
                 continue
 
             parts = line.split('\t', 2)
