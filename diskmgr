@@ -4327,7 +4327,20 @@ class DiskMgrShell(cmd.Cmd):
             return
 
         target_in = args.target
-        resolved = self.resolve_target(target_in, allow_id=True)
+        resolved = None
+        if target_in.startswith('#') and target_in[1:].isdigit():
+            # For convert, allow IDs from the full list row cache (disk/part/crypt),
+            # not only the map/unmapped discovery subset.
+            rid = target_in[1:]
+            resolved = self.id_cache.get(rid)
+            if not resolved:
+                # Backward-compatible fallback to discovery-ID resolver.
+                resolved = self.resolve_target(target_in, allow_id=True)
+                if not resolved:
+                    log(f"Unknown discovery ID: '{target_in}'. Run 'list' first to refresh IDs.", 'ERROR')
+                    return
+        else:
+            resolved = self.resolve_target(target_in, allow_id=True)
         if not resolved:
             log(f"Unknown target: '{target_in}'. Use a mapping name or discovery ID (#N).", 'ERROR')
             log("Tip: run 'list' first to refresh discovery IDs.", 'ERROR')
