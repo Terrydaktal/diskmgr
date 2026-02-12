@@ -17,7 +17,7 @@ from pathlib import Path
 # Configuration
 MAP_FILENAME = 'diskmap.tsv'
 PASSGEN_BIN = 'passgen'
-VERSION = '2.3.5'
+VERSION = '2.3.7'
 
 # ANSI Colors
 class Colors:
@@ -930,6 +930,10 @@ class DiskMgrShell(cmd.Cmd):
         print("      For LUKS: acts on payload filesystem when open; errors if locked.")
         print(f"  {Colors.OKGREEN}sync <sec_name> <pri_name>{Colors.ENDC}")
         print("      Syncs two mounted filesystems (rsync pri -> sec).")
+        print("      For LUKS: resolves to payload filesystem when open; errors if locked/not mounted.")
+        print(f"  {Colors.OKGREEN}diff <sec_name> <pri_name> [--depth N]{Colors.ENDC}")
+        print("      Dry-run filesystem diff (rsync pri -> sec): shows create/modify/delete counts+bytes,")
+        print("      then a per-folder subtree summary (+new, ~updated, -deleted regular files).")
         print("      For LUKS: resolves to payload filesystem when open; errors if locked/not mounted.")
         print(f"  {Colors.OKGREEN}defrag <name>{Colors.ENDC}")
         print("      Defragments a mounted filesystem and records user.last_defrag xattr.")
@@ -3826,6 +3830,202 @@ class DiskMgrShell(cmd.Cmd):
             log("Sync complete.")
         except Exception as e:
             log(f"Sync failed: {e}", 'ERROR')
+
+    def do_diff(self, arg):
+        '''Preview differences between two mounted filesystems: diff <secondary_name> <primary_name> [--depth N]
+
+        Uses rsync dry-run itemized output (primary -> secondary) and prints:
+        1) Change counts and byte estimates (created/modified/deleted, net change).
+        2) Folder summary by subtree up to --depth levels.
+        '''
+        parser = CmdArgumentParser(prog='diff', add_help=False)
+        parser.add_argument('secondary_name')
+        parser.add_argument('primary_name')
+        parser.add_argument('--depth', type=int, default=3, help='Folder depth for subtree summary (default: 3)')
+        try:
+            split_args = shlex.split(arg)
+            args = parser.parse_args(split_args)
+        except argparse.ArgumentError as e:
+            log(str(e), 'ERROR')
+            return
+        except SystemExit:
+            return
+
+        if args.depth < 1:
+            log("--depth must be >= 1.", 'ERROR')
+            return
+
+        secondary = args.secondary_name
+        primary = args.primary_name
+        depth = args.depth
+
+        sec_mnt = self.get_mountpoint(secondary)
+        pri_mnt = self.get_mountpoint(primary)
+        if not sec_mnt:
+            log(f"Secondary disk '{secondary}' is not mounted.", 'ERROR')
+            return
+        if not pri_mnt:
+            log(f"Primary disk '{primary}' is not mounted.", 'ERROR')
+            return
+
+        src_path = pri_mnt.rstrip('/') + '/'
+        dst_path = sec_mnt.rstrip('/') + '/'
+        print(f"Diff (dry-run): {Colors.BOLD}{src_path}{Colors.ENDC} -> {Colors.WARNING}{dst_path}{Colors.ENDC}")
+
+        run_command(['sudo', '-v'])
+
+        cmd = [
+            'rsync', '-anH', '--delete', '--itemize-changes',
+            '--out-format=%i\t%l\t%n',
+            src_path, dst_path
+        ]
+        res = run_command(cmd, sudo=True, capture_output=True, check=False)
+
+        if getattr(res, 'returncode', 0) not in (0, 24):
+            log(f"rsync dry-run exited with status {res.returncode}. Output may be incomplete.", 'WARN')
+
+        out = (getattr(res, 'stdout', '') or '')
+        err = (getattr(res, 'stderr', '') or '')
+        if err.strip():
+            print(err.rstrip(), file=sys.stderr)
+
+        def _parse_int(s):
+            m = re.search(r"[0-9][0-9,]*", str(s or ""))
+            if not m:
+                return 0
+            try:
+                return int(m.group(0).replace(',', ''), 10)
+            except ValueError:
+                return 0
+
+        def _norm_relpath(p):
+            p = (p or '').strip()
+            while p.startswith('./'):
+                p = p[2:]
+            return p
+
+        def _add_subtree(kind, relpath, seen, counts):
+            relpath = _norm_relpath(relpath)
+            if not relpath or relpath.endswith('/'):
+                return
+            parts = relpath.split('/')
+            max_folder_parts = len(parts) - 1
+            if max_folder_parts < 1:
+                seen["."] = True
+                counts[(".", kind)] = counts.get((".", kind), 0) + 1
+                return
+
+            cur = []
+            upto = min(max_folder_parts, depth)
+            for i in range(upto):
+                cur.append(parts[i])
+                k = "/".join(cur)
+                seen[k] = True
+                counts[(k, kind)] = counts.get((k, kind), 0) + 1
+
+        # Summary 1 counters
+        new_files = 0
+        mod_files = 0
+        del_files = 0
+        del_dirs = 0
+        new_bytes = 0
+        mod_bytes = 0
+        del_bytes = 0
+
+        # Summary 2 counters (folder view)
+        seen = {}
+        c = {}
+        total_new = 0
+        total_upd = 0
+        total_del = 0
+
+        for raw in out.splitlines():
+            line = (raw or "").rstrip()
+            if not line:
+                continue
+
+            # Delete lines do not reliably respect out-format.
+            if line.startswith('*deleting'):
+                p = _norm_relpath(line[len('*deleting'):].strip())
+                if p.endswith('/'):
+                    del_dirs += 1
+                else:
+                    del_files += 1
+                    total_del += 1
+                    _add_subtree('del', p, seen, c)
+                    # Best-effort size lookup on destination for deleted regular files.
+                    try:
+                        dp = os.path.join(dst_path, p)
+                        if os.path.isfile(dp):
+                            del_bytes += os.path.getsize(dp)
+                    except Exception:
+                        pass
+                continue
+
+            parts = line.split('\t', 2)
+            if len(parts) < 3:
+                continue
+            item = parts[0].strip()
+            lraw = parts[1].strip()
+            relp = _norm_relpath(parts[2].strip())
+            size_b = _parse_int(lraw)
+
+            # New regular files.
+            if item.startswith('>f+'):
+                new_files += 1
+                total_new += 1
+                new_bytes += size_b
+                _add_subtree('new', relp, seen, c)
+                continue
+
+            # Modified regular files.
+            if item.startswith('>f') and not item.startswith('>f+'):
+                mod_files += 1
+                total_upd += 1
+                mod_bytes += size_b
+                _add_subtree('upd', relp, seen, c)
+                continue
+
+        print(f"Created files:  {new_files}")
+        print(f"Modified files: {mod_files}")
+        print(f"Deleted files:  {del_files}")
+        print(f"Deleted dirs:   {del_dirs}")
+        print("-----------------------")
+        print(f"New Data:       {new_bytes / 1024 / 1024 / 1024:.2f} GiB")
+        print(f"Updated Data:   {mod_bytes / 1024 / 1024 / 1024:.2f} GiB")
+        print(f"Deleted Data:   {del_bytes / 1024 / 1024 / 1024:.2f} GiB")
+        print("-----------------------")
+        print(f"Net Change:     {(new_bytes + mod_bytes - del_bytes) / 1024 / 1024 / 1024:.2f} GiB")
+        print("")
+
+        print("Rsync dry-run change summary by folder (subtree counts)")
+        print(f"Source -> Dest: {src_path}  ->  {dst_path}")
+        print(f"Depth shown: {depth} level(s)")
+        print("")
+        print("Format: <folder>  (+N  ~U  -D)")
+        print("  +N = regular files that would be CREATED under this folder")
+        print("  ~U = regular files that would be MODIFIED/UPDATED under this folder")
+        print("  -D = regular files that would be DELETED under this folder")
+        print("Counts are inclusive of all descendants (subtree totals).")
+        print("-----------------------------------------------")
+
+        keys = sorted(seen.keys())
+        for k in keys:
+            depth_here = 0 if k == "." else (k.count('/') + 1)
+            indent = " " * (depth_here * 2)
+            if k == ".":
+                name = "."
+            else:
+                name = k.split('/')[-1]
+            print(
+                f"{indent}{name}  "
+                f"(+{c.get((k, 'new'), 0)}  "
+                f"~{c.get((k, 'upd'), 0)}  "
+                f"-{c.get((k, 'del'), 0)})"
+            )
+
+        print("-----------------------------------------------")
+        print(f"Totals (regular files): create={total_new}  modify={total_upd}  delete={total_del}")
 
     def do_defrag(self, arg):
         '''Defragment a mounted filesystem: defrag <name>
