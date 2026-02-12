@@ -17,7 +17,7 @@ from pathlib import Path
 # Configuration
 MAP_FILENAME = 'diskmap.tsv'
 PASSGEN_BIN = 'passgen'
-VERSION = '2.4.5'
+VERSION = '2.4.6'
 
 # ANSI Colors
 class Colors:
@@ -929,10 +929,10 @@ class DiskMgrShell(cmd.Cmd):
         print(f"  {Colors.OKGREEN}remount <name>{Colors.ENDC}")
         print("      Move an OPEN disk's mount to /media/$USER/<label> and clean old empty mountpoint dirs.")
         print("      For LUKS: acts on payload filesystem when open; errors if locked.")
-        print(f"  {Colors.OKGREEN}sync <sec_name> <pri_name>{Colors.ENDC}")
+        print(f"  {Colors.OKGREEN}sync <pri_name> <sec_name>{Colors.ENDC}")
         print("      Syncs two mounted filesystems (rsync pri -> sec).")
         print("      For LUKS: resolves to payload filesystem when open; errors if locked/not mounted.")
-        print(f"  {Colors.OKGREEN}diff <sec_name> <pri_name> [--depth N]{Colors.ENDC}")
+        print(f"  {Colors.OKGREEN}diff <pri_name> <sec_name> [--depth N]{Colors.ENDC}")
         print("      Dry-run filesystem diff (rsync pri -> sec): shows create/modify/delete counts+bytes,")
         print("      then a per-folder subtree summary (+new, ~updated, -deleted regular files).")
         print("      Depth default: 2.")
@@ -3773,7 +3773,7 @@ class DiskMgrShell(cmd.Cmd):
         return preferred if preferred in targets else targets[0]
 
     def do_sync(self, arg):
-        '''Synchronize two mounted disks: sync <secondary_name> <primary_name>
+        '''Synchronize two mounted disks: sync <primary_name> <secondary_name>
         
         UNDER THE HOOD:
         1.  Validation: Verifies both disks are mapped and currently mounted.
@@ -3785,10 +3785,10 @@ class DiskMgrShell(cmd.Cmd):
         '''
         args = arg.split()
         if len(args) != 2:
-            log("Usage: sync <secondary_name> <primary_name>", 'ERROR')
+            log("Usage: sync <primary_name> <secondary_name>", 'ERROR')
             return
 
-        secondary, primary = args
+        primary, secondary = args
         
         sec_mnt = self.get_mountpoint(secondary)
         pri_mnt = self.get_mountpoint(primary)
@@ -3806,9 +3806,9 @@ class DiskMgrShell(cmd.Cmd):
             sec_src = (getattr(res_s, 'stdout', '') or '').strip()
             res_p = run_command(['findmnt', '-rn', '-M', pri_mnt, '-o', 'SOURCE'], check=False)
             pri_src = (getattr(res_p, 'stdout', '') or '').strip()
-            if sec_src and self._block_if_root_drive(os.path.realpath(sec_src), f"sync {secondary} {primary}"):
+            if sec_src and self._block_if_root_drive(os.path.realpath(sec_src), f"sync {primary} {secondary}"):
                 return
-            if pri_src and self._block_if_root_drive(os.path.realpath(pri_src), f"sync {secondary} {primary}"):
+            if pri_src and self._block_if_root_drive(os.path.realpath(pri_src), f"sync {primary} {secondary}"):
                 return
         except Exception:
             pass
@@ -3834,15 +3834,15 @@ class DiskMgrShell(cmd.Cmd):
             log(f"Sync failed: {e}", 'ERROR')
 
     def do_diff(self, arg):
-        '''Preview differences between two mounted filesystems: diff <secondary_name> <primary_name> [--depth N]
+        '''Preview differences between two mounted filesystems: diff <primary_name> <secondary_name> [--depth N]
 
         Uses rsync dry-run itemized output (primary -> secondary) and prints:
         1) Change counts and byte estimates (created/modified/deleted, net change).
         2) Folder summary by subtree up to --depth levels.
         '''
         parser = CmdArgumentParser(prog='diff', add_help=False)
-        parser.add_argument('secondary_name')
         parser.add_argument('primary_name')
+        parser.add_argument('secondary_name')
         parser.add_argument('--depth', type=int, default=2, help='Folder depth for subtree summary (default: 2)')
         try:
             split_args = shlex.split(arg)
@@ -3857,8 +3857,8 @@ class DiskMgrShell(cmd.Cmd):
             log("--depth must be >= 1.", 'ERROR')
             return
 
-        secondary = args.secondary_name
         primary = args.primary_name
+        secondary = args.secondary_name
         depth = args.depth
 
         sec_mnt = self.get_mountpoint(secondary)
