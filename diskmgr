@@ -17,7 +17,7 @@ from pathlib import Path
 # Configuration
 MAP_FILENAME = 'diskmap.tsv'
 PASSGEN_BIN = 'passgen'
-VERSION = '2.3.2'
+VERSION = '2.3.3'
 
 # ANSI Colors
 class Colors:
@@ -4084,24 +4084,25 @@ class DiskMgrShell(cmd.Cmd):
                         total_files = None
 
                 epf = None
-                ratio_basis = ""
                 if total_extents is not None and total_files is not None and total_files > 0:
                     epf = total_extents / float(total_files)
-                    ratio_basis = f"{total_extents} extents / {total_files} files"
                 elif total_extents is not None and best_extents is not None and best_extents > 0:
                     epf = total_extents / float(best_extents)
-                    ratio_basis = f"{total_extents} extents / ~{best_extents} files (best-extents proxy)"
 
                 if epf is not None:
-                    state, rubric_hit = _ratio_state_ext4(epf)
-                    score_part = f"; e4defrag score {score}" if score is not None else ""
+                    state, _ = _ratio_state_ext4(epf)
+                    score_part = f"; score {score}" if score is not None else ""
                     print(
                         f"{Colors.BOLD}Defragmentation state:{Colors.ENDC} "
-                        f"{state} (ext4 ratio ~{epf:.2f} extents/file, {rubric_hit}{score_part})"
+                        f"{state} (ext4 ratio ~{epf:.2f} extents/file; thresholds: "
+                        f"<1.1 healthy, >1.5 bad, >5 critical{score_part})"
                     )
-                    print(f"{Colors.BOLD}Extents/files ratio:{Colors.ENDC} {epf:.2f} ({ratio_basis})")
                 elif score is not None:
-                    print(f"{Colors.BOLD}Defragmentation state:{Colors.ENDC} - (extents/files ratio unavailable; e4defrag score {score})")
+                    print(
+                        f"{Colors.BOLD}Defragmentation state:{Colors.ENDC} "
+                        f"- (ext4 thresholds: <1.1 healthy, >1.5 bad, >5 critical; "
+                        f"extents/files ratio unavailable; score {score})"
+                    )
                 else:
                     print(f"{Colors.BOLD}Defragmentation state:{Colors.ENDC} - (could not parse e4defrag output)")
 
