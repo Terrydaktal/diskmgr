@@ -17,7 +17,7 @@ from pathlib import Path
 # Configuration
 MAP_FILENAME = 'diskmap.tsv'
 PASSGEN_BIN = 'passgen'
-VERSION = '2.1.5'
+VERSION = '2.1.9'
 
 # ANSI Colors
 class Colors:
@@ -934,6 +934,10 @@ class DiskMgrShell(cmd.Cmd):
         print(f"  {Colors.OKGREEN}fshealth <name>{Colors.ENDC}")
         print("      Shows filesystem diagnostics, last_defrag/last_scrub xattrs, and ext4 fragmentation score.")
         print("      For LUKS: resolves to payload filesystem when open; errors if locked/not mounted.")
+        print(f"  {Colors.OKGREEN}convert <name/id>{Colors.ENDC}")
+        print("      Converts an UNMOUNTED ext4 filesystem to btrfs in place (btrfs-convert).")
+        print("      Preserves data, supports plain ext4 and open LUKS payload ext4 when resolvable.")
+        print("      For safety, target must be unmounted/closed before conversion.")
         print(f"  {Colors.OKGREEN}scrub <name> [--no-watch]{Colors.ENDC}")
         print("      Runs a blocking btrfs scrub on a mounted filesystem and records user.last_scrub xattr.")
         print("      By default tails kernel checksum/error logs and resolves paths when possible.")
@@ -4241,6 +4245,185 @@ class DiskMgrShell(cmd.Cmd):
             log(f"Recorded xattr: user.last_scrub={ds} on {mnt}")
         except Exception as e:
             log(f"Scrub failed: {e}", 'ERROR')
+
+    def do_convert(self, arg):
+        '''Convert ext4 -> btrfs in place (no data copy): convert <name/id>
+
+        Uses btrfs-convert on an UNMOUNTED ext4 filesystem.
+        - Plain ext4 targets are supported directly.
+        - If target is crypto_LUKS, diskmgr tries to resolve the open payload device
+          (e.g. /dev/mapper/<name> or a crypt child) and convert that.
+        '''
+        parser = CmdArgumentParser(prog='convert', add_help=False)
+        parser.add_argument('target', help='Mapping name or discovery ID (#N)')
+        try:
+            split_args = shlex.split(arg)
+            args = parser.parse_args(split_args)
+        except argparse.ArgumentError as e:
+            log(str(e), 'ERROR')
+            return
+        except SystemExit:
+            return
+
+        target_in = args.target
+        resolved = self.resolve_target(target_in, allow_id=True)
+        if not resolved:
+            log(f"Unknown target: '{target_in}'. Use a mapping name or discovery ID (#N).", 'ERROR')
+            log("Tip: run 'list' first to refresh discovery IDs.", 'ERROR')
+            return
+
+        real_target = os.path.realpath(resolved)
+        if not os.path.exists(real_target):
+            log(f"Target not found: {real_target}", 'ERROR')
+            return
+
+        self.mappings = read_luks_map()
+        mapping_name = target_in if target_in in self.mappings else None
+
+        convert_dev = None
+        convert_hint = ""
+        fstype = (_lsblk_fstype(real_target) or "").strip().lower()
+        dev_type = (_lsblk_type(real_target) or "").strip().lower()
+
+        def _lsblk_rows(dev_path):
+            rows = []
+            res = run_command(['lsblk', '-nr', '-o', 'NAME,TYPE,FSTYPE', dev_path], check=False)
+            for raw in (getattr(res, 'stdout', '') or '').splitlines():
+                line = raw.strip()
+                if not line:
+                    continue
+                parts = line.split(None, 2)
+                if len(parts) < 2:
+                    continue
+                nm = parts[0].strip()
+                ty = parts[1].strip().lower()
+                fs = parts[2].strip().lower() if len(parts) >= 3 else ""
+                rows.append({'name': nm, 'type': ty, 'fstype': fs})
+            return rows
+
+        if fstype == 'ext4':
+            convert_dev = real_target
+            convert_hint = "direct ext4 target"
+        elif fstype == 'crypto_luks':
+            payload_candidates = []
+
+            if mapping_name:
+                mapper_path = f"/dev/mapper/{mapping_name}"
+                if os.path.exists(mapper_path):
+                    mapper_real = os.path.realpath(mapper_path)
+                    mapper_fs = (_lsblk_fstype(mapper_real) or "").strip().lower()
+                    if mapper_fs == 'ext4':
+                        payload_candidates.append((mapper_real, f"/dev/mapper/{mapping_name}"))
+
+            for row in _lsblk_rows(real_target):
+                if row.get('type') != 'crypt':
+                    continue
+                fs = (row.get('fstype') or "").strip().lower()
+                if fs != 'ext4':
+                    continue
+                cdev = os.path.realpath(f"/dev/{row['name']}")
+                payload_candidates.append((cdev, f"/dev/{row['name']}"))
+
+            uniq = {}
+            for path, hint in payload_candidates:
+                uniq[path] = hint
+            payload_candidates = [(p, h) for p, h in uniq.items()]
+
+            if len(payload_candidates) == 1:
+                convert_dev, convert_hint = payload_candidates[0]
+            elif len(payload_candidates) > 1:
+                log("Target is LUKS with multiple open ext4 payload candidates; refusing ambiguous conversion.", 'ERROR')
+                for p, h in payload_candidates:
+                    log(f"  candidate: {h} ({p})", 'ERROR')
+                log("Map and convert the exact payload target explicitly.", 'ERROR')
+                return
+            else:
+                log("Target is crypto_LUKS but no open ext4 payload device was detected.", 'ERROR')
+                log("Open the LUKS container and ensure its payload is ext4 before converting.", 'ERROR')
+                return
+        elif dev_type == 'disk':
+            parts = _lsblk_partitions(real_target)
+            ext_parts = [p for p in parts if (p.get('fstype') or '').strip().lower() == 'ext4']
+            if len(ext_parts) == 1:
+                convert_dev = os.path.realpath(f"/dev/{ext_parts[0]['name']}")
+                convert_hint = f"single ext4 partition /dev/{ext_parts[0]['name']}"
+            elif len(ext_parts) > 1:
+                log("Disk has multiple ext4 partitions; map and convert a single partition target explicitly.", 'ERROR')
+                return
+            else:
+                log(f"No ext4 filesystem found on {real_target}.", 'ERROR')
+                return
+        else:
+            log(f"Unsupported target type/fstype for convert: type={dev_type or '-'}, fstype={fstype or '-'}", 'ERROR')
+            return
+
+        convert_dev = os.path.realpath(convert_dev)
+        if not os.path.exists(convert_dev):
+            log(f"Resolved convert target does not exist: {convert_dev}", 'ERROR')
+            return
+
+        if self._block_if_root_drive(convert_dev, f"convert {target_in}"):
+            return
+
+        # convert requires an unmounted source filesystem.
+        targets = find_mount_targets(convert_dev)
+        if targets:
+            log(f"OPERATION BLOCKED: {convert_dev} is mounted at {', '.join(targets)}. Unmount/close it first.", 'ERROR')
+            return
+
+        final_fs = (_lsblk_fstype(convert_dev) or "").strip().lower()
+        if final_fs != 'ext4':
+            log(f"Resolved target is '{final_fs or 'unknown'}', but convert currently supports ext4 -> btrfs only.", 'ERROR')
+            return
+
+        print(f"Converting: {Colors.BOLD}{convert_dev}{Colors.ENDC} ({convert_hint})")
+        if not self.extensive_confirm(f"convert {target_in} ({convert_dev})", destructive=False):
+            return
+
+        run_command(['sudo', '-v'])
+
+        btrfs_convert_bin = _find_tool_or_common_paths('btrfs-convert', [
+            '/usr/sbin/btrfs-convert',
+            '/sbin/btrfs-convert',
+            '/usr/local/sbin/btrfs-convert',
+            '/usr/bin/btrfs-convert',
+            '/bin/btrfs-convert',
+        ])
+        if btrfs_convert_bin is None:
+            log("btrfs-convert not found. Install 'btrfs-progs' and retry.", 'ERROR')
+            return
+
+        e2fsck_bin = _find_tool_or_common_paths('e2fsck', [
+            '/usr/sbin/e2fsck',
+            '/sbin/e2fsck',
+            '/usr/local/sbin/e2fsck',
+            '/usr/bin/e2fsck',
+            '/bin/e2fsck',
+        ])
+        if e2fsck_bin:
+            log(f"Running pre-conversion fsck: {e2fsck_bin} -f -p {convert_dev}")
+            res_ck = run_command([e2fsck_bin, '-f', '-p', convert_dev], sudo=True, capture_output=True, check=False)
+            if (getattr(res_ck, 'stdout', '') or '').strip():
+                print((getattr(res_ck, 'stdout', '') or '').rstrip())
+            if (getattr(res_ck, 'stderr', '') or '').strip():
+                print((getattr(res_ck, 'stderr', '') or '').rstrip(), file=sys.stderr)
+            if getattr(res_ck, 'returncode', 0) not in (0, 1):
+                log(f"Pre-conversion fsck failed with exit code {res_ck.returncode}. Aborting conversion.", 'ERROR')
+                return
+
+        log(f"Running in-place conversion: {btrfs_convert_bin} {convert_dev}")
+        res_cv = run_command([btrfs_convert_bin, convert_dev], sudo=True, capture_output=True, check=False)
+        if (getattr(res_cv, 'stdout', '') or '').strip():
+            print((getattr(res_cv, 'stdout', '') or '').rstrip())
+        if (getattr(res_cv, 'stderr', '') or '').strip():
+            print((getattr(res_cv, 'stderr', '') or '').rstrip(), file=sys.stderr)
+
+        if getattr(res_cv, 'returncode', 0) != 0:
+            log(f"Conversion failed with exit code {res_cv.returncode}.", 'ERROR')
+            return
+
+        log("Conversion complete: ext4 -> btrfs.")
+        log("Rollback data is kept by btrfs-convert. Avoid btrfs balance if you may need rollback.", 'WARN')
 
     def do_format(self, arg):
         '''Format a superfloppy disk/partition volume: format <name/id> [options]
