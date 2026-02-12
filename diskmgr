@@ -3932,6 +3932,25 @@ class DiskMgrShell(cmd.Cmd):
                 seen[k] = True
                 counts[(k, kind)] = counts.get((k, kind), 0) + 1
 
+        def _add_subtree_bytes(kind, relpath, seen, byte_totals, amount):
+            relpath = _norm_relpath(relpath)
+            if not relpath or relpath.endswith('/'):
+                return
+            parts = relpath.split('/')
+            max_folder_parts = len(parts) - 1
+            if max_folder_parts < 1:
+                seen["."] = True
+                byte_totals[(".", kind)] = byte_totals.get((".", kind), 0) + int(amount)
+                return
+
+            cur = []
+            upto = min(max_folder_parts, depth)
+            for i in range(upto):
+                cur.append(parts[i])
+                k = "/".join(cur)
+                seen[k] = True
+                byte_totals[(k, kind)] = byte_totals.get((k, kind), 0) + int(amount)
+
         def _batch_stat_sizes(base_path, relpaths, chunk_size=512):
             """
             Resolve file sizes for many destination-relative paths using batched stat calls.
@@ -3996,6 +4015,7 @@ class DiskMgrShell(cmd.Cmd):
         # Summary 2 counters (folder view)
         seen = {}
         c = {}
+        cb = {}
         total_new = 0
         total_upd = 0
         total_del = 0
@@ -4051,6 +4071,7 @@ class DiskMgrShell(cmd.Cmd):
                     _add_subtree('del', p, seen, c)
                     if del_size is not None and del_size > 0:
                         del_bytes += del_size
+                        _add_subtree_bytes('del', p, seen, cb, del_size)
                     else:
                         # rsync delete lines often report 0 size; resolve after parse in batches.
                         pending_delete_paths.append(p)
@@ -4070,6 +4091,7 @@ class DiskMgrShell(cmd.Cmd):
                 total_new += 1
                 new_bytes += size_b
                 _add_subtree('new', relp, seen, c)
+                _add_subtree_bytes('new', relp, seen, cb, size_b)
                 continue
 
             # Modified regular files.
@@ -4095,12 +4117,16 @@ class DiskMgrShell(cmd.Cmd):
         if pending_delete_paths:
             del_sizes = _batch_stat_sizes(dst_path, pending_delete_paths)
             for rel in pending_delete_paths:
-                del_bytes += del_sizes.get(rel, 0)
+                sz = del_sizes.get(rel, 0)
+                del_bytes += sz
+                _add_subtree_bytes('del', rel, seen, cb, sz)
 
         if modified_entries:
             mod_dst_sizes = _batch_stat_sizes(dst_path, [rel for rel, _ in modified_entries])
             for rel, src_size in modified_entries:
-                mod_bytes += src_size - mod_dst_sizes.get(rel, 0)
+                delta = src_size - mod_dst_sizes.get(rel, 0)
+                mod_bytes += delta
+                _add_subtree_bytes('upd', rel, seen, cb, delta)
 
         print(f"Created files:  {new_files}")
         print(f"Modified files: {mod_files}")
@@ -4118,10 +4144,11 @@ class DiskMgrShell(cmd.Cmd):
         print(f"Source -> Dest: {src_path}  ->  {dst_path}")
         print(f"Depth shown: {depth} level(s)")
         print("")
-        print("Format: <folder>  (+N  ~U  -D) [status]")
+        print("Format: <folder>  (+N  ~U  -D) [status] [bytes +C  ~U  -R]")
         print("  +N = regular files that would be CREATED under this folder")
         print("  ~U = regular files that would be MODIFIED/UPDATED under this folder")
         print("  -D = regular files that would be DELETED under this folder")
+        print("  +C/~U/-R = created/updated(delta)/removed bytes under this folder")
         print("  status = created, deleted, modified, or mixed")
         print("Counts are inclusive of all descendants (subtree totals).")
         print("-----------------------------------------------")
@@ -4137,6 +4164,9 @@ class DiskMgrShell(cmd.Cmd):
             n_new = c.get((k, 'new'), 0)
             n_upd = c.get((k, 'upd'), 0)
             n_del = c.get((k, 'del'), 0)
+            b_new = cb.get((k, 'new'), 0)
+            b_upd = cb.get((k, 'upd'), 0)
+            b_del = cb.get((k, 'del'), 0)
 
             kinds = 0
             if n_new > 0:
@@ -4166,7 +4196,8 @@ class DiskMgrShell(cmd.Cmd):
                 f"{indent}{cname}  "
                 f"(+{n_new}  "
                 f"~{n_upd}  "
-                f"-{n_del}) [{status}]"
+                f"-{n_del}) [{status}] "
+                f"[bytes +{b_new:,}  ~{b_upd:+,}  -{b_del:,}]"
             )
 
         print("-----------------------------------------------")
