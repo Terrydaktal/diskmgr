@@ -932,6 +932,7 @@ class DiskMgrShell(cmd.Cmd):
         print("      For LUKS: resolves to payload filesystem when open; errors if locked/not mounted.")
         print(f"  {Colors.OKGREEN}defrag <name>{Colors.ENDC}")
         print("      Defragments a mounted filesystem and records user.last_defrag xattr.")
+        print("      On btrfs, runs defragment -r, then balance start -dusage=50.")
         print("      For LUKS: resolves to payload filesystem when open; errors if locked/not mounted.")
         print(f"  {Colors.OKGREEN}fshealth <name>{Colors.ENDC}")
         print("      Shows filesystem diagnostics, last_defrag/last_scrub xattrs, and ext4 fragmentation score.")
@@ -3832,6 +3833,7 @@ class DiskMgrShell(cmd.Cmd):
         3.  Execution:
             - ext4:  runs 'sudo e4defrag <mountpoint>'
             - btrfs: runs 'sudo btrfs filesystem defragment -r <mountpoint>'
+                     then 'sudo btrfs balance start -dusage=50 <mountpoint>'
         4.  Recording: Stores a timestamp on the mountpoint root via:
               sudo setfattr -n user.last_defrag -v "<date>" <mountpoint>
         '''
@@ -3865,7 +3867,7 @@ class DiskMgrShell(cmd.Cmd):
 
         if fstype not in ("ext4", "btrfs"):
             log(f"Defrag not supported for filesystem type '{fstype or 'unknown'}' at {mnt}.", 'ERROR')
-            log("Supported: ext4 (e4defrag), btrfs (btrfs filesystem defragment).", 'ERROR')
+            log("Supported: ext4 (e4defrag), btrfs (defragment + balance -dusage=50).", 'ERROR')
             return
 
         # Confirmation (not strictly destructive, but high-impact: rewrites lots of blocks/metadata).
@@ -3910,6 +3912,8 @@ class DiskMgrShell(cmd.Cmd):
                     return
                 log(f"Running: {btrfs_bin} filesystem defragment -r {mnt}")
                 run_command([btrfs_bin, 'filesystem', 'defragment', '-r', mnt], sudo=True, capture_output=False, check=False)
+                log(f"Running: {btrfs_bin} balance start -dusage=50 {mnt}")
+                run_command([btrfs_bin, 'balance', 'start', '-dusage=50', mnt], sudo=True, capture_output=False, check=False)
 
             # Record timestamp in xattr on mountpoint root.
             if setfattr_bin is None:
