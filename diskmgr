@@ -17,7 +17,7 @@ from pathlib import Path
 # Configuration
 MAP_FILENAME = 'diskmap.tsv'
 PASSGEN_BIN = 'passgen'
-VERSION = '2.2.9'
+VERSION = '2.3.1'
 
 # ANSI Colors
 class Colors:
@@ -937,6 +937,7 @@ class DiskMgrShell(cmd.Cmd):
         print(f"  {Colors.OKGREEN}fshealth <name>{Colors.ENDC}")
         print("      Shows filesystem diagnostics, last_defrag/last_scrub xattrs, ext4 fragmentation score,")
         print("      and btrfs fragmentation amount via compsize with an estimated ext4-like score.")
+        print("      For btrfs, also shows filesystem/device stats and scrub status.")
         print("      For LUKS: resolves to payload filesystem when open; errors if locked/not mounted.")
         print(f"  {Colors.OKGREEN}convert <name/id>{Colors.ENDC}")
         print("      Converts an UNMOUNTED ext4 filesystem to btrfs in place (btrfs-convert).")
@@ -3943,6 +3944,10 @@ class DiskMgrShell(cmd.Cmd):
         - ext4:  sudo tune2fs -l <device>
                 sudo e4defrag -c <mountpoint>   (fragmentation score)
         - btrfs: sudo btrfs filesystem usage <mountpoint>
+                sudo btrfs filesystem show <mountpoint>
+                sudo btrfs filesystem df <mountpoint>
+                sudo btrfs device stats <mountpoint>
+                sudo btrfs scrub status <mountpoint>
                 sudo compsize <mountpoint>  (fragmentation amount + ext4-like score estimate)
         - xfs:   xfs_info <mountpoint>
 
@@ -4180,6 +4185,34 @@ class DiskMgrShell(cmd.Cmd):
                 return
             print(f"\n{Colors.HEADER}{Colors.BOLD}--- btrfs filesystem usage {mnt} ---{Colors.ENDC}")
             res = run_command([btrfs_bin, 'filesystem', 'usage', mnt], sudo=True, capture_output=True, check=False)
+            if (res.stdout or "").strip():
+                print(res.stdout.rstrip())
+            if (res.stderr or "").strip():
+                print(res.stderr.rstrip(), file=sys.stderr)
+
+            print(f"\n{Colors.HEADER}{Colors.BOLD}--- btrfs filesystem show {mnt} ---{Colors.ENDC}")
+            res = run_command([btrfs_bin, 'filesystem', 'show', mnt], sudo=True, capture_output=True, check=False)
+            if (res.stdout or "").strip():
+                print(res.stdout.rstrip())
+            if (res.stderr or "").strip():
+                print(res.stderr.rstrip(), file=sys.stderr)
+
+            print(f"\n{Colors.HEADER}{Colors.BOLD}--- btrfs filesystem df {mnt} ---{Colors.ENDC}")
+            res = run_command([btrfs_bin, 'filesystem', 'df', mnt], sudo=True, capture_output=True, check=False)
+            if (res.stdout or "").strip():
+                print(res.stdout.rstrip())
+            if (res.stderr or "").strip():
+                print(res.stderr.rstrip(), file=sys.stderr)
+
+            print(f"\n{Colors.HEADER}{Colors.BOLD}--- btrfs device stats {mnt} ---{Colors.ENDC}")
+            res = run_command([btrfs_bin, 'device', 'stats', mnt], sudo=True, capture_output=True, check=False)
+            if (res.stdout or "").strip():
+                print(res.stdout.rstrip())
+            if (res.stderr or "").strip():
+                print(res.stderr.rstrip(), file=sys.stderr)
+
+            print(f"\n{Colors.HEADER}{Colors.BOLD}--- btrfs scrub status {mnt} ---{Colors.ENDC}")
+            res = run_command([btrfs_bin, 'scrub', 'status', mnt], sudo=True, capture_output=True, check=False)
             if (res.stdout or "").strip():
                 print(res.stdout.rstrip())
             if (res.stderr or "").strip():
