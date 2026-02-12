@@ -17,7 +17,7 @@ from pathlib import Path
 # Configuration
 MAP_FILENAME = 'diskmap.tsv'
 PASSGEN_BIN = 'passgen'
-VERSION = '2.4.7'
+VERSION = '2.4.9'
 
 # ANSI Colors
 class Colors:
@@ -900,7 +900,8 @@ class DiskMgrShell(cmd.Cmd):
         print("      Partition target: formats inside that partition boundary (not a superfloppy), then mounts it.")
         print("      Default is plain format. Use --luks to run cryptsetup luksFormat, open a mapper,")
         print("      then mkfs the decrypted payload filesystem inside the LUKS container.")
-        print("      Whole disks must be unpartitioned. Existing partitions are never created/modified by format.")
+        print("      Whole disks must be unpartitioned. format never creates, deletes, resizes, or moves partitions;")
+        print("      it only writes a filesystem/LUKS+filesystem inside the selected disk or partition target.")
         print("      Use: erase <name> first if the whole disk is currently partitioned.")
         print(f"  {Colors.OKGREEN}erase <name/id>{Colors.ENDC}")
         print("      Fast metadata wipe for re-provisioning (wipefs + zap GPT/MBR metadata) on disk/part.")
