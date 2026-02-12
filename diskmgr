@@ -3980,6 +3980,7 @@ class DiskMgrShell(cmd.Cmd):
                         sizes[rel] = int(st.st_size)
                     except OSError:
                         pass
+            return sizes
 
         # Summary 1 counters
         new_files = 0
