@@ -934,6 +934,7 @@ class DiskMgrShell(cmd.Cmd):
         print(f"  {Colors.OKGREEN}diff <sec_name> <pri_name> [--depth N]{Colors.ENDC}")
         print("      Dry-run filesystem diff (rsync pri -> sec): shows create/modify/delete counts+bytes,")
         print("      then a per-folder subtree summary (+new, ~updated, -deleted regular files).")
+        print("      Depth default: 2.")
         print("      For LUKS: resolves to payload filesystem when open; errors if locked/not mounted.")
         print(f"  {Colors.OKGREEN}defrag <name>{Colors.ENDC}")
         print("      Defragments a mounted filesystem and records user.last_defrag xattr.")
@@ -3841,7 +3842,7 @@ class DiskMgrShell(cmd.Cmd):
         parser = CmdArgumentParser(prog='diff', add_help=False)
         parser.add_argument('secondary_name')
         parser.add_argument('primary_name')
-        parser.add_argument('--depth', type=int, default=3, help='Folder depth for subtree summary (default: 3)')
+        parser.add_argument('--depth', type=int, default=2, help='Folder depth for subtree summary (default: 2)')
         try:
             split_args = shlex.split(arg)
             args = parser.parse_args(split_args)
