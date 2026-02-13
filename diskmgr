@@ -1036,7 +1036,7 @@ class DiskMgrShell(cmd.Cmd):
         Usage:
           list            -> verbose table (default)
           list verbose    -> explicit verbose table
-          list concise    -> compact table (#, NAME, DEVICE, TYPE, MOUNTPOINT, PERSISTENT PATH)
+          list concise    -> compact table (#, NAME, DEVICE, TYPE, FSTAB, MOUNTPOINT, PERSISTENT PATH)
           list list       -> list-style entries (key/value) instead of a table
         
         UNDER THE HOOD:
@@ -1100,6 +1100,9 @@ class DiskMgrShell(cmd.Cmd):
             friendly_map = {}
             missing_mappings = []
 
+        fstab_real_set = self._fstab_real_devices()
+        fstab_uuid_set = self._fstab_uuid_values()
+
         disk_rows = {}
         for d in disks:
             d_name = d.get('name', '')
@@ -1114,7 +1117,12 @@ class DiskMgrShell(cmd.Cmd):
                 if (getattr(ls_res, 'stdout', '') or '').strip():
                     data = json.loads(ls_res.stdout)
                     if 'blockdevices' in data:
-                        rows = self._collect_lsblk_rows(data['blockdevices'], friendly_map=friendly_map)
+                        rows = self._collect_lsblk_rows(
+                            data['blockdevices'],
+                            friendly_map=friendly_map,
+                            fstab_real_set=fstab_real_set,
+                            fstab_uuid_set=fstab_uuid_set
+                        )
                 disk_rows[d_name] = rows
             except Exception:
                 disk_rows[d_name] = []
@@ -1381,6 +1389,7 @@ class DiskMgrShell(cmd.Cmd):
             "NAME",
             "DEVICE",
             "TYPE",
+            "FSTAB",
             "FSTYPE",
             "FSLABEL",
             "FSUUID",
@@ -1396,9 +1405,127 @@ class DiskMgrShell(cmd.Cmd):
             "NAME",
             "DEVICE",
             "TYPE",
+            "FSTAB",
             "MOUNTPOINT",
             "PERSISTENT PATH (IEEE)",
         ]
+
+    def _resolve_fstab_spec_to_realdev(self, spec):
+        """
+        Resolve one /etc/fstab source spec to a real /dev path when possible.
+        Returns a realpath string or None.
+        """
+        s = (spec or "").strip()
+        if not s:
+            return None
+
+        # Common non-block pseudo filesystems.
+        if s in ("none", "proc", "sysfs", "tmpfs", "devtmpfs", "devpts", "cgroup", "cgroup2", "overlay", "swap"):
+            return None
+
+        try:
+            if s.startswith("/dev/"):
+                return os.path.realpath(s) if os.path.exists(s) else None
+
+            if s.startswith("UUID="):
+                uuid = s[len("UUID="):]
+                by_uuid = f"/dev/disk/by-uuid/{uuid}"
+                if os.path.exists(by_uuid):
+                    return os.path.realpath(by_uuid)
+                res = run_command(['blkid', '-U', uuid], capture_output=True, check=False)
+                p = (getattr(res, 'stdout', '') or '').strip()
+                return os.path.realpath(p) if p and os.path.exists(p) else None
+
+            if s.startswith("PARTUUID="):
+                pu = s[len("PARTUUID="):]
+                by_partuuid = f"/dev/disk/by-partuuid/{pu}"
+                if os.path.exists(by_partuuid):
+                    return os.path.realpath(by_partuuid)
+                res = run_command(['blkid', '-t', f'PARTUUID={pu}', '-o', 'device'], capture_output=True, check=False)
+                lines = [ln.strip() for ln in (getattr(res, 'stdout', '') or '').splitlines() if ln.strip()]
+                if lines and os.path.exists(lines[0]):
+                    return os.path.realpath(lines[0])
+                return None
+
+            if s.startswith("LABEL="):
+                lbl = s[len("LABEL="):]
+                by_label = f"/dev/disk/by-label/{lbl}"
+                if os.path.exists(by_label):
+                    return os.path.realpath(by_label)
+                res = run_command(['blkid', '-L', lbl], capture_output=True, check=False)
+                p = (getattr(res, 'stdout', '') or '').strip()
+                return os.path.realpath(p) if p and os.path.exists(p) else None
+
+            if s.startswith("PARTLABEL="):
+                pl = s[len("PARTLABEL="):]
+                by_partlabel = f"/dev/disk/by-partlabel/{pl}"
+                if os.path.exists(by_partlabel):
+                    return os.path.realpath(by_partlabel)
+                res = run_command(['blkid', '-t', f'PARTLABEL={pl}', '-o', 'device'], capture_output=True, check=False)
+                lines = [ln.strip() for ln in (getattr(res, 'stdout', '') or '').splitlines() if ln.strip()]
+                if lines and os.path.exists(lines[0]):
+                    return os.path.realpath(lines[0])
+                return None
+        except Exception:
+            return None
+
+        return None
+
+    def _fstab_real_devices(self):
+        """
+        Build set of real /dev paths referenced by active OS /etc/fstab.
+        """
+        out = set()
+        fstab = Path('/etc/fstab')
+        if not fstab.exists():
+            return out
+        try:
+            lines = fstab.read_text(errors='replace').splitlines()
+        except Exception:
+            return out
+
+        for raw in lines:
+            line = (raw or '').strip()
+            if not line or line.startswith('#'):
+                continue
+            body = raw.split('#', 1)[0].strip()
+            if not body:
+                continue
+            parts = body.split()
+            if len(parts) < 2:
+                continue
+            real_dev = self._resolve_fstab_spec_to_realdev(parts[0])
+            if real_dev:
+                out.add(real_dev)
+        return out
+
+    def _fstab_uuid_values(self):
+        """
+        Build set of UUID values referenced as UUID=... in /etc/fstab.
+        """
+        out = set()
+        fstab = Path('/etc/fstab')
+        if not fstab.exists():
+            return out
+        try:
+            lines = fstab.read_text(errors='replace').splitlines()
+        except Exception:
+            return out
+
+        for raw in lines:
+            line = (raw or '').strip()
+            if not line or line.startswith('#'):
+                continue
+            body = raw.split('#', 1)[0].strip()
+            if not body:
+                continue
+            parts = body.split()
+            if len(parts) < 2:
+                continue
+            spec = (parts[0] or '').strip()
+            if spec.startswith("UUID="):
+                out.add(spec[len("UUID="):].strip().lower())
+        return out
 
     def _lsblk_col_widths(self, rows, cols=None):
         if cols is None:
@@ -1450,12 +1577,16 @@ class DiskMgrShell(cmd.Cmd):
                 max_len = max(max_len, len(f"  {c}: {v}"))
         return max_len
 
-    def _collect_lsblk_rows(self, devices, indent="", is_root=True, parent_wwn="", friendly_map=None):
+    def _collect_lsblk_rows(self, devices, indent="", is_root=True, parent_wwn="", friendly_map=None, fstab_real_set=None, fstab_uuid_set=None):
         """
         Collect an lsblk JSON tree into flat rows, while preserving the tree glyphs in NAME.
         Returns a list of dicts with consistent string keys.
         """
         rows = []
+        if fstab_real_set is None:
+            fstab_real_set = set()
+        if fstab_uuid_set is None:
+            fstab_uuid_set = set()
         for i, dev in enumerate(devices):
             is_last = (i == len(devices) - 1)
 
@@ -1510,6 +1641,9 @@ class DiskMgrShell(cmd.Cmd):
                 except Exception:
                     friendly = "-"
 
+            dev_real = os.path.realpath(f"/dev/{kname}")
+            uuid_norm = (str(uuid).strip().lower() if uuid else "")
+            in_fstab = (dev_real in fstab_real_set) or (uuid_norm in fstab_uuid_set if uuid_norm else False)
             rows.append({
                 "#": "-",
                 "KNAME": kname,
@@ -1517,6 +1651,7 @@ class DiskMgrShell(cmd.Cmd):
                 "DEVICE": tree_part,
                 "PERSISTENT PATH (IEEE)": pdp,
                 "TYPE": dtype,
+                "FSTAB": "y" if in_fstab else "n",
                 "SIZE": size,
                 "FSTYPE": fstype,
                 "FSLABEL": label,
@@ -1527,7 +1662,15 @@ class DiskMgrShell(cmd.Cmd):
             })
 
             if 'children' in dev:
-                rows.extend(self._collect_lsblk_rows(dev['children'], next_indent, is_root=False, parent_wwn=wwn, friendly_map=friendly_map))
+                rows.extend(self._collect_lsblk_rows(
+                    dev['children'],
+                    next_indent,
+                    is_root=False,
+                    parent_wwn=wwn,
+                    friendly_map=friendly_map,
+                    fstab_real_set=fstab_real_set,
+                    fstab_uuid_set=fstab_uuid_set
+                ))
         return rows
 
     def _print_lsblk_rows(self, rows, widths=None, cols=None):
