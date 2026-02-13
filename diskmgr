@@ -2894,7 +2894,9 @@ class DiskMgrShell(cmd.Cmd):
                 log(f"Unsupported filesystem for labeling: {fstype}", 'ERROR')
                 return
 
-        if label_changed:
+        if label_changed or write_fstab:
+            if write_fstab and not label_changed:
+                log("Label is unchanged; ensuring /etc/fstab entry is present for this label.")
             try:
                 removed, added, new_mp = self._update_fstab_for_label_change(
                     target_dev=target_dev,
