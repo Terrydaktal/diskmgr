@@ -13,12 +13,20 @@ import re
 import shutil
 import datetime
 import threading
+import atexit
 from pathlib import Path
+try:
+    import readline
+except ImportError:
+    readline = None
 
 # Configuration
 MAP_FILENAME = 'diskmap.tsv'
 PASSGEN_BIN = 'passgen'
 VERSION = '2.5.0'
+HISTORY_FILE_ENV = 'DISKMGR_HISTORY'
+DEFAULT_HISTORY_FILE = Path.home() / '.diskmgr_history'
+MAX_HISTORY_ENTRIES = 5000
 
 # ANSI Colors
 class Colors:
@@ -786,6 +794,37 @@ class DiskMgrShell(cmd.Cmd):
         self.mappings = read_luks_map()
         self.unmapped_cache = []
         self.id_cache = {}
+        self.history_file = Path(os.environ.get(HISTORY_FILE_ENV, str(DEFAULT_HISTORY_FILE))).expanduser()
+        self.history_enabled = False
+        self._init_history()
+
+    def _init_history(self):
+        if readline is None:
+            return
+        try:
+            readline.read_history_file(str(self.history_file))
+        except FileNotFoundError:
+            pass
+        except Exception:
+            # Best-effort: shell remains usable even if history cannot be read.
+            pass
+        try:
+            readline.set_history_length(MAX_HISTORY_ENTRIES)
+        except Exception:
+            pass
+        atexit.register(self._save_history)
+        self.history_enabled = True
+
+    def _save_history(self):
+        if not self.history_enabled or readline is None:
+            return
+        try:
+            self.history_file.parent.mkdir(parents=True, exist_ok=True)
+            readline.set_history_length(MAX_HISTORY_ENTRIES)
+            readline.write_history_file(str(self.history_file))
+        except Exception:
+            # Best-effort: do not block shell exit on history write errors.
+            pass
 
     def get_disk_info(self):
         # Use lsblk -J for JSON output
@@ -965,6 +1004,7 @@ class DiskMgrShell(cmd.Cmd):
         print(f"\n{Colors.BOLD}shell:{Colors.ENDC}")
         print(f"  {Colors.OKGREEN}version{Colors.ENDC}")
         print("      Print diskmgr version.")
+        print(f"      Command history persists across sessions in {self.history_file} (override with ${HISTORY_FILE_ENV}).")
         print(f"  {Colors.OKGREEN}exit / quit / Ctrl+D{Colors.ENDC}")
         print("      Exit the application.")
 
@@ -974,15 +1014,18 @@ class DiskMgrShell(cmd.Cmd):
 
     def do_exit(self, arg):
         'Exit the application'
+        self._save_history()
         return True
 
     def do_quit(self, arg):
         'Exit the application'
+        self._save_history()
         return True
 
     def do_EOF(self, arg):
         'Exit the application'
         print("")
+        self._save_history()
         return True
 
     def do_list(self, arg):
