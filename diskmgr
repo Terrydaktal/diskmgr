@@ -910,9 +910,9 @@ class DiskMgrShell(cmd.Cmd):
         print("Mappings point to persistent device paths so names remain stable across reboots/ports.\n")
 
         print(f"{Colors.BOLD}all:{Colors.ENDC}")
-        print(f"  {Colors.OKGREEN}list [concise|verbose] [list]{Colors.ENDC}")
-        print("      Displays disk layout (verbose table by default).")
-        print("      Use concise for fewer columns, or list mode for key/value entries.")
+        print(f"  {Colors.OKGREEN}list [standard|concise|verbose] [list]{Colors.ENDC}")
+        print("      Displays disk layout (standard table by default).")
+        print("      Use concise for fewer columns, verbose for full columns, or list mode for key/value entries.")
         print(f"  {Colors.OKGREEN}boot{Colors.ENDC}")
         print("      Displays boot entries/submenus from GRUB and /etc/fstab detection per partition.")
 
@@ -1034,8 +1034,9 @@ class DiskMgrShell(cmd.Cmd):
     def do_list(self, arg):
         '''Display the physical partition layout and free space for all plugged-in disks.
         Usage:
-          list            -> verbose table (default)
-          list verbose    -> explicit verbose table
+          list            -> standard table (default)
+          list standard   -> explicit standard table
+          list verbose    -> full verbose table (includes FSTAB ENTRY details)
           list concise    -> compact table (#, NAME, DEVICE, TYPE, MOUNTPOINT, FSTAB, PERSISTENT PATH)
           list list       -> list-style entries (key/value) with full verbose fields
         
@@ -1051,11 +1052,13 @@ class DiskMgrShell(cmd.Cmd):
             - Calculates MiB and GiB values from sector counts.
         '''
         argv = shlex.split(arg) if arg else []
-        mode = 'verbose'
+        mode = 'standard'
         render_mode = 'table'
         for token in argv:
             t = token.strip().lower()
-            if t in ('concise', '--concise', '-c'):
+            if t in ('standard', '--standard', '-s'):
+                mode = 'standard'
+            elif t in ('concise', '--concise', '-c'):
                 mode = 'concise'
             elif t in ('verbose', '--verbose', '-v'):
                 mode = 'verbose'
@@ -1064,13 +1067,18 @@ class DiskMgrShell(cmd.Cmd):
             elif t in ('table', '--table', '-t'):
                 render_mode = 'table'
             else:
-                log(f"Unknown list option: {token}. Use: list [concise|verbose] [list]", 'ERROR')
+                log(f"Unknown list option: {token}. Use: list [standard|concise|verbose] [list]", 'ERROR')
                 return
 
         if render_mode == 'list':
             selected_cols = self._lsblk_verbose_cols()
         else:
-            selected_cols = self._lsblk_concise_cols() if mode == 'concise' else self._lsblk_verbose_cols()
+            if mode == 'concise':
+                selected_cols = self._lsblk_concise_cols()
+            elif mode == 'verbose':
+                selected_cols = self._lsblk_verbose_cols()
+            else:
+                selected_cols = self._lsblk_standard_cols()
 
         all_devs = self.get_disk_info()
         disks = [d for d in all_devs if d.get('type') == 'disk']
@@ -1403,6 +1411,24 @@ class DiskMgrShell(cmd.Cmd):
             "FSMOUNTPOINTS",
             "FSTAB",
             "FSTAB ENTRY",
+            "PERSISTENT PATH (IEEE)",
+        ]
+
+    def _lsblk_standard_cols(self):
+        return [
+            "#",
+            "NAME",
+            "DEVICE",
+            "TYPE",
+            "FSTYPE",
+            "FSVER",
+            "FSLABEL",
+            "FSUUID",
+            "SIZE",
+            "FSAVAIL",
+            "FSUSE%",
+            "FSMOUNTPOINTS",
+            "FSTAB",
             "PERSISTENT PATH (IEEE)",
         ]
 
