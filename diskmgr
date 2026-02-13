@@ -1037,7 +1037,7 @@ class DiskMgrShell(cmd.Cmd):
           list            -> standard table (default)
           list standard   -> explicit standard table
           list verbose    -> full verbose table (includes FSTAB ENTRY details)
-          list concise    -> compact table (#, NAME, DEVICE, TYPE, MOUNTPOINT, FSTAB, PERSISTENT PATH)
+          list concise    -> compact table (#, NAME, DEVICE, TYPE, MOUNTPOINT, PERSISTENT PATH)
           list list       -> list-style entries (key/value) with full verbose fields
         
         UNDER THE HOOD:
@@ -1426,9 +1426,7 @@ class DiskMgrShell(cmd.Cmd):
             "FSUUID",
             "SIZE",
             "FSAVAIL",
-            "FSUSE%",
             "FSMOUNTPOINTS",
-            "FSTAB",
             "PERSISTENT PATH (IEEE)",
         ]
 
@@ -1439,7 +1437,6 @@ class DiskMgrShell(cmd.Cmd):
             "DEVICE",
             "TYPE",
             "MOUNTPOINT",
-            "FSTAB",
             "PERSISTENT PATH (IEEE)",
         ]
 
