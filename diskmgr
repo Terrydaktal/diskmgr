@@ -3920,11 +3920,12 @@ class DiskMgrShell(cmd.Cmd):
             relpath = _norm_relpath(relpath)
             if not relpath or relpath.endswith('/'):
                 return
+            # Root always tracks full-tree totals for all changed files.
+            seen["."] = True
+            counts[(".", kind)] = counts.get((".", kind), 0) + 1
             parts = relpath.split('/')
             max_folder_parts = len(parts) - 1
             if max_folder_parts < 1:
-                seen["."] = True
-                counts[(".", kind)] = counts.get((".", kind), 0) + 1
                 return
 
             cur = []
@@ -3939,11 +3940,12 @@ class DiskMgrShell(cmd.Cmd):
             relpath = _norm_relpath(relpath)
             if not relpath or relpath.endswith('/'):
                 return
+            # Root always tracks full-tree totals for all changed-file byte deltas.
+            seen["."] = True
+            byte_totals[(".", kind)] = byte_totals.get((".", kind), 0) + int(amount)
             parts = relpath.split('/')
             max_folder_parts = len(parts) - 1
             if max_folder_parts < 1:
-                seen["."] = True
-                byte_totals[(".", kind)] = byte_totals.get((".", kind), 0) + int(amount)
                 return
 
             cur = []
@@ -4198,14 +4200,19 @@ class DiskMgrShell(cmd.Cmd):
 
         def _entry_sort_key(entry):
             etype, path = entry
-            parts = [] if path == "." else path.split('/')
-            return (parts, 0 if etype == 'dir' else 1)
+            if path == ".":
+                return ([], 0, "")
+            parts = path.split('/')
+            parent = parts[:-1]
+            name = parts[-1]
+            # Within each parent, show directories before files.
+            return (parent, 0 if etype == 'dir' else 1, name)
 
         for etype, path in sorted(entries, key=_entry_sort_key):
             if etype == 'dir':
                 depth_here = 0 if path == "." else (path.count('/') + 1)
                 indent = " " * (depth_here * 2)
-                name = "./" if path == "." else (path.split('/')[-1] + "/")
+                name = "/" if path == "." else (path.split('/')[-1] + "/")
                 n_new = c.get((path, 'new'), 0)
                 n_upd = c.get((path, 'upd'), 0)
                 n_del = c.get((path, 'del'), 0)
