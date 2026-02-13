@@ -982,6 +982,7 @@ class DiskMgrShell(cmd.Cmd):
         print("      Depth default: 2.")
         print("      Use -d to show directories only.")
         print("      Use --fast to print raw rsync -an --delete --stats output only (no summaries).")
+        print("      In --fast, created(new+updated) regular files = 'Number of regular files transferred'.")
         print("      Unchanged entries are shown uncolored.")
         print("      Endpoints may be mapped names/IDs or absolute directory paths.")
         print("      For LUKS: resolves to payload filesystem when open; errors if locked/not mounted.")
@@ -3960,9 +3961,21 @@ class DiskMgrShell(cmd.Cmd):
             res_fast = run_command(
                 ['rsync', '-an', '--delete', '--stats', src_path, dst_path],
                 sudo=True,
-                capture_output=False,
+                capture_output=True,
                 check=False
             )
+            out_fast = (getattr(res_fast, 'stdout', '') or '')
+            err_fast = (getattr(res_fast, 'stderr', '') or '')
+            if out_fast.strip():
+                print(out_fast.rstrip())
+            if err_fast.strip():
+                print(err_fast.rstrip(), file=sys.stderr)
+
+            m_rf = re.search(r'^\s*Number of regular files transferred:\s*([0-9][0-9,]*)\s*$', out_fast, flags=re.MULTILINE)
+            if m_rf:
+                n_rf = int(m_rf.group(1).replace(',', ''))
+                print(f"Fast note: created (new+updated regular files) = {n_rf:,}.")
+
             rc_fast = getattr(res_fast, 'returncode', 0)
             if rc_fast not in (0, 24):
                 log(f"rsync dry-run exited with status {rc_fast}. Output may be incomplete.", 'WARN')
