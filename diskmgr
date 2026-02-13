@@ -937,10 +937,11 @@ class DiskMgrShell(cmd.Cmd):
         print(f"  {Colors.OKGREEN}sync <pri_name> <sec_name>{Colors.ENDC}")
         print("      Syncs two mounted filesystems (rsync pri -> sec).")
         print("      For LUKS: resolves to payload filesystem when open; errors if locked/not mounted.")
-        print(f"  {Colors.OKGREEN}diff <pri_name> <sec_name> [--depth N]{Colors.ENDC}")
+        print(f"  {Colors.OKGREEN}diff <pri_name> <sec_name> [--depth N] [-d]{Colors.ENDC}")
         print("      Dry-run filesystem diff (rsync pri -> sec): shows create/modify/delete counts+bytes,")
-        print("      then a per-folder subtree summary (+new, ~updated, -deleted regular files).")
+        print("      then a hierarchy summary of dirs/files (+new, ~updated, -deleted regular files).")
         print("      Depth default: 2.")
+        print("      Use -d to show directories only.")
         print("      Endpoints may be mapped names/IDs or absolute directory paths.")
         print("      For LUKS: resolves to payload filesystem when open; errors if locked/not mounted.")
         print(f"  {Colors.OKGREEN}defrag <name>{Colors.ENDC}")
@@ -3840,17 +3841,18 @@ class DiskMgrShell(cmd.Cmd):
             log(f"Sync failed: {e}", 'ERROR')
 
     def do_diff(self, arg):
-        '''Preview differences between two mounted filesystems: diff <primary_name> <secondary_name> [--depth N]
+        '''Preview differences between two mounted filesystems: diff <primary_name> <secondary_name> [--depth N] [-d]
 
         Endpoints may be mapping names/IDs (must be mounted) or absolute directory paths.
         Uses rsync dry-run itemized output (primary -> secondary) and prints:
         1) Change counts and byte estimates (created/modified/deleted, net change).
-        2) Folder summary by subtree up to --depth levels.
+        2) Hierarchy summary by subtree up to --depth levels.
         '''
         parser = CmdArgumentParser(prog='diff', add_help=False)
         parser.add_argument('primary_name')
         parser.add_argument('secondary_name')
-        parser.add_argument('--depth', type=int, default=2, help='Folder depth for subtree summary (default: 2)')
+        parser.add_argument('--depth', type=int, default=2, help='Hierarchy depth for subtree summary (default: 2)')
+        parser.add_argument('-d', '--dirs-only', action='store_true', help='Show directories only in hierarchy output')
         try:
             split_args = shlex.split(arg)
             args = parser.parse_args(split_args)
@@ -3867,6 +3869,7 @@ class DiskMgrShell(cmd.Cmd):
         primary = args.primary_name
         secondary = args.secondary_name
         depth = args.depth
+        dirs_only = args.dirs_only
 
         def _resolve_diff_endpoint(value, role_label):
             if os.path.isabs(value):
@@ -3951,6 +3954,30 @@ class DiskMgrShell(cmd.Cmd):
                 seen[k] = True
                 byte_totals[(k, kind)] = byte_totals.get((k, kind), 0) + int(amount)
 
+        def _add_file_change(kind, relpath, file_counts, file_bytes, amount):
+            relpath = _norm_relpath(relpath)
+            if not relpath or relpath.endswith('/'):
+                return
+            file_counts[(relpath, kind)] = file_counts.get((relpath, kind), 0) + 1
+            file_bytes[(relpath, kind)] = file_bytes.get((relpath, kind), 0) + int(amount)
+
+        def _fmt_size_human(num_bytes, signed=False):
+            n = int(num_bytes or 0)
+            neg = n < 0
+            v = abs(float(n))
+            units = ['B', 'KB', 'MB', 'GB']
+            idx = 0
+            while idx < len(units) - 1 and v >= 1024.0:
+                v /= 1024.0
+                idx += 1
+            if idx == 0:
+                txt = f"{int(v)}B"
+            else:
+                txt = f"{v:.2f}".rstrip('0').rstrip('.') + units[idx]
+            if signed:
+                return ("-" if neg else "+") + txt
+            return ("-" if neg else "") + txt
+
         def _batch_stat_sizes(base_path, relpaths, chunk_size=512):
             """
             Resolve file sizes for many destination-relative paths using batched stat calls.
@@ -4016,6 +4043,8 @@ class DiskMgrShell(cmd.Cmd):
         seen = {}
         c = {}
         cb = {}
+        fc = {}
+        fb = {}
         total_new = 0
         total_upd = 0
         total_del = 0
@@ -4072,6 +4101,7 @@ class DiskMgrShell(cmd.Cmd):
                     if del_size is not None and del_size > 0:
                         del_bytes += del_size
                         _add_subtree_bytes('del', p, seen, cb, del_size)
+                        _add_file_change('del', p, fc, fb, del_size)
                     else:
                         # rsync delete lines often report 0 size; resolve after parse in batches.
                         pending_delete_paths.append(p)
@@ -4092,6 +4122,7 @@ class DiskMgrShell(cmd.Cmd):
                 new_bytes += size_b
                 _add_subtree('new', relp, seen, c)
                 _add_subtree_bytes('new', relp, seen, cb, size_b)
+                _add_file_change('new', relp, fc, fb, size_b)
                 continue
 
             # Modified regular files.
@@ -4120,6 +4151,7 @@ class DiskMgrShell(cmd.Cmd):
                 sz = del_sizes.get(rel, 0)
                 del_bytes += sz
                 _add_subtree_bytes('del', rel, seen, cb, sz)
+                _add_file_change('del', rel, fc, fb, sz)
 
         if modified_entries:
             mod_dst_sizes = _batch_stat_sizes(dst_path, [rel for rel, _ in modified_entries])
@@ -4127,6 +4159,7 @@ class DiskMgrShell(cmd.Cmd):
                 delta = src_size - mod_dst_sizes.get(rel, 0)
                 mod_bytes += delta
                 _add_subtree_bytes('upd', rel, seen, cb, delta)
+                _add_file_change('upd', rel, fc, fb, delta)
 
         print(f"Created files:  {new_files}")
         print(f"Modified files: {mod_files}")
@@ -4140,33 +4173,55 @@ class DiskMgrShell(cmd.Cmd):
         print(f"Net Change:     {new_bytes + mod_bytes - del_bytes:,} bytes")
         print("")
 
-        print("Rsync dry-run change summary by folder (subtree counts)")
+        print("Rsync dry-run change summary by hierarchy")
         print(f"Source -> Dest: {src_path}  ->  {dst_path}")
         print(f"Depth shown: {depth} level(s)")
         print("")
-        print("Format: <folder>  (+N  ~U  -D) [status] [bytes +C  ~U  -R]")
-        print("  +N = regular files that would be CREATED under this folder")
-        print("  ~U = regular files that would be MODIFIED/UPDATED under this folder")
-        print("  -D = regular files that would be DELETED under this folder")
-        print("  +C/~U/-R = created/updated(delta)/removed bytes under this folder")
-        print("  status = created, deleted, modified, or mixed")
+        print("Format: <name[/]>  (+N  ~U  -D) [bytes +C  ~U  -R]")
+        print("  +N = regular files that would be CREATED under this entry/subtree")
+        print("  ~U = regular files that would be MODIFIED/UPDATED under this entry/subtree")
+        print("  -D = regular files that would be DELETED under this entry/subtree")
+        print("  +C/~U/-R = created/updated(delta)/removed bytes under this entry/subtree")
+        print("  Directories end with '/'.")
         print("Counts are inclusive of all descendants (subtree totals).")
         print("-----------------------------------------------")
 
-        keys = sorted(seen.keys())
-        for k in keys:
-            depth_here = 0 if k == "." else (k.count('/') + 1)
-            indent = " " * (depth_here * 2)
-            if k == ".":
-                name = "."
+        entries = []
+        for k in sorted(seen.keys()):
+            entries.append(('dir', k))
+
+        if not dirs_only:
+            for relp in sorted({k for (k, _kind) in fc.keys()}):
+                parent_depth = relp.count('/')
+                if parent_depth <= depth:
+                    entries.append(('file', relp))
+
+        def _entry_sort_key(entry):
+            etype, path = entry
+            parts = [] if path == "." else path.split('/')
+            return (parts, 0 if etype == 'dir' else 1)
+
+        for etype, path in sorted(entries, key=_entry_sort_key):
+            if etype == 'dir':
+                depth_here = 0 if path == "." else (path.count('/') + 1)
+                indent = " " * (depth_here * 2)
+                name = "./" if path == "." else (path.split('/')[-1] + "/")
+                n_new = c.get((path, 'new'), 0)
+                n_upd = c.get((path, 'upd'), 0)
+                n_del = c.get((path, 'del'), 0)
+                b_new = cb.get((path, 'new'), 0)
+                b_upd = cb.get((path, 'upd'), 0)
+                b_del = cb.get((path, 'del'), 0)
             else:
-                name = k.split('/')[-1]
-            n_new = c.get((k, 'new'), 0)
-            n_upd = c.get((k, 'upd'), 0)
-            n_del = c.get((k, 'del'), 0)
-            b_new = cb.get((k, 'new'), 0)
-            b_upd = cb.get((k, 'upd'), 0)
-            b_del = cb.get((k, 'del'), 0)
+                depth_here = path.count('/') + 1
+                indent = " " * (depth_here * 2)
+                name = path.split('/')[-1]
+                n_new = fc.get((path, 'new'), 0)
+                n_upd = fc.get((path, 'upd'), 0)
+                n_del = fc.get((path, 'del'), 0)
+                b_new = fb.get((path, 'new'), 0)
+                b_upd = fb.get((path, 'upd'), 0)
+                b_del = fb.get((path, 'del'), 0)
 
             kinds = 0
             if n_new > 0:
@@ -4177,27 +4232,21 @@ class DiskMgrShell(cmd.Cmd):
                 kinds += 1
 
             if kinds > 1:
-                status = "mixed"
+                color = Colors.WARNING
             elif n_new > 0:
-                status = "created"
-            elif n_del > 0:
-                status = "deleted"
-            else:
-                status = "modified"
-
-            if status == "created":
                 color = Colors.OKGREEN
-            elif status == "deleted":
+            elif n_del > 0:
                 color = Colors.FAIL
             else:
                 color = Colors.WARNING
+
             cname = f"{color}{name}{Colors.ENDC}"
             print(
                 f"{indent}{cname}  "
                 f"(+{n_new}  "
                 f"~{n_upd}  "
-                f"-{n_del}) [{status}] "
-                f"[bytes +{b_new:,}  ~{b_upd:+,}  -{b_del:,}]"
+                f"-{n_del}) "
+                f"[bytes +{_fmt_size_human(b_new)}  ~{_fmt_size_human(b_upd, signed=True)}  -{_fmt_size_human(b_del)}]"
             )
 
         print("-----------------------------------------------")
