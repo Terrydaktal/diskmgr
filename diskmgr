@@ -1111,7 +1111,7 @@ class DiskMgrShell(cmd.Cmd):
             dev_path = f"/dev/{d_name}"
             try:
                 ls_res = run_command(['lsblk', '-J', '-f', '-o',
-                                      'NAME,KNAME,TYPE,SIZE,FSTYPE,LABEL,UUID,FSAVAIL,MOUNTPOINTS,WWN',
+                                      'NAME,KNAME,TYPE,SIZE,FSTYPE,FSVER,LABEL,UUID,FSAVAIL,FSUSE%,MOUNTPOINTS,WWN',
                                       dev_path], sudo=True, check=False)
                 rows = []
                 if (getattr(ls_res, 'stdout', '') or '').strip():
@@ -1390,10 +1390,12 @@ class DiskMgrShell(cmd.Cmd):
             "DEVICE",
             "TYPE",
             "FSTYPE",
+            "FSVER",
             "FSLABEL",
             "FSUUID",
             "SIZE",
             "FSAVAIL",
+            "FSUSE%",
             "FSMOUNTPOINTS",
             "FSTAB",
             "PERSISTENT PATH (IEEE)",
@@ -1595,9 +1597,11 @@ class DiskMgrShell(cmd.Cmd):
             dtype = dev.get('type') or ""
             size = dev.get('size') or ""
             fstype = dev.get('fstype') or ""
+            fsver = dev.get('fsver') or ""
             label = dev.get('label') or ""
             uuid = dev.get('uuid') or ""
             fsavail = dev.get('fsavail') or ""
+            fsuse = dev.get('fsuse%') or ""
             # Partitions often don't carry WWN/EUI in lsblk output; inherit from parent disk when missing.
             wwn = dev.get('wwn') or parent_wwn or ""
 
@@ -1654,9 +1658,11 @@ class DiskMgrShell(cmd.Cmd):
                 "FSTAB": "y" if in_fstab else "n",
                 "SIZE": size,
                 "FSTYPE": fstype,
+                "FSVER": fsver,
                 "FSLABEL": label,
                 "FSUUID": uuid,
                 "FSAVAIL": fsavail,
+                "FSUSE%": fsuse,
                 "FSMOUNTPOINTS": mounts,
                 "MOUNTPOINT": mounts,
             })
