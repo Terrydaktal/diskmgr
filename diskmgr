@@ -914,7 +914,7 @@ class DiskMgrShell(cmd.Cmd):
         print("      Displays disk layout (verbose table by default).")
         print("      Use concise for fewer columns, or list mode for key/value entries.")
         print(f"  {Colors.OKGREEN}boot{Colors.ENDC}")
-        print("      Displays all boot entries and submenus from GRUB.")
+        print("      Displays all boot entries/submenus from GRUB and the active OS /etc/fstab.")
 
         print(f"\n{Colors.BOLD}disk:{Colors.ENDC}")
         print(f"  {Colors.OKGREEN}create <name/id> [--gpt|--mbr] [--partition] [--start X] [--end Y]{Colors.ENDC}")
@@ -1576,10 +1576,93 @@ class DiskMgrShell(cmd.Cmd):
             pass
         return ""
 
+    def _render_os_fstab(self):
+        """
+        Render the active OS /etc/fstab in a readable table.
+        Returns True if rendered, False on fatal read failure.
+        """
+        fstab_path = Path('/etc/fstab')
+        print(f"\n{Colors.HEADER}{Colors.BOLD}--- Active OS fstab ({fstab_path}) ---{Colors.ENDC}")
+
+        if not fstab_path.exists():
+            print(f"{Colors.WARNING}No fstab file found at {fstab_path}.{Colors.ENDC}")
+            return False
+
+        try:
+            lines = fstab_path.read_text(errors='replace').splitlines()
+        except Exception as e:
+            print(f"{Colors.FAIL}Could not read {fstab_path}: {e}{Colors.ENDC}")
+            return False
+
+        cols = ["#", "SOURCE", "TARGET", "FSTYPE", "OPTIONS", "DUMP", "PASS"]
+        rows = []
+        malformed = []
+        ignored_comments = 0
+        ignored_blank = 0
+
+        for ln_no, raw in enumerate(lines, start=1):
+            line = (raw or "").strip()
+            if not line:
+                ignored_blank += 1
+                continue
+            if line.startswith('#'):
+                ignored_comments += 1
+                continue
+
+            body = raw.split('#', 1)[0].strip()
+            if not body:
+                ignored_comments += 1
+                continue
+
+            parts = body.split()
+            if len(parts) < 4:
+                malformed.append((ln_no, raw.rstrip()))
+                continue
+
+            spec, target, fstype, options = parts[:4]
+            dump = parts[4] if len(parts) > 4 else "-"
+            passno = parts[5] if len(parts) > 5 else "-"
+
+            src_display = spec
+            if spec.startswith("UUID="):
+                uuid = spec[len("UUID="):]
+                dev = self.resolve_uuid_to_dev(uuid)
+                src_display = f"{spec} [{dev if dev else '-'}]"
+
+            rows.append({
+                "#": str(len(rows) + 1),
+                "SOURCE": src_display,
+                "TARGET": target,
+                "FSTYPE": fstype,
+                "OPTIONS": options,
+                "DUMP": dump,
+                "PASS": passno,
+            })
+
+        if rows:
+            self._print_lsblk_rows(rows, cols=cols)
+        else:
+            print("(No active fstab entries found.)")
+
+        meta = f"Entries: {len(rows)}"
+        meta += f" | Ignored comments: {ignored_comments}"
+        meta += f" | Ignored blank lines: {ignored_blank}"
+        print(meta)
+
+        if malformed:
+            print(f"{Colors.WARNING}Malformed lines (showing up to 5):{Colors.ENDC}")
+            for ln_no, txt in malformed[:5]:
+                print(f"  line {ln_no}: {txt}")
+            if len(malformed) > 5:
+                print(f"  ... {len(malformed) - 5} more")
+
+        return True
+
     def do_boot(self, arg):
-        '''Display boot entries from the GRUB configuration of all disks.
+        '''Display active OS fstab and boot entries from GRUB configurations.
         
         UNDER THE HOOD:
+        Prints /etc/fstab from the currently running OS in a readable table.
         Scans all block devices. If mounted, it parses /boot/grub/grub.cfg.
         If unmounted or encrypted, it explains why it cannot yet read the config.
         '''
@@ -1617,6 +1700,8 @@ class DiskMgrShell(cmd.Cmd):
   }
 """
         processed_devs = set()
+
+        self._render_os_fstab()
 
         print(f"\n{Colors.HEADER}{Colors.BOLD}--- System Boot Configuration Scan ---{Colors.ENDC}")
 
