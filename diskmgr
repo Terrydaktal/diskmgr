@@ -978,9 +978,10 @@ class DiskMgrShell(cmd.Cmd):
         print("      For LUKS: resolves to payload filesystem when open; errors if locked/not mounted.")
         print(f"  {Colors.OKGREEN}diff <pri_name> <sec_name> [--depth N] [-d]{Colors.ENDC}")
         print("      Dry-run filesystem diff (rsync pri -> sec): shows create/modify/delete counts+bytes,")
-        print("      then a hierarchy summary of dirs/files (+new, ~updated, -deleted regular files).")
+        print("      then a tree-style hierarchy summary of dirs/files (+new, ~updated, -deleted regular files).")
         print("      Depth default: 2.")
         print("      Use -d to show directories only.")
+        print("      Unchanged entries are shown uncolored.")
         print("      Endpoints may be mapped names/IDs or absolute directory paths.")
         print("      For LUKS: resolves to payload filesystem when open; errors if locked/not mounted.")
         print(f"  {Colors.OKGREEN}defrag <name>{Colors.ENDC}")
@@ -4023,6 +4024,49 @@ class DiskMgrShell(cmd.Cmd):
                 return ("-" if neg else "+") + txt
             return ("-" if neg else "") + txt
 
+        def _build_tree_entries(root_dir, max_depth, dirs_only_mode):
+            """
+            Build entries in tree order (directories first) up to max_depth.
+            Includes unchanged files/dirs from the primary path so output mirrors:
+              tree -L <depth> --dirsfirst
+            """
+            entries = [('dir', '.')]
+
+            def _walk(abs_dir, rel_dir, level):
+                if level >= max_depth:
+                    return
+                try:
+                    with os.scandir(abs_dir) as it:
+                        dirs = []
+                        files = []
+                        for ent in it:
+                            try:
+                                is_dir = ent.is_dir(follow_symlinks=False)
+                            except OSError:
+                                is_dir = False
+                            if is_dir:
+                                dirs.append(ent.name)
+                            elif not dirs_only_mode:
+                                files.append(ent.name)
+                except (OSError, PermissionError, FileNotFoundError, NotADirectoryError):
+                    return
+
+                dirs.sort()
+                files.sort()
+
+                for dname in dirs:
+                    relp = dname if not rel_dir else f"{rel_dir}/{dname}"
+                    entries.append(('dir', relp))
+                    _walk(os.path.join(abs_dir, dname), relp, level + 1)
+
+                if not dirs_only_mode:
+                    for fname in files:
+                        relp = fname if not rel_dir else f"{rel_dir}/{fname}"
+                        entries.append(('file', relp))
+
+            _walk(root_dir, "", 0)
+            return entries
+
         def _batch_stat_sizes(base_path, relpaths, chunk_size=512):
             """
             Resolve file sizes for many destination-relative paths using batched stat calls.
@@ -4228,30 +4272,13 @@ class DiskMgrShell(cmd.Cmd):
         print("  -D = regular files that would be DELETED under this entry/subtree")
         print("  +C/~U/-R = created/updated(delta)/removed bytes under this entry/subtree")
         print("  Directories end with '/'.")
+        print("  Unchanged entries are uncolored.")
         print("Counts are inclusive of all descendants (subtree totals).")
         print("-----------------------------------------------")
 
-        entries = []
-        for k in sorted(seen.keys()):
-            entries.append(('dir', k))
+        entries = _build_tree_entries(src_path.rstrip('/'), depth, dirs_only)
 
-        if not dirs_only:
-            for relp in sorted({k for (k, _kind) in fc.keys()}):
-                parent_depth = relp.count('/')
-                if parent_depth <= depth:
-                    entries.append(('file', relp))
-
-        def _entry_sort_key(entry):
-            etype, path = entry
-            if path == ".":
-                return ([], 0, "")
-            parts = path.split('/')
-            parent = parts[:-1]
-            name = parts[-1]
-            # Within each parent, show directories before files.
-            return (parent, 0 if etype == 'dir' else 1, name)
-
-        for etype, path in sorted(entries, key=_entry_sort_key):
+        for etype, path in entries:
             if etype == 'dir':
                 depth_here = 0 if path == "." else (path.count('/') + 1)
                 indent = " " * (depth_here * 2)
@@ -4287,10 +4314,12 @@ class DiskMgrShell(cmd.Cmd):
                 color = Colors.OKGREEN
             elif n_del > 0:
                 color = Colors.FAIL
-            else:
+            elif n_upd > 0:
                 color = Colors.WARNING
+            else:
+                color = None
 
-            cname = f"{color}{name}{Colors.ENDC}"
+            cname = f"{color}{name}{Colors.ENDC}" if color else name
             print(
                 f"{indent}{cname}  "
                 f"(+{n_new}  "
