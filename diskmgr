@@ -981,7 +981,7 @@ class DiskMgrShell(cmd.Cmd):
         print("      then a tree-style hierarchy summary of dirs/files (+new, ~updated, -deleted regular files).")
         print("      Depth default: 2.")
         print("      Use -d to show directories only.")
-        print("      Use --fast to print raw rsync -ani --delete output only (no summaries).")
+        print("      Use --fast to print raw rsync -an --delete --stats output only (no summaries).")
         print("      Unchanged entries are shown uncolored.")
         print("      Endpoints may be mapped names/IDs or absolute directory paths.")
         print("      For LUKS: resolves to payload filesystem when open; errors if locked/not mounted.")
@@ -3898,7 +3898,7 @@ class DiskMgrShell(cmd.Cmd):
         parser.add_argument('secondary_name')
         parser.add_argument('--depth', type=int, default=2, help='Hierarchy depth for subtree summary (default: 2)')
         parser.add_argument('-d', '--dirs-only', action='store_true', help='Show directories only in hierarchy output')
-        parser.add_argument('--fast', action='store_true', help='Show raw rsync -ani --delete output only')
+        parser.add_argument('--fast', action='store_true', help='Show raw rsync -an --delete --stats output only')
         try:
             split_args = shlex.split(arg)
             args = parser.parse_args(split_args)
@@ -3958,7 +3958,7 @@ class DiskMgrShell(cmd.Cmd):
                 log("--fast ignores --depth.", 'WARN')
 
             res_fast = run_command(
-                ['rsync', '-ani', '--delete', src_path, dst_path],
+                ['rsync', '-an', '--delete', '--stats', src_path, dst_path],
                 sudo=True,
                 capture_output=False,
                 check=False
