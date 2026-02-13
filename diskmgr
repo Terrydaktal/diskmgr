@@ -969,10 +969,10 @@ class DiskMgrShell(cmd.Cmd):
         print("      password change, header backup/print, and header restore.")
         print(f"  {Colors.OKGREEN}label <name> [new_label] [--fstab]{Colors.ENDC}")
         print("      Get or set the filesystem label of an OPEN disk.")
-        print("      On relabel: removes old LABEL-based fstab entry. With --fstab, also adds a new LABEL entry.")
+        print("      On relabel: removes old LABEL-based fstab entry. With --fstab, adds UUID entry at /mnt/<label>.")
         print("      For LUKS: acts on payload filesystem when open; errors if locked.")
         print(f"  {Colors.OKGREEN}remount <name>{Colors.ENDC}")
-        print("      Move an OPEN disk's mount to its /etc/fstab mountpoint when present;")
+        print("      Move an OPEN disk's mount to /mnt/<label> when /etc/fstab entry exists;")
         print("      otherwise /media/$USER/<label>, and clean old empty mountpoint dirs.")
         print("      For LUKS: acts on payload filesystem when open; errors if locked.")
         print(f"  {Colors.OKGREEN}sync <pri_name> <sec_name>{Colors.ENDC}")
@@ -1692,17 +1692,54 @@ class DiskMgrShell(cmd.Cmd):
         else:
             run_command(['mount', devnode, mountpoint], sudo=True)
 
+    def _update_fstab_mountpoint(self, entry, new_mountpoint):
+        """
+        Rewrite one existing /etc/fstab entry's mountpoint (matched by entry index).
+        Preserves source/fstype/options/dump/pass and trailing inline comment.
+        """
+        idx = int(entry.get('index'))
+        lines = self._read_system_fstab_lines()
+        if idx < 0 or idx >= len(lines):
+            raise RuntimeError("fstab entry index out of range")
+
+        raw = lines[idx]
+        comment = ""
+        if '#' in raw:
+            comment = raw.split('#', 1)[1].strip()
+
+        line = (
+            f"{entry.get('spec', '')}\t"
+            f"{self._fstab_escape(new_mountpoint)}\t"
+            f"{entry.get('fstype', 'auto')}\t"
+            f"{entry.get('opts', 'defaults')}\t"
+            f"{entry.get('dump', '0')}\t"
+            f"{entry.get('passno', '0')}"
+        )
+        if comment:
+            line += f"  # {comment}"
+        lines[idx] = line
+        self._write_system_fstab_lines(lines)
+
     def _update_fstab_for_label_change(self, target_dev, old_label, new_label, fstype, add_entry):
         """
         Update host /etc/fstab after relabel.
         - Removes old-label fstab entry when old label is known.
-        - Adds a new LABEL= entry when add_entry=True.
+        - Adds a new UUID= entry mounted at /mnt/<label> when add_entry=True.
         Returns (removed_count, added_count, new_mountpoint_or_empty).
         """
         lines = self._read_system_fstab_lines()
-        user = os.environ.get('USER', 'root')
-        old_mountpoint = f"/media/{user}/{old_label}" if old_label else ""
-        new_mountpoint = f"/media/{user}/{new_label}" if new_label else ""
+        old_mountpoint_media = f"/media/{os.environ.get('USER', 'root')}/{old_label}" if old_label else ""
+        old_mountpoint_mnt = f"/mnt/{old_label}" if old_label else ""
+        new_mountpoint = f"/mnt/{new_label}" if new_label else ""
+        target_uuid = ""
+        if add_entry:
+            try:
+                r_uuid = run_command(['blkid', '-o', 'value', '-s', 'UUID', target_dev], sudo=True, check=False)
+                target_uuid = (getattr(r_uuid, 'stdout', '') or '').strip()
+            except Exception:
+                target_uuid = ""
+            if not target_uuid:
+                raise RuntimeError(f"Could not determine filesystem UUID for {target_dev}")
 
         out = []
         removed = 0
@@ -1731,13 +1768,17 @@ class DiskMgrShell(cmd.Cmd):
                         remove = True
                 if spec_unesc == f"/dev/disk/by-label/{old_label}":
                     remove = True
-                if mountpoint == old_mountpoint:
+                if mountpoint in (old_mountpoint_media, old_mountpoint_mnt):
                     remove = True
 
             if add_entry and new_label:
                 if spec.startswith("LABEL="):
                     lbl = self._fstab_unescape(spec[len("LABEL="):]).strip()
                     if lbl == new_label:
+                        remove = True
+                if target_uuid and spec.startswith("UUID="):
+                    u = self._fstab_unescape(spec[len("UUID="):]).strip().lower()
+                    if u == str(target_uuid).strip().lower():
                         remove = True
                 if mountpoint == new_mountpoint:
                     remove = True
@@ -1751,7 +1792,7 @@ class DiskMgrShell(cmd.Cmd):
         if add_entry and new_label:
             fs_t = (fstype or "auto").strip() or "auto"
             entry = (
-                f"LABEL={self._fstab_escape(new_label)}\t"
+                f"UUID={self._fstab_escape(target_uuid)}\t"
                 f"{self._fstab_escape(new_mountpoint)}\t"
                 f"{fs_t}\tdefaults,nofail\t0\t0"
             )
@@ -2775,6 +2816,9 @@ class DiskMgrShell(cmd.Cmd):
             - ext4: Uses 'e2label' on the active device.
             - xfs: Requires a temporary unmount, then uses 'xfs_admin -L', then remounts.
         4.  Refresh: Executes 'udevadm trigger' to force tools like 'lsblk' to see the change.
+        5.  Optional fstab update (--fstab):
+            - Removes old label-based /etc/fstab entry.
+            - Adds UUID-based entry with mountpoint /mnt/<new_label>.
         
         The label is written directly to the disk hardware and persists across different computers.
         '''
@@ -2910,7 +2954,7 @@ class DiskMgrShell(cmd.Cmd):
                     log(f"Removed {removed} old fstab entr{'y' if removed == 1 else 'ies'} for previous label.")
                 if write_fstab:
                     if added:
-                        log(f"Added new fstab entry: LABEL={new_label} -> {new_mp}")
+                        log(f"Added new fstab entry: UUID=<fsuuid> -> {new_mp}")
                     else:
                         log("No new fstab entry was added.")
             except Exception as e:
@@ -2936,7 +2980,8 @@ class DiskMgrShell(cmd.Cmd):
         '''Remount an OPEN disk to its label mountpoint: remount <name>
 
         This fixes "mounted twice" and "data1/data2 suffix" issues by moving the mount
-        to the canonical path: /etc/fstab mountpoint (if present), else /media/$USER/<label>.
+        to the canonical path: /mnt/<label> when the device has an /etc/fstab entry;
+        otherwise /media/$USER/<label>.
 
         SAFETY RULES:
         - Refuses if the target mountpoint is already mounted by a different device.
@@ -2946,7 +2991,9 @@ class DiskMgrShell(cmd.Cmd):
         UNDER THE HOOD:
         1.  Resolve Device: Uses /dev/mapper/<name> if present, otherwise the mapped source path.
             If the mapping is LUKS and not OPEN, it refuses.
-        2.  Target Mountpoint: Prefers /etc/fstab entry for this device; falls back to LABEL path.
+        2.  Target Mountpoint:
+            - If /etc/fstab entry exists, enforce /mnt/<label> (and update the fstab mountpoint if needed).
+            - Otherwise, fall back to /media/$USER/<label>.
         3.  Preflight: Validates selected mountpoint is safe to use.
         4.  Unmount: Unmounts all current mount targets for the device (if any).
         5.  Cleanup: Removes empty old mountpoint directories under /media/$USER (best-effort rmdir).
@@ -3009,7 +3056,18 @@ class DiskMgrShell(cmd.Cmd):
         use_fstab_mount = bool(fstab_entry)
 
         if use_fstab_mount:
-            new_mountpoint = fstab_entry['mountpoint']
+            if label:
+                desired_mountpoint = f"/mnt/{label}"
+                if fstab_entry['mountpoint'] != desired_mountpoint:
+                    try:
+                        self._update_fstab_mountpoint(fstab_entry, desired_mountpoint)
+                        log(f"Updated fstab mountpoint for remount: {fstab_entry['spec']} -> {desired_mountpoint}")
+                    except Exception as e:
+                        log(f"Failed to update fstab mountpoint to {desired_mountpoint}: {e}", 'ERROR')
+                        return
+                new_mountpoint = desired_mountpoint
+            else:
+                new_mountpoint = fstab_entry['mountpoint']
             log(f"Using fstab mount for remount: {fstab_entry['spec']} -> {new_mountpoint}")
         else:
             if not label:
