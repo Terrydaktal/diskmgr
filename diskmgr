@@ -4024,40 +4024,82 @@ class DiskMgrShell(cmd.Cmd):
                 return ("-" if neg else "+") + txt
             return ("-" if neg else "") + txt
 
-        def _build_tree_entries(root_dir, max_depth, dirs_only_mode):
+        def _build_tree_entries(root_dir, max_depth, dirs_only_mode, extra_dirs=None, extra_files=None):
             """
             Build entries in tree order (directories first) up to max_depth.
             Includes unchanged files/dirs from the primary path so output mirrors:
               tree -L <depth> --dirsfirst
             """
             entries = [('dir', '.')]
+            extra_dirs = set(extra_dirs or [])
+            extra_files = set(extra_files or [])
+
+            def _split_parent_name(relp):
+                if not relp or relp == ".":
+                    return ("", "")
+                if "/" in relp:
+                    parent, name = relp.rsplit("/", 1)
+                    return (parent, name)
+                return ("", relp)
+
+            extra_dirs_by_parent = {}
+            for relp in extra_dirs:
+                parent, name = _split_parent_name(relp)
+                if not name:
+                    continue
+                extra_dirs_by_parent.setdefault(parent, set()).add(name)
+
+            extra_files_by_parent = {}
+            for relp in extra_files:
+                parent, name = _split_parent_name(relp)
+                if not name:
+                    continue
+                extra_files_by_parent.setdefault(parent, set()).add(name)
+
+            def _walk_virtual(rel_dir, level):
+                if level >= max_depth:
+                    return
+                vdirs = sorted(extra_dirs_by_parent.get(rel_dir, set()))
+                vfiles = sorted(extra_files_by_parent.get(rel_dir, set())) if not dirs_only_mode else []
+                for dname in vdirs:
+                    relp = dname if not rel_dir else f"{rel_dir}/{dname}"
+                    entries.append(('dir', relp))
+                    _walk_virtual(relp, level + 1)
+                if not dirs_only_mode:
+                    for fname in vfiles:
+                        relp = fname if not rel_dir else f"{rel_dir}/{fname}"
+                        entries.append(('file', relp))
 
             def _walk(abs_dir, rel_dir, level):
                 if level >= max_depth:
                     return
+                source_dir_names = set()
+                source_file_names = set()
                 try:
                     with os.scandir(abs_dir) as it:
-                        dirs = []
-                        files = []
                         for ent in it:
                             try:
                                 is_dir = ent.is_dir(follow_symlinks=False)
                             except OSError:
                                 is_dir = False
                             if is_dir:
-                                dirs.append(ent.name)
+                                source_dir_names.add(ent.name)
                             elif not dirs_only_mode:
-                                files.append(ent.name)
+                                source_file_names.add(ent.name)
                 except (OSError, PermissionError, FileNotFoundError, NotADirectoryError):
+                    _walk_virtual(rel_dir, level)
                     return
 
-                dirs.sort()
-                files.sort()
+                dirs = sorted(source_dir_names | extra_dirs_by_parent.get(rel_dir, set()))
+                files = sorted(source_file_names | extra_files_by_parent.get(rel_dir, set())) if not dirs_only_mode else []
 
                 for dname in dirs:
                     relp = dname if not rel_dir else f"{rel_dir}/{dname}"
                     entries.append(('dir', relp))
-                    _walk(os.path.join(abs_dir, dname), relp, level + 1)
+                    if dname in source_dir_names:
+                        _walk(os.path.join(abs_dir, dname), relp, level + 1)
+                    else:
+                        _walk_virtual(relp, level + 1)
 
                 if not dirs_only_mode:
                     for fname in files:
@@ -4276,7 +4318,21 @@ class DiskMgrShell(cmd.Cmd):
         print("Counts are inclusive of all descendants (subtree totals).")
         print("-----------------------------------------------")
 
-        entries = _build_tree_entries(src_path.rstrip('/'), depth, dirs_only)
+        deleted_dirs = {
+            k for k in seen.keys()
+            if k != "." and c.get((k, 'del'), 0) > 0
+        }
+        deleted_files = {
+            p for (p, kind) in fc.keys()
+            if kind == 'del'
+        }
+        entries = _build_tree_entries(
+            src_path.rstrip('/'),
+            depth,
+            dirs_only,
+            extra_dirs=deleted_dirs,
+            extra_files=deleted_files
+        )
 
         for etype, path in entries:
             if etype == 'dir':
