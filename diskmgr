@@ -23,7 +23,7 @@ except ImportError:
 # Configuration
 MAP_FILENAME = 'diskmap.tsv'
 PASSGEN_BIN = 'passgen'
-VERSION = '2.7.5'
+VERSION = '2.7.7'
 HISTORY_FILE_ENV = 'DISKMGR_HISTORY'
 DEFAULT_HISTORY_FILE = Path.home() / '.local' / 'state' / 'diskmgr' / 'history'
 MAX_HISTORY_ENTRIES = 5000
@@ -977,6 +977,7 @@ class DiskMgrShell(cmd.Cmd):
         print("      For LUKS: acts on payload filesystem when open; errors if locked.")
         print(f"  {Colors.OKGREEN}sync <pri_name> <sec_name>{Colors.ENDC}")
         print("      Syncs two mounted filesystems (rsync pri -> sec).")
+        print("      Endpoints may be mapped names or absolute directory paths.")
         print("      For LUKS: resolves to payload filesystem when open; errors if locked/not mounted.")
         print(f"  {Colors.OKGREEN}diff <pri_name> <sec_name> [--depth N] [-d] [--fast]{Colors.ENDC}")
         print("      Dry-run filesystem diff (rsync pri -> sec): shows create/modify/delete counts+bytes,")
@@ -4370,38 +4371,66 @@ class DiskMgrShell(cmd.Cmd):
         return preferred if preferred in targets else targets[0]
 
     def do_sync(self, arg):
-        '''Synchronize two mounted disks: sync <primary_name> <secondary_name>
+        '''Synchronize two filesystems: sync <primary> <secondary>
         
         UNDER THE HOOD:
-        1.  Validation: Verifies both disks are mapped and currently mounted.
+        1.  Validation: Verifies both endpoints resolve to directories.
+            - Mapped names must already be mounted.
+            - Absolute paths must exist and be directories.
         2.  Confirmation: Requires solving two math problems (DESTRUCTIVE for secondary).
         3.  Execution: Runs 'rsync -avh --delete --progress <primary_mnt>/ <secondary_mnt>/'.
         
         Note: The SECONDARY disk will be modified to match the PRIMARY disk.
         All files on the secondary that do not exist on the primary will be DELETED.
         '''
-        args = arg.split()
-        if len(args) != 2:
-            log("Usage: sync <primary_name> <secondary_name>", 'ERROR')
+        parser = CmdArgumentParser(prog='sync', add_help=False)
+        parser.add_argument('primary')
+        parser.add_argument('secondary')
+        try:
+            split_args = shlex.split(arg)
+            args = parser.parse_args(split_args)
+        except argparse.ArgumentError as e:
+            log(str(e), 'ERROR')
+            return
+        except SystemExit:
             return
 
-        primary, secondary = args
-        
-        sec_mnt = self.get_mountpoint(secondary)
-        pri_mnt = self.get_mountpoint(primary)
-        
-        if not sec_mnt:
-            log(f"Secondary disk '{secondary}' is not mounted.", 'ERROR')
-            return
-        if not pri_mnt:
-            log(f"Primary disk '{primary}' is not mounted.", 'ERROR')
+        primary = args.primary
+        secondary = args.secondary
+
+        def _resolve_sync_endpoint(value, role_label):
+            if os.path.isabs(value):
+                p = os.path.realpath(value)
+                if not os.path.exists(p):
+                    log(f"{role_label} path does not exist: {value}", 'ERROR')
+                    return None, None
+                if not os.path.isdir(p):
+                    log(f"{role_label} path must be a directory: {value}", 'ERROR')
+                    return None, None
+                return p, 'path'
+
+            mp = self.get_mountpoint(value)
+            if not mp:
+                log(f"{role_label} disk '{value}' is not mounted.", 'ERROR')
+                return None, None
+            return mp, 'mapping'
+
+        pri_mnt, pri_kind = _resolve_sync_endpoint(primary, "Primary")
+        sec_mnt, sec_kind = _resolve_sync_endpoint(secondary, "Secondary")
+        if not pri_mnt or not sec_mnt:
             return
 
         # Block syncing to/from the system root drive.
         try:
-            res_s = run_command(['findmnt', '-rn', '-M', sec_mnt, '-o', 'SOURCE'], check=False)
+            if sec_kind == 'mapping':
+                res_s = run_command(['findmnt', '-rn', '-M', sec_mnt, '-o', 'SOURCE'], check=False)
+            else:
+                res_s = run_command(['findmnt', '-rn', '-T', sec_mnt, '-o', 'SOURCE'], check=False)
             sec_src = (getattr(res_s, 'stdout', '') or '').strip()
-            res_p = run_command(['findmnt', '-rn', '-M', pri_mnt, '-o', 'SOURCE'], check=False)
+            if pri_kind == 'mapping':
+                res_p = run_command(['findmnt', '-rn', '-M', pri_mnt, '-o', 'SOURCE'], check=False)
+            else:
+                res_p = run_command(['findmnt', '-rn', '-T', pri_mnt, '-o', 'SOURCE'], check=False)
             pri_src = (getattr(res_p, 'stdout', '') or '').strip()
             if sec_src and self._block_if_root_drive(os.path.realpath(sec_src), f"sync {primary} {secondary}"):
                 return
