@@ -4266,11 +4266,11 @@ class DiskMgrShell(cmd.Cmd):
         print(f"Source -> Dest: {src_path}  ->  {dst_path}")
         print(f"Depth shown: {depth} level(s)")
         print("")
-        print("Format: <name[/]>  (+N  ~U  -D) [bytes +C  ~U  -R]")
+        print("Format: <name[/]>  (+N [C]  ~U [U]  -D [R])")
         print("  +N = regular files that would be CREATED under this entry/subtree")
         print("  ~U = regular files that would be MODIFIED/UPDATED under this entry/subtree")
         print("  -D = regular files that would be DELETED under this entry/subtree")
-        print("  +C/~U/-R = created/updated(delta)/removed bytes under this entry/subtree")
+        print("  [C]/[U]/[R] = created/updated(delta)/removed bytes (shown only when non-zero)")
         print("  Directories end with '/'.")
         print("  Unchanged entries are uncolored.")
         print("Counts are inclusive of all descendants (subtree totals).")
@@ -4319,13 +4319,15 @@ class DiskMgrShell(cmd.Cmd):
             else:
                 color = None
 
+            new_part = f"+{n_new}" + (f" [{_fmt_size_human(b_new)}]" if b_new != 0 else "")
+            upd_part = f"~{n_upd}" + (f" [{_fmt_size_human(b_upd, signed=True)}]" if b_upd != 0 else "")
+            del_part = f"-{n_del}" + (f" [{_fmt_size_human(b_del)}]" if b_del != 0 else "")
             cname = f"{color}{name}{Colors.ENDC}" if color else name
             print(
                 f"{indent}{cname}  "
-                f"(+{n_new}  "
-                f"~{n_upd}  "
-                f"-{n_del}) "
-                f"[bytes +{_fmt_size_human(b_new)}  ~{_fmt_size_human(b_upd, signed=True)}  -{_fmt_size_human(b_del)}]"
+                f"({new_part}  "
+                f"{upd_part}  "
+                f"{del_part})"
             )
 
         print("-----------------------------------------------")
