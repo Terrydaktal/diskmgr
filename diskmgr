@@ -914,7 +914,7 @@ class DiskMgrShell(cmd.Cmd):
         print("      Displays disk layout (verbose table by default).")
         print("      Use concise for fewer columns, or list mode for key/value entries.")
         print(f"  {Colors.OKGREEN}boot{Colors.ENDC}")
-        print("      Displays all boot entries/submenus from GRUB and the active OS /etc/fstab.")
+        print("      Displays boot entries/submenus from GRUB and /etc/fstab detection per partition.")
 
         print(f"\n{Colors.BOLD}disk:{Colors.ENDC}")
         print(f"  {Colors.OKGREEN}create <name/id> [--gpt|--mbr] [--partition] [--start X] [--end Y]{Colors.ENDC}")
@@ -1576,22 +1576,20 @@ class DiskMgrShell(cmd.Cmd):
             pass
         return ""
 
-    def _render_os_fstab(self):
+    def _render_fstab_file(self, fstab_path, indent="  "):
         """
-        Render the active OS /etc/fstab in a readable table.
-        Returns True if rendered, False on fatal read failure.
+        Render a single fstab file in a readable table.
+        Returns True when a file is parsed/rendered, False otherwise.
         """
-        fstab_path = Path('/etc/fstab')
-        print(f"\n{Colors.HEADER}{Colors.BOLD}--- Active OS fstab ({fstab_path}) ---{Colors.ENDC}")
-
+        fstab_path = Path(fstab_path)
         if not fstab_path.exists():
-            print(f"{Colors.WARNING}No fstab file found at {fstab_path}.{Colors.ENDC}")
+            print(f"{indent}{Colors.WARNING}Result: No fstab detected ({fstab_path}).{Colors.ENDC}")
             return False
 
         try:
             lines = fstab_path.read_text(errors='replace').splitlines()
         except Exception as e:
-            print(f"{Colors.FAIL}Could not read {fstab_path}: {e}{Colors.ENDC}")
+            print(f"{indent}{Colors.FAIL}Result: Could not read fstab ({fstab_path}): {e}{Colors.ENDC}")
             return False
 
         cols = ["#", "SOURCE", "TARGET", "FSTYPE", "OPTIONS", "DUMP", "PASS"]
@@ -1639,31 +1637,42 @@ class DiskMgrShell(cmd.Cmd):
                 "PASS": passno,
             })
 
+        print(f"{indent}{Colors.OKGREEN}Result: Found fstab at {fstab_path}{Colors.ENDC}")
         if rows:
-            self._print_lsblk_rows(rows, cols=cols)
+            widths = self._lsblk_col_widths(rows, cols=cols)
+
+            def _cell(text, width):
+                inner = max(width - 2, 0)
+                return f" {text:<{inner}} "
+
+            header = "".join([_cell(c, widths[c]) for c in cols]).rstrip()
+            print(f"{indent}{Colors.BOLD}{header}{Colors.ENDC}")
+            for r in rows:
+                line = "".join([_cell(str(r.get(c, '') or ''), widths[c]) for c in cols]).rstrip()
+                print(f"{indent}{line}")
         else:
-            print("(No active fstab entries found.)")
+            print(f"{indent}(No active fstab entries found.)")
 
         meta = f"Entries: {len(rows)}"
         meta += f" | Ignored comments: {ignored_comments}"
         meta += f" | Ignored blank lines: {ignored_blank}"
-        print(meta)
+        print(f"{indent}{meta}")
 
         if malformed:
-            print(f"{Colors.WARNING}Malformed lines (showing up to 5):{Colors.ENDC}")
+            print(f"{indent}{Colors.WARNING}Malformed lines (showing up to 5):{Colors.ENDC}")
             for ln_no, txt in malformed[:5]:
-                print(f"  line {ln_no}: {txt}")
+                print(f"{indent}  line {ln_no}: {txt}")
             if len(malformed) > 5:
-                print(f"  ... {len(malformed) - 5} more")
+                print(f"{indent}  ... {len(malformed) - 5} more")
 
         return True
 
     def do_boot(self, arg):
-        '''Display active OS fstab and boot entries from GRUB configurations.
+        '''Display boot entries from GRUB and fstab detection for each partition.
         
         UNDER THE HOOD:
-        Prints /etc/fstab from the currently running OS in a readable table.
-        Scans all block devices. If mounted, it parses /boot/grub/grub.cfg.
+        Scans partition devices. If mounted, it parses /boot/grub/grub.cfg
+        and checks for /etc/fstab inside that mounted partition.
         If unmounted or encrypted, it explains why it cannot yet read the config.
         '''
         all_devs = self.get_disk_info()
@@ -1701,9 +1710,7 @@ class DiskMgrShell(cmd.Cmd):
 """
         processed_devs = set()
 
-        self._render_os_fstab()
-
-        print(f"\n{Colors.HEADER}{Colors.BOLD}--- System Boot Configuration Scan ---{Colors.ENDC}")
+        print(f"\n{Colors.HEADER}{Colors.BOLD}--- Partition Boot Configuration Scan ---{Colors.ENDC}")
 
         for dev in flat_disks:
             d_name = dev.get('name')
@@ -1713,24 +1720,27 @@ class DiskMgrShell(cmd.Cmd):
             fstype = dev.get('fstype')
             mountpoint = dev.get('mountpoint')
 
-            if d_type == 'loop' or (d_type == 'disk' and 'children' in dev):
+            if d_type != 'part':
                 continue
             
             if d_path in processed_devs:
                 continue
             processed_devs.add(d_path)
 
-            print(f"\n{Colors.OKBLUE}Device: {d_path} ({fstype or 'unknown FS'}){Colors.ENDC}")
+            print(f"\n{Colors.OKBLUE}Partition: {d_path} ({fstype or 'unknown FS'}){Colors.ENDC}")
 
             if fstype == 'crypto_LUKS':
-                print(f"  {Colors.WARNING}Result: LUKS container is LOCKED. Please 'open' this disk to scan for boot entries.{Colors.ENDC}")
+                print(f"  {Colors.WARNING}Result: LUKS container is LOCKED. Please 'open' this partition to scan for boot entries.{Colors.ENDC}")
+                print(f"  {Colors.WARNING}Result: No fstab detected (locked encrypted partition).{Colors.ENDC}")
             elif not mountpoint:
                 if fstype and fstype != '-':
-                    print(f"  {Colors.WARNING}Result: Disk is UNMOUNTED. Please 'open' or mount the disk to scan for boot entries.{Colors.ENDC}")
+                    print(f"  {Colors.WARNING}Result: Partition is UNMOUNTED. Please 'open' or mount the partition to scan for boot entries.{Colors.ENDC}")
                 else:
                     print(f"  {Colors.WARNING}Result: No recognizable filesystem found.{Colors.ENDC}")
+                print(f"  {Colors.WARNING}Result: No fstab detected (partition is not mounted).{Colors.ENDC}")
             else:
                 cfg_path = Path(mountpoint) / "boot/grub/grub.cfg"
+                fstab_path = Path(mountpoint) / "etc/fstab"
                 display_path = str(cfg_path).replace("//", "/")
                 try:
                     if cfg_path.exists():
@@ -1764,10 +1774,13 @@ class DiskMgrShell(cmd.Cmd):
                             print("  (No menu entries found in config)")
                     else:
                         print(f"  {Colors.OKCYAN}Result: Mounted at {mountpoint}, but no GRUB configuration found.{Colors.ENDC}")
+                    self._render_fstab_file(fstab_path, indent="  ")
                 except PermissionError:
                     print(f"  {Colors.FAIL}Result: Permission denied scanning {mountpoint} (System protected path).{Colors.ENDC}")
+                    print(f"  {Colors.WARNING}Result: No fstab detected (permission denied).{Colors.ENDC}")
                 except Exception as e:
                     print(f"  {Colors.FAIL}Result: Error checking path: {e}{Colors.ENDC}")
+                    print(f"  {Colors.WARNING}Result: No fstab detected (scan error).{Colors.ENDC}")
             
             print("-" * 60)
 
