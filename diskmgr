@@ -970,6 +970,7 @@ class DiskMgrShell(cmd.Cmd):
         print(f"  {Colors.OKGREEN}label <name> [new_label] [--fstab]{Colors.ENDC}")
         print("      Get or set the filesystem label of an OPEN disk.")
         print("      On relabel: removes old LABEL-based fstab entry. With --fstab, adds UUID entry at /mnt/<label>.")
+        print("      Generated fstab options: defaults,nofail,x-gvfs-show,x-gvfs-name=<label>.")
         print("      For LUKS: acts on payload filesystem when open; errors if locked.")
         print(f"  {Colors.OKGREEN}remount <name>{Colors.ENDC}")
         print("      Move an OPEN disk's mount to /mnt/<label> when /etc/fstab entry exists;")
@@ -1692,9 +1693,14 @@ class DiskMgrShell(cmd.Cmd):
         else:
             run_command(['mount', devnode, mountpoint], sudo=True)
 
-    def _update_fstab_mountpoint(self, entry, new_mountpoint):
+    def _desired_fstab_options(self, label):
+        gvfs_name = str(label or "").replace(",", "_")
+        gvfs_name = self._fstab_escape(gvfs_name)
+        return f"defaults,nofail,x-gvfs-show,x-gvfs-name={gvfs_name}"
+
+    def _update_fstab_mountpoint(self, entry, new_mountpoint, new_opts=None):
         """
-        Rewrite one existing /etc/fstab entry's mountpoint (matched by entry index).
+        Rewrite one existing /etc/fstab entry (matched by entry index).
         Preserves source/fstype/options/dump/pass and trailing inline comment.
         """
         idx = int(entry.get('index'))
@@ -1711,7 +1717,7 @@ class DiskMgrShell(cmd.Cmd):
             f"{entry.get('spec', '')}\t"
             f"{self._fstab_escape(new_mountpoint)}\t"
             f"{entry.get('fstype', 'auto')}\t"
-            f"{entry.get('opts', 'defaults')}\t"
+            f"{new_opts if new_opts is not None else entry.get('opts', 'defaults')}\t"
             f"{entry.get('dump', '0')}\t"
             f"{entry.get('passno', '0')}"
         )
@@ -1791,10 +1797,11 @@ class DiskMgrShell(cmd.Cmd):
         added = 0
         if add_entry and new_label:
             fs_t = (fstype or "auto").strip() or "auto"
+            opts = self._desired_fstab_options(new_label)
             entry = (
                 f"UUID={self._fstab_escape(target_uuid)}\t"
                 f"{self._fstab_escape(new_mountpoint)}\t"
-                f"{fs_t}\tdefaults,nofail\t0\t0"
+                f"{fs_t}\t{opts}\t0\t0"
             )
             if out and out[-1].strip():
                 out.append("")
@@ -3058,12 +3065,20 @@ class DiskMgrShell(cmd.Cmd):
         if use_fstab_mount:
             if label:
                 desired_mountpoint = f"/mnt/{label}"
-                if fstab_entry['mountpoint'] != desired_mountpoint:
+                desired_opts = self._desired_fstab_options(label)
+                need_mountpoint_update = (fstab_entry.get('mountpoint') != desired_mountpoint)
+                need_opts_update = (str(fstab_entry.get('opts') or '') != desired_opts)
+                if need_mountpoint_update or need_opts_update:
                     try:
-                        self._update_fstab_mountpoint(fstab_entry, desired_mountpoint)
-                        log(f"Updated fstab mountpoint for remount: {fstab_entry['spec']} -> {desired_mountpoint}")
+                        self._update_fstab_mountpoint(fstab_entry, desired_mountpoint, new_opts=desired_opts)
+                        if need_mountpoint_update and need_opts_update:
+                            log(f"Updated fstab mountpoint/options for remount: {fstab_entry['spec']} -> {desired_mountpoint} ({desired_opts})")
+                        elif need_mountpoint_update:
+                            log(f"Updated fstab mountpoint for remount: {fstab_entry['spec']} -> {desired_mountpoint}")
+                        else:
+                            log(f"Updated fstab options for remount: {fstab_entry['spec']} -> {desired_opts}")
                     except Exception as e:
-                        log(f"Failed to update fstab mountpoint to {desired_mountpoint}: {e}", 'ERROR')
+                        log(f"Failed to update fstab entry for remount: {e}", 'ERROR')
                         return
                 new_mountpoint = desired_mountpoint
             else:
