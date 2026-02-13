@@ -976,11 +976,12 @@ class DiskMgrShell(cmd.Cmd):
         print(f"  {Colors.OKGREEN}sync <pri_name> <sec_name>{Colors.ENDC}")
         print("      Syncs two mounted filesystems (rsync pri -> sec).")
         print("      For LUKS: resolves to payload filesystem when open; errors if locked/not mounted.")
-        print(f"  {Colors.OKGREEN}diff <pri_name> <sec_name> [--depth N] [-d]{Colors.ENDC}")
+        print(f"  {Colors.OKGREEN}diff <pri_name> <sec_name> [--depth N] [-d] [--fast]{Colors.ENDC}")
         print("      Dry-run filesystem diff (rsync pri -> sec): shows create/modify/delete counts+bytes,")
         print("      then a tree-style hierarchy summary of dirs/files (+new, ~updated, -deleted regular files).")
         print("      Depth default: 2.")
         print("      Use -d to show directories only.")
+        print("      Use --fast to print raw rsync -an --delete output only (no summaries).")
         print("      Unchanged entries are shown uncolored.")
         print("      Endpoints may be mapped names/IDs or absolute directory paths.")
         print("      For LUKS: resolves to payload filesystem when open; errors if locked/not mounted.")
@@ -3885,7 +3886,7 @@ class DiskMgrShell(cmd.Cmd):
             log(f"Sync failed: {e}", 'ERROR')
 
     def do_diff(self, arg):
-        '''Preview differences between two mounted filesystems: diff <primary_name> <secondary_name> [--depth N] [-d]
+        '''Preview differences between two mounted filesystems: diff <primary_name> <secondary_name> [--depth N] [-d] [--fast]
 
         Endpoints may be mapping names/IDs (must be mounted) or absolute directory paths.
         Uses rsync dry-run itemized output (primary -> secondary) and prints:
@@ -3897,6 +3898,7 @@ class DiskMgrShell(cmd.Cmd):
         parser.add_argument('secondary_name')
         parser.add_argument('--depth', type=int, default=2, help='Hierarchy depth for subtree summary (default: 2)')
         parser.add_argument('-d', '--dirs-only', action='store_true', help='Show directories only in hierarchy output')
+        parser.add_argument('--fast', action='store_true', help='Show raw rsync -an --delete output only')
         try:
             split_args = shlex.split(arg)
             args = parser.parse_args(split_args)
@@ -3914,6 +3916,7 @@ class DiskMgrShell(cmd.Cmd):
         secondary = args.secondary_name
         depth = args.depth
         dirs_only = args.dirs_only
+        fast_mode = args.fast
 
         def _resolve_diff_endpoint(value, role_label):
             if os.path.isabs(value):
@@ -3941,9 +3944,29 @@ class DiskMgrShell(cmd.Cmd):
 
         src_path = pri_mnt.rstrip('/') + '/'
         dst_path = sec_mnt.rstrip('/') + '/'
-        print(f"Diff (dry-run): {Colors.BOLD}{src_path}{Colors.ENDC} -> {Colors.WARNING}{dst_path}{Colors.ENDC}")
+        if fast_mode:
+            print(f"Diff (fast dry-run): {Colors.BOLD}{src_path}{Colors.ENDC} -> {Colors.WARNING}{dst_path}{Colors.ENDC}")
+        else:
+            print(f"Diff (dry-run): {Colors.BOLD}{src_path}{Colors.ENDC} -> {Colors.WARNING}{dst_path}{Colors.ENDC}")
 
         run_command(['sudo', '-v'])
+
+        if fast_mode:
+            if dirs_only:
+                log("--fast ignores -d/--dirs-only.", 'WARN')
+            if depth != 2:
+                log("--fast ignores --depth.", 'WARN')
+
+            res_fast = run_command(
+                ['rsync', '-an', '--delete', src_path, dst_path],
+                sudo=True,
+                capture_output=False,
+                check=False
+            )
+            rc_fast = getattr(res_fast, 'returncode', 0)
+            if rc_fast not in (0, 24):
+                log(f"rsync dry-run exited with status {rc_fast}. Output may be incomplete.", 'WARN')
+            return
 
         def _parse_int(s):
             m = re.search(r"[0-9][0-9,]*", str(s or ""))
