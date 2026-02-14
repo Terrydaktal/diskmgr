@@ -5037,7 +5037,7 @@ class DiskMgrShell(cmd.Cmd):
             if etype == 'dir':
                 depth_here = 0 if path == "." else (path.count('/') + 1)
                 indent = " " * (depth_here * 2)
-                name = "/" if path == "." else (path.split('/')[-1] + "/")
+                name = src_path if path == "." else (path.split('/')[-1] + "/")
                 n_new = c.get((path, 'new'), 0)
                 n_upd = c.get((path, 'upd'), 0)
                 n_del = c.get((path, 'del'), 0)
