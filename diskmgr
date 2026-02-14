@@ -4944,8 +4944,16 @@ class DiskMgrShell(cmd.Cmd):
             relp = _norm_relpath(parts[2].strip())
             size_b = _parse_int(lraw)
 
-            # New regular files.
-            if item.startswith('>f+'):
+            if len(item) < 2:
+                continue
+            item_type = item[1]
+            is_new_nondir = (
+                item.startswith('>f+') or item.startswith('cf+') or
+                item.startswith('>L+') or item.startswith('cL+')
+            )
+
+            # New files/symlinks.
+            if is_new_nondir:
                 new_files += 1
                 total_new += 1
                 new_bytes += size_b
@@ -4954,12 +4962,22 @@ class DiskMgrShell(cmd.Cmd):
                 _add_file_change('new', relp, fc, fb, size_b)
                 continue
 
-            # Modified regular files.
-            if item.startswith('>f') and not item.startswith('>f+'):
+            # Modified regular files (delta estimated as src_size - dst_size).
+            if item_type == 'f':
                 mod_files += 1
                 total_upd += 1
                 modified_entries.append((relp, size_b))
                 _add_subtree('upd', relp, seen, c)
+                continue
+
+            # Modified symlinks (delta from rsync item size field only; no dst stat fallback).
+            if item_type == 'L':
+                mod_files += 1
+                total_upd += 1
+                mod_bytes += size_b
+                _add_subtree('upd', relp, seen, c)
+                _add_subtree_bytes('upd', relp, seen, cb, size_b)
+                _add_file_change('upd', relp, fc, fb, size_b)
                 continue
 
         if proc.stdout:
@@ -5008,9 +5026,9 @@ class DiskMgrShell(cmd.Cmd):
         print(f"Depth shown: {depth} level(s)")
         print("")
         print("Format: <name[/]>  (+N [C]  ~U [U]  -D [R])")
-        print("  +N = regular files that would be CREATED under this entry/subtree")
-        print("  ~U = regular files that would be MODIFIED/UPDATED under this entry/subtree")
-        print("  -D = regular files that would be DELETED under this entry/subtree")
+        print("  +N = files/symlinks that would be CREATED under this entry/subtree")
+        print("  ~U = files/symlinks that would be MODIFIED/UPDATED under this entry/subtree")
+        print("  -D = files/symlinks that would be DELETED under this entry/subtree")
         print("  [C]/[U]/[R] = created/updated(delta)/removed bytes (shown only when non-zero)")
         print("  Directories end with '/'.")
         print("  Unchanged entries are uncolored.")
@@ -5086,7 +5104,7 @@ class DiskMgrShell(cmd.Cmd):
             )
 
         print("-----------------------------------------------")
-        print(f"Totals (regular files): create={total_new}  modify={total_upd}  delete={total_del}")
+        print(f"Totals (files/symlinks): create={total_new}  modify={total_upd}  delete={total_del}")
 
     def do_defrag(self, arg):
         '''Defragment a mounted filesystem: defrag <name>
