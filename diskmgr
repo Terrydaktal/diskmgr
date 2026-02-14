@@ -959,6 +959,7 @@ class DiskMgrShell(cmd.Cmd):
         print(f"  {Colors.OKGREEN}open <name/id>{Colors.ENDC}")
         print("      Opens and mounts a plain or encrypted superfloppy disk/partition.")
         print("      For encrypted targets, unlocks LUKS then mounts payload filesystem.")
+        print("      Btrfs mounts are enforced with compression (compress=zstd:3).")
         print("      Uses /etc/fstab mountpoint/options when an entry exists; otherwise /media/$USER/<label>.")
         print(f"  {Colors.OKGREEN}close <name/id>{Colors.ENDC}")
         print("      close <name>: unmounts filesystem(s) and closes /dev/mapper/<name> when present (locks LUKS).")
@@ -995,7 +996,7 @@ class DiskMgrShell(cmd.Cmd):
         print("      For LUKS: resolves to payload filesystem when open; errors if locked/not mounted.")
         print(f"  {Colors.OKGREEN}defrag <name>{Colors.ENDC}")
         print("      Defragments a mounted filesystem and records user.last_defrag xattr.")
-        print("      On btrfs, runs defragment -r, then balance start -dusage=50.")
+        print("      On btrfs, runs defragment -r -czstd (recompress), then balance start -dusage=50.")
         print("      For LUKS: resolves to payload filesystem when open; errors if locked/not mounted.")
         print(f"  {Colors.OKGREEN}fshealth <name>{Colors.ENDC}")
         print("      Shows filesystem diagnostics, last_defrag/last_scrub xattrs, and extents/files ratios.")
@@ -1688,18 +1689,63 @@ class DiskMgrShell(cmd.Cmd):
             return fstab_entry['mountpoint'], True, fstab_entry
         return fallback_mountpoint, False, None
 
+    def _detect_fstype(self, devnode):
+        fstype = (_lsblk_fstype(devnode) or "").strip().lower()
+        if fstype:
+            return fstype
+        try:
+            res = run_command(['blkid', '-o', 'value', '-s', 'TYPE', devnode], sudo=True, check=False)
+            return (getattr(res, 'stdout', '') or '').strip().lower()
+        except Exception:
+            return ""
+
+    def _ensure_btrfs_compression_on_mount(self, mountpoint):
+        res = run_command(['findmnt', '-rn', '-M', mountpoint, '-o', 'FSTYPE,OPTIONS'], check=False)
+        if getattr(res, 'returncode', 1) != 0:
+            return
+        out = (getattr(res, 'stdout', '') or '').strip()
+        if not out:
+            return
+
+        parts = out.split(None, 1)
+        fstype = (parts[0] if parts else '').strip().lower()
+        opts = (parts[1] if len(parts) > 1 else '').strip().lower()
+        if fstype != 'btrfs':
+            return
+        if ('compress=' in opts) or ('compress-force=' in opts):
+            return
+
+        log(f"Enabling btrfs compression on {mountpoint} (compress=zstd:3).")
+        run_command(['mount', '-o', 'remount,compress=zstd:3', mountpoint], sudo=True)
+
+        verify = run_command(['findmnt', '-rn', '-M', mountpoint, '-o', 'OPTIONS'], check=False)
+        vopts = (getattr(verify, 'stdout', '') or '').strip().lower()
+        if ('compress=' not in vopts) and ('compress-force=' not in vopts):
+            raise RuntimeError(f"Btrfs mount at {mountpoint} is missing compression options after remount.")
+
     def _mount_device(self, devnode, mountpoint, use_fstab=False):
+        dev_fstype = self._detect_fstype(devnode)
         run_command(['mkdir', '-p', mountpoint], sudo=True)
         if use_fstab:
             # Use /etc/fstab mount options and source selection.
             run_command(['mount', mountpoint], sudo=True)
         else:
-            run_command(['mount', devnode, mountpoint], sudo=True)
+            if dev_fstype == 'btrfs':
+                run_command(['mount', '-o', 'compress=zstd:3', devnode, mountpoint], sudo=True)
+            else:
+                run_command(['mount', devnode, mountpoint], sudo=True)
 
-    def _desired_fstab_options(self, label):
+        if dev_fstype == 'btrfs' or use_fstab:
+            self._ensure_btrfs_compression_on_mount(mountpoint)
+
+    def _desired_fstab_options(self, label, fstype=None):
         gvfs_name = str(label or "").replace(",", "_")
         gvfs_name = self._fstab_escape(gvfs_name)
-        return f"defaults,nofail,x-gvfs-show,x-gvfs-name={gvfs_name}"
+        opts = ["defaults", "nofail"]
+        if (str(fstype or "").strip().lower() == "btrfs"):
+            opts.append("compress=zstd:3")
+        opts.extend(["x-gvfs-show", f"x-gvfs-name={gvfs_name}"])
+        return ",".join(opts)
 
     def _update_fstab_mountpoint(self, entry, new_mountpoint, new_opts=None):
         """
@@ -1800,7 +1846,7 @@ class DiskMgrShell(cmd.Cmd):
         added = 0
         if add_entry and new_label:
             fs_t = (fstype or "auto").strip() or "auto"
-            opts = self._desired_fstab_options(new_label)
+            opts = self._desired_fstab_options(new_label, fs_t)
             entry = (
                 f"UUID={self._fstab_escape(target_uuid)}\t"
                 f"{self._fstab_escape(new_mountpoint)}\t"
@@ -2482,6 +2528,7 @@ class DiskMgrShell(cmd.Cmd):
             - Otherwise identifies preferred mountpoint: /media/$USER/<label>.
             - If no hardware label is present, falls back to /media/$USER/<mapping_name>.
             - Ensures the directory exists and attaches the device.
+            - For btrfs, enforces compression (compress=zstd:3) on the mounted filesystem.
         6.  Policy Enforcement: If the disk is already mounted at a non-standard path, 
             it unmounts and remounts it to the preferred path.
 
@@ -2678,6 +2725,11 @@ class DiskMgrShell(cmd.Cmd):
                         run_command(['umount', mp], sudo=True)
                     except Exception as e:
                         log(f"Failed to unmount {mp}: {e}. It may be in use.", 'WARN')
+            try:
+                self._ensure_btrfs_compression_on_mount(mountpoint)
+            except Exception as e:
+                log(f"Failed to enforce btrfs compression on {mountpoint}: {e}", 'ERROR')
+                return
             log(f"Already mounted at {mountpoint}.")
         else:
             log(f"Disk is mounted at {', '.join(current_targets)} (system default). Overriding...")
@@ -3008,6 +3060,7 @@ class DiskMgrShell(cmd.Cmd):
         4.  Unmount: Unmounts all current mount targets for the device (if any).
         5.  Cleanup: Removes empty old mountpoint directories under /media/$USER (best-effort rmdir).
         6.  Mount: Uses fstab mount when present; otherwise direct mount to LABEL path.
+            For btrfs, compression is enforced (compress=zstd:3).
         '''
         parser = CmdArgumentParser(prog='remount', add_help=False)
         parser.add_argument('name')
@@ -3060,6 +3113,7 @@ class DiskMgrShell(cmd.Cmd):
             label = (getattr(res_b, 'stdout', '') or '').strip()
         except:
             pass
+        fs_type = self._detect_fstype(target_dev)
 
         fallback_mountpoint = f"/media/{os.environ.get('USER', 'root')}/{label}" if label else ""
         fstab_entry = self._find_fstab_entry_for_device(target_dev, preferred_label=label or None)
@@ -3068,7 +3122,7 @@ class DiskMgrShell(cmd.Cmd):
         if use_fstab_mount:
             if label:
                 desired_mountpoint = f"/mnt/{label}"
-                desired_opts = self._desired_fstab_options(label)
+                desired_opts = self._desired_fstab_options(label, fs_type)
                 need_mountpoint_update = (fstab_entry.get('mountpoint') != desired_mountpoint)
                 need_opts_update = (str(fstab_entry.get('opts') or '') != desired_opts)
                 if need_mountpoint_update or need_opts_update:
@@ -3109,6 +3163,11 @@ class DiskMgrShell(cmd.Cmd):
         if new_mountpoint in current_targets:
             extra = [t for t in current_targets if t != new_mountpoint]
             if not extra:
+                try:
+                    self._ensure_btrfs_compression_on_mount(new_mountpoint)
+                except Exception as e:
+                    log(f"Failed to enforce btrfs compression on {new_mountpoint}: {e}", 'ERROR')
+                    return
                 log(f"Already mounted at {new_mountpoint}.")
                 return
 
@@ -3119,6 +3178,11 @@ class DiskMgrShell(cmd.Cmd):
                     cleanup_mountpoint_dir(mp)
             except Exception as e:
                 log(f"Failed to unmount extra mount(s): {e}", 'ERROR')
+                return
+            try:
+                self._ensure_btrfs_compression_on_mount(new_mountpoint)
+            except Exception as e:
+                log(f"Failed to enforce btrfs compression on {new_mountpoint}: {e}", 'ERROR')
             return
 
         if current_targets:
@@ -5114,7 +5178,7 @@ class DiskMgrShell(cmd.Cmd):
         2.  Confirmation: Requires solving two math problems.
         3.  Execution:
             - ext4:  runs 'sudo e4defrag <mountpoint>'
-            - btrfs: runs 'sudo btrfs filesystem defragment -r <mountpoint>'
+            - btrfs: runs 'sudo btrfs filesystem defragment -r -czstd <mountpoint>'
                      then 'sudo btrfs balance start -dusage=50 <mountpoint>'
         4.  Recording: Stores a timestamp on the mountpoint root via:
               sudo setfattr -n user.last_defrag -v "<date>" <mountpoint>
@@ -5192,8 +5256,8 @@ class DiskMgrShell(cmd.Cmd):
                 if btrfs_bin is None:
                     log("btrfs not found. Install 'btrfs-progs' and retry.", 'ERROR')
                     return
-                log(f"Running: {btrfs_bin} filesystem defragment -r {mnt}")
-                run_command([btrfs_bin, 'filesystem', 'defragment', '-r', mnt], sudo=True, capture_output=False, check=False)
+                log(f"Running: {btrfs_bin} filesystem defragment -r -czstd {mnt}")
+                run_command([btrfs_bin, 'filesystem', 'defragment', '-r', '-czstd', mnt], sudo=True, capture_output=False, check=False)
                 log(f"Running: {btrfs_bin} balance start -dusage=50 {mnt}")
                 run_command([btrfs_bin, 'balance', 'start', '-dusage=50', mnt], sudo=True, capture_output=False, check=False)
 
