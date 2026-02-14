@@ -981,13 +981,14 @@ class DiskMgrShell(cmd.Cmd):
         print("      Primary/source is copied FROM. Secondary/destination is replaced to match source.")
         print("      Endpoints may be mapped names or absolute directory paths.")
         print("      For LUKS: resolves to payload filesystem when open; errors if locked/not mounted.")
-        print(f"  {Colors.OKGREEN}diff <pri_name> <sec_name> [--depth N] [-d] [--fast]{Colors.ENDC}")
+        print(f"  {Colors.OKGREEN}diff <pri_name> <sec_name> [--depth N] [-d] [--fast] [--checksum]{Colors.ENDC}")
         print("      Dry-run filesystem diff (rsync pri -> sec): shows create/modify/delete counts+bytes,")
         print("      Primary/source is copied FROM. Secondary/destination is what would be replaced.")
         print("      then a tree-style hierarchy summary of dirs/files (+new, ~updated, -deleted regular files).")
         print("      Depth default: 2.")
         print("      Use -d to show directories only.")
         print("      Use --fast to print raw rsync -an --delete --stats output only (no summaries).")
+        print("      Use --checksum to compare file contents via rsync checksums (slower, ignores mtime-only changes).")
         print("      In --fast, created(new+updated) regular files = 'Number of regular files transferred'.")
         print("      Unchanged entries are shown uncolored.")
         print("      Endpoints may be mapped names/IDs or absolute directory paths.")
@@ -4535,7 +4536,7 @@ class DiskMgrShell(cmd.Cmd):
             log(f"Sync failed: {e}", 'ERROR')
 
     def do_diff(self, arg):
-        '''Preview differences between two mounted filesystems: diff <primary_name> <secondary_name> [--depth N] [-d] [--fast]
+        '''Preview differences between two mounted filesystems: diff <primary_name> <secondary_name> [--depth N] [-d] [--fast] [--checksum]
 
         Endpoints may be mapping names/IDs (must be mounted) or absolute directory paths.
         Uses rsync dry-run itemized output (primary -> secondary) and prints:
@@ -4548,6 +4549,7 @@ class DiskMgrShell(cmd.Cmd):
         parser.add_argument('--depth', type=int, default=2, help='Hierarchy depth for subtree summary (default: 2)')
         parser.add_argument('-d', '--dirs-only', action='store_true', help='Show directories only in hierarchy output')
         parser.add_argument('--fast', action='store_true', help='Show raw rsync -an --delete --stats output only')
+        parser.add_argument('--checksum', action='store_true', help='Compare file content using checksums (slower)')
         try:
             split_args = shlex.split(arg)
             args = parser.parse_args(split_args)
@@ -4566,6 +4568,7 @@ class DiskMgrShell(cmd.Cmd):
         depth = args.depth
         dirs_only = args.dirs_only
         fast_mode = args.fast
+        checksum_mode = args.checksum
 
         def _resolve_diff_endpoint(value, role_label):
             if os.path.isabs(value):
@@ -4599,6 +4602,8 @@ class DiskMgrShell(cmd.Cmd):
         else:
             print(f"Diff (dry-run, source->destination): {Colors.BOLD}{src_path}{Colors.ENDC} -> {Colors.WARNING}{dst_path}{Colors.ENDC}")
             print("  Source is copied FROM; destination is what would be replaced to match source.")
+        if checksum_mode:
+            print("  Comparison mode: checksum/content-based (rsync -c).")
 
         run_command(['sudo', '-v'])
 
@@ -4608,8 +4613,12 @@ class DiskMgrShell(cmd.Cmd):
             if depth != 2:
                 log("--fast ignores --depth.", 'WARN')
 
+            fast_cmd = ['rsync', '-an']
+            if checksum_mode:
+                fast_cmd.append('-c')
+            fast_cmd.extend(['--delete', '--stats', src_path, dst_path])
             res_fast = run_command(
-                ['rsync', '-an', '--delete', '--stats', src_path, dst_path],
+                fast_cmd,
                 sudo=True,
                 capture_output=True,
                 check=False
@@ -4866,11 +4875,14 @@ class DiskMgrShell(cmd.Cmd):
         total_upd = 0
         total_del = 0
 
-        cmd = [
-            'sudo', 'rsync', '-anH', '--delete', '--itemize-changes',
+        cmd = ['sudo', 'rsync', '-anH']
+        if checksum_mode:
+            cmd.append('-c')
+        cmd.extend([
+            '--delete', '--itemize-changes',
             '--out-format=%i\t%l\t%n',
             src_path, dst_path
-        ]
+        ])
         stderr_lines = []
 
         def _drain_stderr(stream, sink):
