@@ -23,7 +23,7 @@ except ImportError:
 # Configuration
 MAP_FILENAME = 'diskmap.tsv'
 PASSGEN_BIN = 'passgen'
-VERSION = '2.7.7'
+VERSION = '2.9.2'
 HISTORY_FILE_ENV = 'DISKMGR_HISTORY'
 DEFAULT_HISTORY_FILE = Path.home() / '.local' / 'state' / 'diskmgr' / 'history'
 MAX_HISTORY_ENTRIES = 5000
@@ -994,10 +994,11 @@ class DiskMgrShell(cmd.Cmd):
         print("      Unchanged entries are shown uncolored.")
         print("      Endpoints may be mapped names/IDs or absolute directory paths.")
         print("      For LUKS: resolves to payload filesystem when open; errors if locked/not mounted.")
-        print(f"  {Colors.OKGREEN}defrag <name>{Colors.ENDC}")
+        print(f"  {Colors.OKGREEN}defrag <name> [--compress]{Colors.ENDC}")
         print("      Defragments a mounted filesystem and records user.last_defrag xattr.")
-        print("      On btrfs, runs defragment -r -v -czstd with live per-directory progress,")
-        print("      then balance start -dusage=50.")
+        print("      On btrfs, default runs defragment -r -v with live per-directory progress.")
+        print("      Use --compress to add -czstd recompression,")
+        print("      then balance start -dusage=50 and live balance status monitoring.")
         print("      For LUKS: resolves to payload filesystem when open; errors if locked/not mounted.")
         print(f"  {Colors.OKGREEN}fshealth <name>{Colors.ENDC}")
         print("      Shows filesystem diagnostics, last_defrag/last_scrub xattrs, and extents/files ratios.")
@@ -5268,25 +5269,34 @@ class DiskMgrShell(cmd.Cmd):
         print(f"Totals (files/symlinks): create={total_new}  modify={total_upd}  delete={total_del}")
 
     def do_defrag(self, arg):
-        '''Defragment a mounted filesystem: defrag <name>
+        '''Defragment a mounted filesystem: defrag <name> [--compress]
 
         UNDER THE HOOD:
         1.  Validation: Verifies the disk is mapped and currently mounted.
         2.  Confirmation: Requires solving two math problems.
         3.  Execution:
             - ext4:  runs 'sudo e4defrag <mountpoint>'
-            - btrfs: runs 'sudo btrfs filesystem defragment -r -v -czstd <mountpoint>'
+            - btrfs: runs 'sudo btrfs filesystem defragment -r -v <mountpoint>'
+                     optional: add '--compress' to use '-czstd' recompression mode.
                      with live progress counters (total files + current directory),
                      then 'sudo btrfs balance start -dusage=50 <mountpoint>'
         4.  Recording: Stores a timestamp on the mountpoint root via:
               sudo setfattr -n user.last_defrag -v "<date>" <mountpoint>
         '''
-        args = arg.split()
-        if len(args) != 1:
-            log("Usage: defrag <name>", 'ERROR')
+        parser = CmdArgumentParser(prog='defrag', add_help=False)
+        parser.add_argument('name')
+        parser.add_argument('--compress', action='store_true', help='Enable btrfs recompression during defrag (-czstd)')
+        try:
+            split_args = shlex.split(arg)
+            args = parser.parse_args(split_args)
+        except argparse.ArgumentError as e:
+            log(str(e), 'ERROR')
+            return
+        except SystemExit:
             return
 
-        name = args[0]
+        name = args.name
+        compress_mode = bool(getattr(args, 'compress', False))
         mnt = self.get_mountpoint(name)
         if not mnt:
             log(f"Disk '{name}' is not mounted. Run 'open {name}' first.", 'ERROR')
@@ -5345,6 +5355,8 @@ class DiskMgrShell(cmd.Cmd):
 
         try:
             if fstype == "ext4":
+                if compress_mode:
+                    log("--compress applies to btrfs only; ignoring for ext4.", 'WARN')
                 if e4defrag_bin is None:
                     log("e4defrag not found. Install 'e2fsprogs' and retry.", 'ERROR')
                     return
@@ -5356,7 +5368,12 @@ class DiskMgrShell(cmd.Cmd):
                     return
                 start_ts = time.time()
                 log_path = f"/tmp/diskmgr_btrfs_defrag_{os.getpid()}_{int(start_ts)}.log"
-                log(f"Running: {btrfs_bin} filesystem defragment -r -v -czstd {mnt}")
+                cmd = ['sudo', btrfs_bin, 'filesystem', 'defragment', '-r', '-v']
+                if compress_mode:
+                    cmd.append('-czstd')
+                cmd.append(mnt)
+                cmd_str = " ".join(cmd[1:])
+                log(f"Running: {cmd_str}")
                 log(f"Progress log: {log_path}")
 
                 def _fmt_hms(total_seconds):
@@ -5370,7 +5387,6 @@ class DiskMgrShell(cmd.Cmd):
                 current_dir = "Scanning..."
                 dir_counts = {}
                 last_render = 0.0
-                cmd = ['sudo', btrfs_bin, 'filesystem', 'defragment', '-r', '-v', '-czstd', mnt]
                 proc = subprocess.Popen(
                     cmd,
                     stdout=subprocess.PIPE,
@@ -5420,7 +5436,47 @@ class DiskMgrShell(cmd.Cmd):
                 if rc_defrag not in (0,):
                     log(f"btrfs defragment exited with status {rc_defrag}. Continuing with balance.", 'WARN')
                 log(f"Running: {btrfs_bin} balance start -dusage=50 {mnt}")
-                run_command([btrfs_bin, 'balance', 'start', '-dusage=50', mnt], sudo=True, capture_output=False, check=False)
+                res_balance_start = run_command(
+                    [btrfs_bin, 'balance', 'start', '-dusage=50', mnt],
+                    sudo=True,
+                    capture_output=True,
+                    check=False
+                )
+                out_start = (getattr(res_balance_start, 'stdout', '') or '').strip()
+                err_start = (getattr(res_balance_start, 'stderr', '') or '').strip()
+                if out_start:
+                    print(out_start)
+                if err_start:
+                    print(err_start, file=sys.stderr)
+                if getattr(res_balance_start, 'returncode', 0) not in (0,):
+                    log(
+                        f"btrfs balance start exited with status {getattr(res_balance_start, 'returncode', 0)}. "
+                        f"Will still query balance status.",
+                        'WARN'
+                    )
+
+                log(f"Monitoring: {btrfs_bin} balance status {mnt}")
+                last_status = None
+                while True:
+                    res_status = run_command(
+                        [btrfs_bin, 'balance', 'status', mnt],
+                        sudo=True,
+                        capture_output=True,
+                        check=False
+                    )
+                    out_status = (getattr(res_status, 'stdout', '') or '').strip()
+                    err_status = (getattr(res_status, 'stderr', '') or '').strip()
+                    status_text = out_status or err_status or "(no status output)"
+
+                    if status_text != last_status:
+                        print(status_text)
+                        last_status = status_text
+
+                    s = status_text.lower()
+                    if ("is running" in s) or ("is paused" in s):
+                        time.sleep(2.0)
+                        continue
+                    break
 
             # Record timestamp in xattr on mountpoint root.
             if setfattr_bin is None:
