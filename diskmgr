@@ -5354,6 +5354,17 @@ class DiskMgrShell(cmd.Cmd):
         print(f"{Colors.BOLD}Last defrag:{Colors.ENDC} {last_defrag or '-'}")
         print(f"{Colors.BOLD}Last scrub:{Colors.ENDC} {last_scrub or '-'}")
 
+        print(f"\n{Colors.HEADER}{Colors.BOLD}--- findmnt -A --output-all --json {mnt} ---{Colors.ENDC}")
+        res_fm = run_command(['findmnt', '-A', '--output-all', '--json', mnt], check=False)
+        fm_out = (getattr(res_fm, 'stdout', '') or '')
+        fm_err = (getattr(res_fm, 'stderr', '') or '')
+        if fm_out.strip():
+            print(fm_out.rstrip())
+        else:
+            print("{}")
+        if fm_err.strip():
+            print(fm_err.rstrip(), file=sys.stderr)
+
         run_command(['sudo', '-v'])
 
         # Compute/print fragmentation state (best-effort).
