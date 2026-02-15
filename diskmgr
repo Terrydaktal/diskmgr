@@ -1131,7 +1131,7 @@ class DiskMgrShell(cmd.Cmd):
                 continue
             dev_path = f"/dev/{d_name}"
             try:
-                ls_res = run_command(['lsblk', '-J', '-f', '-o',
+                ls_res = run_command(['lsblk', '-J', '-b', '-f', '-o',
                                       'NAME,KNAME,TYPE,SIZE,FSTYPE,FSVER,LABEL,UUID,FSAVAIL,FSUSE%,MOUNTPOINTS,WWN',
                                       dev_path], sudo=True, check=False)
                 rows = []
@@ -2000,6 +2000,32 @@ class DiskMgrShell(cmd.Cmd):
                 max_len = max(max_len, len(f"  {c}: {v}"))
         return max_len
 
+    def _format_size_tib_gib(self, size_value):
+        """
+        Format byte-count sizes with higher precision in binary units.
+        Uses GiB/TiB (and higher if needed), promoting units when rounding
+        would otherwise show 1024.000 of the lower unit.
+        """
+        raw = str(size_value or '').strip()
+        if not raw:
+            return ""
+        try:
+            n = int(raw, 10)
+        except (TypeError, ValueError):
+            # Fallback for unexpected non-byte strings.
+            return raw
+
+        if n == 0:
+            return "0 GiB"
+
+        value = n / float(1024 ** 3)  # start in GiB
+        units = ["GiB", "TiB", "PiB", "EiB"]
+        idx = 0
+        while idx < len(units) - 1 and round(value, 3) >= 1024.0:
+            value /= 1024.0
+            idx += 1
+        return f"{value:.3f} {units[idx]}"
+
     def _collect_lsblk_rows(self, devices, indent="", is_root=True, parent_wwn="", friendly_map=None, fstab_real_set=None, fstab_uuid_set=None, fstab_detail_real=None, fstab_detail_uuid=None, findmnt_lookup=None):
         """
         Collect an lsblk JSON tree into flat rows, while preserving the tree glyphs in NAME.
@@ -2022,7 +2048,7 @@ class DiskMgrShell(cmd.Cmd):
             name = dev.get('name', '') or ""
             kname = dev.get('kname', '') or name
             dtype = dev.get('type') or ""
-            size = dev.get('size') or ""
+            size = self._format_size_tib_gib(dev.get('size') or "")
             fstype = dev.get('fstype') or ""
             fsver = dev.get('fsver') or ""
             label = dev.get('label') or ""
