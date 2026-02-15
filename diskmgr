@@ -996,7 +996,8 @@ class DiskMgrShell(cmd.Cmd):
         print("      For LUKS: resolves to payload filesystem when open; errors if locked/not mounted.")
         print(f"  {Colors.OKGREEN}defrag <name>{Colors.ENDC}")
         print("      Defragments a mounted filesystem and records user.last_defrag xattr.")
-        print("      On btrfs, runs defragment -r -czstd (recompress), then balance start -dusage=50.")
+        print("      On btrfs, runs defragment -r -v -czstd with live per-directory progress,")
+        print("      then balance start -dusage=50.")
         print("      For LUKS: resolves to payload filesystem when open; errors if locked/not mounted.")
         print(f"  {Colors.OKGREEN}fshealth <name>{Colors.ENDC}")
         print("      Shows filesystem diagnostics, last_defrag/last_scrub xattrs, and extents/files ratios.")
@@ -5274,7 +5275,8 @@ class DiskMgrShell(cmd.Cmd):
         2.  Confirmation: Requires solving two math problems.
         3.  Execution:
             - ext4:  runs 'sudo e4defrag <mountpoint>'
-            - btrfs: runs 'sudo btrfs filesystem defragment -r -czstd <mountpoint>'
+            - btrfs: runs 'sudo btrfs filesystem defragment -r -v -czstd <mountpoint>'
+                     with live progress counters (total files + current directory),
                      then 'sudo btrfs balance start -dusage=50 <mountpoint>'
         4.  Recording: Stores a timestamp on the mountpoint root via:
               sudo setfattr -n user.last_defrag -v "<date>" <mountpoint>
@@ -5352,8 +5354,71 @@ class DiskMgrShell(cmd.Cmd):
                 if btrfs_bin is None:
                     log("btrfs not found. Install 'btrfs-progs' and retry.", 'ERROR')
                     return
-                log(f"Running: {btrfs_bin} filesystem defragment -r -czstd {mnt}")
-                run_command([btrfs_bin, 'filesystem', 'defragment', '-r', '-czstd', mnt], sudo=True, capture_output=False, check=False)
+                start_ts = time.time()
+                log_path = f"/tmp/diskmgr_btrfs_defrag_{os.getpid()}_{int(start_ts)}.log"
+                log(f"Running: {btrfs_bin} filesystem defragment -r -v -czstd {mnt}")
+                log(f"Progress log: {log_path}")
+
+                def _fmt_hms(total_seconds):
+                    s = int(max(total_seconds, 0))
+                    h = s // 3600
+                    m = (s % 3600) // 60
+                    sec = s % 60
+                    return f"{h:02d}:{m:02d}:{sec:02d}"
+
+                total_done = 0
+                current_dir = "Scanning..."
+                dir_counts = {}
+                last_render = 0.0
+                cmd = ['sudo', btrfs_bin, 'filesystem', 'defragment', '-r', '-v', '-czstd', mnt]
+                proc = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1,
+                )
+                with open(log_path, 'w', encoding='utf-8', errors='replace') as lf:
+                    if proc.stdout:
+                        for raw in proc.stdout:
+                            line = (raw or '').rstrip('\n')
+                            lf.write(line + "\n")
+                            txt = line.strip()
+                            if txt.startswith('/'):
+                                # btrfs -v emits one path per processed file; use it as progress signal.
+                                path = txt.rstrip(':')
+                                current_dir = os.path.dirname(path) or '/'
+                                total_done += 1
+                                dir_counts[current_dir] = dir_counts.get(current_dir, 0) + 1
+                            now = time.time()
+                            if now - last_render >= 1.0:
+                                in_dir = dir_counts.get(current_dir, 0)
+                                msg = (
+                                    f"\rFiles: {total_done:<10} | "
+                                    f"In Current Dir: {in_dir:<8} | "
+                                    f"Path: {current_dir[:70]}"
+                                )
+                                sys.stdout.write(msg)
+                                sys.stdout.flush()
+                                last_render = now
+                        proc.stdout.close()
+                rc_defrag = proc.wait()
+                in_dir = dir_counts.get(current_dir, 0)
+                final_msg = (
+                    f"\rFiles: {total_done:<10} | "
+                    f"In Current Dir: {in_dir:<8} | "
+                    f"Path: {current_dir[:70]}"
+                )
+                sys.stdout.write(final_msg + "\n")
+                sys.stdout.flush()
+
+                elapsed = time.time() - start_ts
+                print("--------------------------------------------------------")
+                print(f"Btrfs defragment complete. Duration: {_fmt_hms(elapsed)}")
+                print(f"Total files processed (verbose paths): {total_done}")
+                print(f"Progress log saved at: {log_path}")
+                if rc_defrag not in (0,):
+                    log(f"btrfs defragment exited with status {rc_defrag}. Continuing with balance.", 'WARN')
                 log(f"Running: {btrfs_bin} balance start -dusage=50 {mnt}")
                 run_command([btrfs_bin, 'balance', 'start', '-dusage=50', mnt], sudo=True, capture_output=False, check=False)
 
