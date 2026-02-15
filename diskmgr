@@ -1891,8 +1891,8 @@ class DiskMgrShell(cmd.Cmd):
             if not raw:
                 return {}
             data = json.loads(raw)
-            filesystems = data.get('filesystems', [])
-            if not isinstance(filesystems, list):
+            roots = data.get('filesystems', [])
+            if not isinstance(roots, list):
                 return {}
         except Exception:
             return {}
@@ -1904,7 +1904,18 @@ class DiskMgrShell(cmd.Cmd):
             if v not in lst:
                 lst.append(v)
 
-        for fs in filesystems:
+        def _iter_findmnt_nodes(nodes):
+            if not isinstance(nodes, list):
+                return
+            for node in nodes:
+                if not isinstance(node, dict):
+                    continue
+                yield node
+                children = node.get('children')
+                if isinstance(children, list):
+                    yield from _iter_findmnt_nodes(children)
+
+        for fs in _iter_findmnt_nodes(roots):
             if not isinstance(fs, dict):
                 continue
             src = str(fs.get('source') or '').strip()
