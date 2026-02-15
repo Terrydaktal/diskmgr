@@ -1723,8 +1723,10 @@ class DiskMgrShell(cmd.Cmd):
         if ('compress=' not in vopts) and ('compress-force=' not in vopts):
             raise RuntimeError(f"Btrfs mount at {mountpoint} is missing compression options after remount.")
 
-    def _mount_device(self, devnode, mountpoint, use_fstab=False):
+    def _mount_device(self, devnode, mountpoint, use_fstab=False, announce_btrfs=False):
         dev_fstype = self._detect_fstype(devnode)
+        if announce_btrfs and dev_fstype == 'btrfs':
+            log(f"Enabling btrfs compression on {mountpoint} (compress=zstd:3).")
         run_command(['mkdir', '-p', mountpoint], sudo=True)
         if use_fstab:
             # Use /etc/fstab mount options and source selection.
@@ -2714,7 +2716,7 @@ class DiskMgrShell(cmd.Cmd):
 
         if not current_targets:
             log(f"Mounting {target_to_mount} to {mountpoint}...")
-            self._mount_device(target_to_mount, mountpoint, use_fstab=use_fstab_mount)
+            self._mount_device(target_to_mount, mountpoint, use_fstab=use_fstab_mount, announce_btrfs=True)
             log("Mounted.")
         elif mountpoint in current_targets:
             extra = [t for t in current_targets if t != mountpoint]
@@ -2736,7 +2738,7 @@ class DiskMgrShell(cmd.Cmd):
             try:
                 for mp in current_targets:
                     run_command(['umount', mp], sudo=True)
-                self._mount_device(target_to_mount, mountpoint, use_fstab=use_fstab_mount)
+                self._mount_device(target_to_mount, mountpoint, use_fstab=use_fstab_mount, announce_btrfs=True)
                 log(f"Successfully moved mount to {mountpoint}")
             except Exception as e:
                 log(f"Failed to override mount: {e}. It may be in use.", 'WARN')
@@ -3209,7 +3211,7 @@ class DiskMgrShell(cmd.Cmd):
 
         log(f"Mounting {target_dev} to {new_mountpoint}...")
         try:
-            self._mount_device(target_dev, new_mountpoint, use_fstab=use_fstab_mount)
+            self._mount_device(target_dev, new_mountpoint, use_fstab=use_fstab_mount, announce_btrfs=True)
             log(f"Remounted successfully at {new_mountpoint}")
         except Exception as e:
             log(f"Failed to mount at {new_mountpoint}: {e}", 'ERROR')
