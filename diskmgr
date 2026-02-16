@@ -2031,6 +2031,55 @@ class DiskMgrShell(cmd.Cmd):
             idx += 1
         return f"{value:.3f} {units[idx]}"
 
+    def _format_bytes_binary_with_metric(self, byte_value):
+        """
+        Format a raw byte count as:
+          - binary: MiB/GiB/TiB (base 1024)
+          - metric: (MB/GB/TB) in brackets (base 1000)
+        Picks unit based on range (MiB < 1 GiB, GiB < 1 TiB, else TiB+).
+        """
+        raw = str(byte_value or "").strip()
+        if not raw or raw == "-":
+            return raw
+        try:
+            n = int(raw, 10)
+        except (TypeError, ValueError):
+            return raw
+        if n < 0:
+            return "-"
+
+        if n >= 1024 ** 4:
+            bin_unit = "TiB"
+            bin_div = 1024 ** 4
+            met_unit = "TB"
+            met_div = 1000 ** 4
+        elif n >= 1024 ** 3:
+            bin_unit = "GiB"
+            bin_div = 1024 ** 3
+            met_unit = "GB"
+            met_div = 1000 ** 3
+        else:
+            bin_unit = "MiB"
+            bin_div = 1024 ** 2
+            met_unit = "MB"
+            met_div = 1000 ** 2
+
+        bin_val = n / float(bin_div)
+        met_val = n / float(met_div)
+
+        # Binary: keep consistent 3-decimal precision like SIZE.
+        bin_s = f"{bin_val:.3f} {bin_unit}"
+
+        # Metric: fewer decimals for readability.
+        if met_val >= 100:
+            met_s = f"{met_val:.0f}{met_unit}"
+        elif met_val >= 10:
+            met_s = f"{met_val:.1f}{met_unit}"
+        else:
+            met_s = f"{met_val:.2f}{met_unit}"
+
+        return f"{bin_s} ({met_s})"
+
     def _collect_lsblk_rows(self, devices, indent="", is_root=True, parent_wwn="", friendly_map=None, fstab_real_set=None, fstab_uuid_set=None, fstab_detail_real=None, fstab_detail_uuid=None, findmnt_lookup=None):
         """
         Collect an lsblk JSON tree into flat rows, while preserving the tree glyphs in NAME.
@@ -2059,7 +2108,8 @@ class DiskMgrShell(cmd.Cmd):
             fsver = dev.get('fsver') or ""
             label = dev.get('label') or ""
             uuid = dev.get('uuid') or ""
-            fsavail = dev.get('fsavail') or ""
+            fsavail_raw = dev.get('fsavail') or ""
+            fsavail = self._format_bytes_binary_with_metric(fsavail_raw)
             fsuse = dev.get('fsuse%') or ""
             # Partitions often don't carry WWN/EUI in lsblk output; inherit from parent disk when missing.
             wwn = dev.get('wwn') or parent_wwn or ""
