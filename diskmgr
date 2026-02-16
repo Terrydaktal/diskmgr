@@ -1247,6 +1247,8 @@ class DiskMgrShell(cmd.Cmd):
                             size_info = f"{size_bytes/(1024**2):.2f}MiB"
                         else:
                             size_info = f"{size_bytes/(1024**2):.2f}MiB ≈ {size_bytes/(1024**3):.1f}GiB"
+                            if size_bytes >= 1024**4:
+                                size_info += f" ({size_bytes/(1024**4):.3f} TiB)"
                         print(f"{Colors.OKGREEN}[ {d_name} {disk_fstype} {total_logical_sectors}s ({size_info}) ]{Colors.ENDC}")
 
                     # Still show lsblk hierarchy so the user can see what's on the disk.
@@ -1319,6 +1321,8 @@ class DiskMgrShell(cmd.Cmd):
                         size_info = f"{size_bytes/(1024**2):.2f}MiB"
                     else:
                         size_info = f"{size_bytes/(1024**2):.2f}MiB ≈ {size_bytes/(1024**3):.1f}GiB"
+                        if size_bytes >= 1024**4:
+                            size_info += f" ({size_bytes/(1024**4):.3f} TiB)"
 
                     if fs_or_type == 'free' or (not fs_or_type and len(parts) == 5):
                         segments.append(f"{Colors.OKCYAN}[ free {size_sectors}s ({size_info}) ]{Colors.ENDC}")
