@@ -1881,6 +1881,7 @@ class DiskMgrShell(cmd.Cmd):
               "SOURCE": "<joined>",
               "FS-OPTIONS": "<joined>",
               "VFS-OPTIONS": "<joined>",
+              "FS-USED": "<joined>",
             },
             ...
           }
@@ -1927,6 +1928,7 @@ class DiskMgrShell(cmd.Cmd):
 
             fs_opts = str(fs.get('fs-options') or '').strip()
             vfs_opts = str(fs.get('vfs-options') or '').strip()
+            fs_used = str(fs.get('used') or '').strip()
 
             keys = [src]
             try:
@@ -1937,10 +1939,11 @@ class DiskMgrShell(cmd.Cmd):
                 pass
 
             for key in keys:
-                slot = lookup.setdefault(key, {'SOURCE': [], 'FS-OPTIONS': [], 'VFS-OPTIONS': []})
+                slot = lookup.setdefault(key, {'SOURCE': [], 'FS-OPTIONS': [], 'VFS-OPTIONS': [], 'FS-USED': []})
                 _add_unique(slot['SOURCE'], src)
                 _add_unique(slot['FS-OPTIONS'], fs_opts)
                 _add_unique(slot['VFS-OPTIONS'], vfs_opts)
+                _add_unique(slot['FS-USED'], fs_used)
 
         out = {}
         for key, slot in lookup.items():
@@ -1948,6 +1951,7 @@ class DiskMgrShell(cmd.Cmd):
                 'SOURCE': " | ".join(slot['SOURCE']) if slot['SOURCE'] else '-',
                 'FS-OPTIONS': " | ".join(slot['FS-OPTIONS']) if slot['FS-OPTIONS'] else '-',
                 'VFS-OPTIONS': " | ".join(slot['VFS-OPTIONS']) if slot['VFS-OPTIONS'] else '-',
+                'FS-USED': " | ".join(slot['FS-USED']) if slot['FS-USED'] else '-',
             }
         return out
 
@@ -1997,7 +2001,7 @@ class DiskMgrShell(cmd.Cmd):
         for i, r in enumerate(rows, start=1):
             max_len = max(max_len, len(f"Entry {i}"))
             for c in cols:
-                v = str(r.get(c, '') or '')
+                v = self._lsblk_list_value(r, c)
                 max_len = max(max_len, len(f"  {c}: {v}"))
         return max_len
 
@@ -2115,6 +2119,7 @@ class DiskMgrShell(cmd.Cmd):
             mount_source = str(findmnt_row.get('SOURCE') or '-')
             fs_options = str(findmnt_row.get('FS-OPTIONS') or '-')
             vfs_options = str(findmnt_row.get('VFS-OPTIONS') or '-')
+            fs_used_metric = str(findmnt_row.get('FS-USED') or '-')
             rows.append({
                 "#": "-",
                 "KNAME": kname,
@@ -2134,6 +2139,7 @@ class DiskMgrShell(cmd.Cmd):
                 "SOURCE": mount_source,
                 "FS-OPTIONS": fs_options,
                 "VFS-OPTIONS": vfs_options,
+                "FS-USED": fs_used_metric,
                 "MOUNTPOINT": mounts,
                 "FSTAB ENTRY": fstab_entry,
             })
@@ -2180,9 +2186,19 @@ class DiskMgrShell(cmd.Cmd):
         for i, r in enumerate(rows, start=1):
             print(f"{Colors.BOLD}Entry {i}{Colors.ENDC}")
             for c in cols:
-                print(f"  {c}: {str(r.get(c, '') or '')}")
+                print(f"  {c}: {self._lsblk_list_value(r, c)}")
             if i != len(rows):
                 print("")
+
+    def _lsblk_list_value(self, row, col):
+        """Return display value for list-mode cells."""
+        if col == "FSUSE%":
+            fsuse = str(row.get("FSUSE%", "") or "")
+            fs_used = str(row.get("FS-USED", "") or "")
+            if fsuse and fsuse != "-" and fs_used and fs_used != "-":
+                return f"{fsuse} ({fs_used})"
+            return fsuse
+        return str(row.get(col, "") or "")
 
     def resolve_uuid_to_dev(self, uuid):
         '''Resolves a UUID to a short device name like sda1 or nvme0n1p1.'''
