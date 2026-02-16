@@ -5825,7 +5825,11 @@ class DiskMgrShell(cmd.Cmd):
 
         run_command(['sudo', '-v'])
 
-        # Compute/print fragmentation state (best-effort).
+        # Compute fragmentation state (best-effort), but print it at the end of fshealth output.
+        frag_lines = []
+        def _frag(line):
+            frag_lines.append(line)
+
         compsize_bin = None
         compsize_out = ""
         compsize_err = ""
@@ -5907,33 +5911,33 @@ class DiskMgrShell(cmd.Cmd):
                 if epf is not None:
                     state, _ = _ratio_state_ext4(epf)
                     score_part = f"; score {score}" if score is not None else ""
-                    print(
+                    _frag(
                         f"{Colors.BOLD}Defragmentation state:{Colors.ENDC} "
                         f"{state} (ext4 ratio ~{epf:.2f} extents/file; thresholds: "
                         f"<1.1 healthy, >1.5 bad, >5 critical{score_part})"
                     )
                 elif score is not None:
-                    print(
+                    _frag(
                         f"{Colors.BOLD}Defragmentation state:{Colors.ENDC} "
                         f"- (ext4 thresholds: <1.1 healthy, >1.5 bad, >5 critical; "
                         f"extents/files ratio unavailable; score {score})"
                     )
                 else:
-                    print(f"{Colors.BOLD}Defragmentation state:{Colors.ENDC} - (could not parse e4defrag output)")
+                    _frag(f"{Colors.BOLD}Defragmentation state:{Colors.ENDC} - (could not parse e4defrag output)")
 
                 if total_extents is not None and best_extents is not None:
                     extra_extents = max(total_extents - best_extents, 0)
                     overhead_pct = (extra_extents / float(best_extents) * 100.0) if best_extents > 0 else 0.0
-                    print(
+                    _frag(
                         f"{Colors.BOLD}Extent overhead:{Colors.ENDC} "
                         f"{extra_extents} extra extents over ideal ({overhead_pct:.2f}%)"
                     )
                 if m_avg:
                     avg_extent = (m_avg.group(1) or "").strip()
                     if avg_extent:
-                        print(f"{Colors.BOLD}Average extent size:{Colors.ENDC} {avg_extent}")
+                        _frag(f"{Colors.BOLD}Average extent size:{Colors.ENDC} {avg_extent}")
             else:
-                print(f"{Colors.BOLD}Defragmentation state:{Colors.ENDC} - (e4defrag not found)")
+                _frag(f"{Colors.BOLD}Defragmentation state:{Colors.ENDC} - (e4defrag not found)")
         elif fstype == 'btrfs':
             compsize_bin = _find_tool_or_common_paths('compsize', [
                 '/usr/sbin/compsize',
@@ -5943,7 +5947,7 @@ class DiskMgrShell(cmd.Cmd):
                 '/bin/compsize',
             ])
             if compsize_bin is None:
-                print(f"{Colors.BOLD}Defragmentation state:{Colors.ENDC} - (compsize not found)")
+                _frag(f"{Colors.BOLD}Defragmentation state:{Colors.ENDC} - (compsize not found)")
             else:
                 res_c = run_command([compsize_bin, mnt], sudo=True, capture_output=True, check=False)
                 compsize_out = (getattr(res_c, 'stdout', '') or '')
@@ -5963,18 +5967,18 @@ class DiskMgrShell(cmd.Cmd):
                     if files is not None and extents is not None and files > 0:
                         epf = extents / float(files)
                         state, _ = _ratio_state_btrfs(epf)
-                        print(
+                        _frag(
                             f"{Colors.BOLD}Defragmentation state:{Colors.ENDC} "
                             f"{state} (btrfs ratio ~{epf:.2f} extents/file; thresholds: "
                             f"<1 good, >5 bad, >20 critical; "
                             f"{extents} extents/{files} files; via compsize)"
                         )
                     else:
-                        print(f"{Colors.BOLD}Defragmentation state:{Colors.ENDC} - (could not parse compsize counters)")
+                        _frag(f"{Colors.BOLD}Defragmentation state:{Colors.ENDC} - (could not parse compsize counters)")
                 else:
-                    print(f"{Colors.BOLD}Defragmentation state:{Colors.ENDC} - (compsize did not report Processed counters)")
+                    _frag(f"{Colors.BOLD}Defragmentation state:{Colors.ENDC} - (compsize did not report Processed counters)")
         else:
-            print(f"{Colors.BOLD}Defragmentation state:{Colors.ENDC} - (no global defrag metric for {fstype or 'unknown'})")
+            _frag(f"{Colors.BOLD}Defragmentation state:{Colors.ENDC} - (no global defrag metric for {fstype or 'unknown'})")
 
         # Filesystem diagnostics output (read-only).
         if fstype == 'ext4':
@@ -5987,16 +5991,15 @@ class DiskMgrShell(cmd.Cmd):
             ])
             if tune2fs_bin is None:
                 log("tune2fs not found. Install 'e2fsprogs' to view ext4 diagnostics.", 'WARN')
-                return
-            if not src_real:
+            elif not src_real:
                 log("Could not determine source device for this mount (findmnt SOURCE).", 'ERROR')
-                return
-            print(f"\n{Colors.HEADER}{Colors.BOLD}--- tune2fs -l {src_real} ---{Colors.ENDC}")
-            res = run_command([tune2fs_bin, '-l', src_real], sudo=True, capture_output=True, check=False)
-            if (res.stdout or "").strip():
-                print(res.stdout.rstrip())
-            if (res.stderr or "").strip():
-                print(res.stderr.rstrip(), file=sys.stderr)
+            else:
+                print(f"\n{Colors.HEADER}{Colors.BOLD}--- tune2fs -l {src_real} ---{Colors.ENDC}")
+                res = run_command([tune2fs_bin, '-l', src_real], sudo=True, capture_output=True, check=False)
+                if (res.stdout or "").strip():
+                    print(res.stdout.rstrip())
+                if (res.stderr or "").strip():
+                    print(res.stderr.rstrip(), file=sys.stderr)
         elif fstype == 'btrfs':
             btrfs_bin = _find_tool_or_common_paths('btrfs', [
                 '/usr/sbin/btrfs',
@@ -6007,49 +6010,49 @@ class DiskMgrShell(cmd.Cmd):
             ])
             if btrfs_bin is None:
                 log("btrfs not found. Install 'btrfs-progs' to view btrfs diagnostics.", 'WARN')
-                return
-            print(f"\n{Colors.HEADER}{Colors.BOLD}--- btrfs filesystem usage {mnt} ---{Colors.ENDC}")
-            res = run_command([btrfs_bin, 'filesystem', 'usage', mnt], sudo=True, capture_output=True, check=False)
-            if (res.stdout or "").strip():
-                print(res.stdout.rstrip())
-            if (res.stderr or "").strip():
-                print(res.stderr.rstrip(), file=sys.stderr)
-
-            print(f"\n{Colors.HEADER}{Colors.BOLD}--- btrfs filesystem show {mnt} ---{Colors.ENDC}")
-            res = run_command([btrfs_bin, 'filesystem', 'show', mnt], sudo=True, capture_output=True, check=False)
-            if (res.stdout or "").strip():
-                print(res.stdout.rstrip())
-            if (res.stderr or "").strip():
-                print(res.stderr.rstrip(), file=sys.stderr)
-
-            print(f"\n{Colors.HEADER}{Colors.BOLD}--- btrfs filesystem df {mnt} ---{Colors.ENDC}")
-            res = run_command([btrfs_bin, 'filesystem', 'df', mnt], sudo=True, capture_output=True, check=False)
-            if (res.stdout or "").strip():
-                print(res.stdout.rstrip())
-            if (res.stderr or "").strip():
-                print(res.stderr.rstrip(), file=sys.stderr)
-
-            print(f"\n{Colors.HEADER}{Colors.BOLD}--- btrfs device stats {mnt} ---{Colors.ENDC}")
-            res = run_command([btrfs_bin, 'device', 'stats', mnt], sudo=True, capture_output=True, check=False)
-            if (res.stdout or "").strip():
-                print(res.stdout.rstrip())
-            if (res.stderr or "").strip():
-                print(res.stderr.rstrip(), file=sys.stderr)
-
-            print(f"\n{Colors.HEADER}{Colors.BOLD}--- btrfs scrub status {mnt} ---{Colors.ENDC}")
-            res = run_command([btrfs_bin, 'scrub', 'status', mnt], sudo=True, capture_output=True, check=False)
-            if (res.stdout or "").strip():
-                print(res.stdout.rstrip())
-            if (res.stderr or "").strip():
-                print(res.stderr.rstrip(), file=sys.stderr)
-            if compsize_bin is None:
-                log("compsize not found. Install 'compsize' to view btrfs fragmentation amount.", 'WARN')
             else:
-                print(f"\n{Colors.HEADER}{Colors.BOLD}--- compsize {mnt} ---{Colors.ENDC}")
-                if compsize_out.strip():
-                    print(compsize_out.rstrip())
-                if compsize_err.strip():
-                    print(compsize_err.rstrip(), file=sys.stderr)
+                print(f"\n{Colors.HEADER}{Colors.BOLD}--- btrfs filesystem usage {mnt} ---{Colors.ENDC}")
+                res = run_command([btrfs_bin, 'filesystem', 'usage', mnt], sudo=True, capture_output=True, check=False)
+                if (res.stdout or "").strip():
+                    print(res.stdout.rstrip())
+                if (res.stderr or "").strip():
+                    print(res.stderr.rstrip(), file=sys.stderr)
+
+                print(f"\n{Colors.HEADER}{Colors.BOLD}--- btrfs filesystem show {mnt} ---{Colors.ENDC}")
+                res = run_command([btrfs_bin, 'filesystem', 'show', mnt], sudo=True, capture_output=True, check=False)
+                if (res.stdout or "").strip():
+                    print(res.stdout.rstrip())
+                if (res.stderr or "").strip():
+                    print(res.stderr.rstrip(), file=sys.stderr)
+
+                print(f"\n{Colors.HEADER}{Colors.BOLD}--- btrfs filesystem df {mnt} ---{Colors.ENDC}")
+                res = run_command([btrfs_bin, 'filesystem', 'df', mnt], sudo=True, capture_output=True, check=False)
+                if (res.stdout or "").strip():
+                    print(res.stdout.rstrip())
+                if (res.stderr or "").strip():
+                    print(res.stderr.rstrip(), file=sys.stderr)
+
+                print(f"\n{Colors.HEADER}{Colors.BOLD}--- btrfs device stats {mnt} ---{Colors.ENDC}")
+                res = run_command([btrfs_bin, 'device', 'stats', mnt], sudo=True, capture_output=True, check=False)
+                if (res.stdout or "").strip():
+                    print(res.stdout.rstrip())
+                if (res.stderr or "").strip():
+                    print(res.stderr.rstrip(), file=sys.stderr)
+
+                print(f"\n{Colors.HEADER}{Colors.BOLD}--- btrfs scrub status {mnt} ---{Colors.ENDC}")
+                res = run_command([btrfs_bin, 'scrub', 'status', mnt], sudo=True, capture_output=True, check=False)
+                if (res.stdout or "").strip():
+                    print(res.stdout.rstrip())
+                if (res.stderr or "").strip():
+                    print(res.stderr.rstrip(), file=sys.stderr)
+                if compsize_bin is None:
+                    log("compsize not found. Install 'compsize' to view btrfs fragmentation amount.", 'WARN')
+                else:
+                    print(f"\n{Colors.HEADER}{Colors.BOLD}--- compsize {mnt} ---{Colors.ENDC}")
+                    if compsize_out.strip():
+                        print(compsize_out.rstrip())
+                    if compsize_err.strip():
+                        print(compsize_err.rstrip(), file=sys.stderr)
         elif fstype == 'xfs':
             xfs_info_bin = _find_tool_or_common_paths('xfs_info', [
                 '/usr/sbin/xfs_info',
@@ -6066,6 +6069,12 @@ class DiskMgrShell(cmd.Cmd):
                 print(res.stderr.rstrip(), file=sys.stderr)
         else:
             log(f"Unsupported or unknown filesystem type '{fstype or 'unknown'}'.", 'ERROR')
+
+        # Print fragmentation summary last.
+        if frag_lines:
+            print("")
+            for line in frag_lines:
+                print(line)
 
     def do_fsdiag(self, arg):
         '''(Deprecated) Alias for fshealth: fsdiag <name>
