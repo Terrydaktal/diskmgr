@@ -40,7 +40,51 @@ class Colors:
     BOLD = '\033[1m'
     UNDERLINE = '\033[4m'
 
+_CMD_LOG_FH = None
+_CMD_LOG_PATH = None
+
+def _cmd_log_write(text):
+    global _CMD_LOG_FH
+    if _CMD_LOG_FH is None:
+        return
+    try:
+        _CMD_LOG_FH.write(text)
+        if not text.endswith("\n"):
+            _CMD_LOG_FH.write("\n")
+        _CMD_LOG_FH.flush()
+    except Exception:
+        # Best-effort logging: never break the tool because logs can't be written.
+        pass
+
+def _cmd_log_open(prefix):
+    """Enable per-command logging to /tmp; returns the path."""
+    global _CMD_LOG_FH, _CMD_LOG_PATH
+    try:
+        ts = int(time.time())
+        path = f"/tmp/diskmgr_{prefix}_{os.getpid()}_{ts}.log"
+        _CMD_LOG_FH = open(path, "w", encoding="utf-8", errors="replace")
+        _CMD_LOG_PATH = path
+        _cmd_log_write(f"# diskmgr {VERSION}")
+        _cmd_log_write(f"# started: {datetime.datetime.now().isoformat(sep=' ', timespec='seconds')}")
+        return path
+    except Exception:
+        _CMD_LOG_FH = None
+        _CMD_LOG_PATH = None
+        return None
+
+def _cmd_log_close():
+    global _CMD_LOG_FH, _CMD_LOG_PATH
+    try:
+        if _CMD_LOG_FH is not None:
+            _cmd_log_write(f"# ended: {datetime.datetime.now().isoformat(sep=' ', timespec='seconds')}")
+            _CMD_LOG_FH.close()
+    except Exception:
+        pass
+    _CMD_LOG_FH = None
+    _CMD_LOG_PATH = None
+
 def log(msg, level='INFO'):
+    _cmd_log_write(f"[{datetime.datetime.now().isoformat(sep=' ', timespec='seconds')}] {level}: {msg}")
     if level == 'ERROR':
         print(f"{Colors.FAIL}ERROR: {msg}{Colors.ENDC}", file=sys.stderr)
     elif level == 'WARN':
@@ -60,6 +104,8 @@ def run_command(command, check=True, input_str=None, capture_output=True, sudo=F
         command = ['sudo'] + command
     
     try:
+        start_ts = time.time()
+        _cmd_log_write(f"[{datetime.datetime.now().isoformat(sep=' ', timespec='seconds')}] CMD: {' '.join(command)}")
         result = subprocess.run(
             command,
             input=input_str,
@@ -68,6 +114,16 @@ def run_command(command, check=True, input_str=None, capture_output=True, sudo=F
             stdout=subprocess.PIPE if capture_output else None,
             stderr=subprocess.PIPE if capture_output else None
         )
+        _cmd_log_write(f"RC: {getattr(result, 'returncode', 0)}  elapsed={_fmt_hms(time.time() - start_ts)}")
+        if capture_output:
+            out = getattr(result, 'stdout', '') or ''
+            err = getattr(result, 'stderr', '') or ''
+            if out.strip():
+                _cmd_log_write("--- STDOUT ---")
+                _cmd_log_write(out.rstrip())
+            if err.strip():
+                _cmd_log_write("--- STDERR ---")
+                _cmd_log_write(err.rstrip())
         return result
     except subprocess.CalledProcessError as e:
         if check:
@@ -932,7 +988,7 @@ class DiskMgrShell(cmd.Cmd):
         print("      Safety policy for table creation: disk must be erased first (run: erase <name>).")
         print(f"  {Colors.OKGREEN}selftest <name/id>{Colors.ENDC}")
         print("      Starts a SMART long self-test (smartctl -t long) for the underlying disk")
-        print("      (USB uses -d sat).")
+        print("      (USB uses -d sat). Use: selftest <name/id> --watch to poll progress until complete.")
         print(f"  {Colors.OKGREEN}health <name/id> [alias: smart]{Colors.ENDC}")
         print("      Shows SMART health (smartctl -a) for the underlying disk (USB uses -d sat).")
 
@@ -3966,6 +4022,9 @@ class DiskMgrShell(cmd.Cmd):
         run_command(['sudo', '-v'])
 
         start_ts = time.time()
+        log_path = _cmd_log_open("nuke") if (_CMD_LOG_FH is None) else _CMD_LOG_PATH
+        if log_path:
+            print(f"Log: {log_path}")
         ok = False
         try:
             ok = bool(secure_erase_disk(real_target))
@@ -3975,6 +4034,7 @@ class DiskMgrShell(cmd.Cmd):
                 log("Secure erase failed.", 'ERROR')
         finally:
             print(f"Duration: {_fmt_hms(time.time() - start_ts)}")
+            _cmd_log_close()
 
     def do_clone(self, arg):
         '''Clone one disk or partition to another: clone <src_name/id> <dst_name/id>
@@ -4778,12 +4838,24 @@ class DiskMgrShell(cmd.Cmd):
               smartctl -d sat -t long /dev/sdX
           (common for USB-SATA bridges).
         '''
-        args = arg.split()
-        if len(args) != 1:
-            log("Usage: selftest <name/id>", 'ERROR')
+        parser = CmdArgumentParser(prog='selftest', add_help=False)
+        parser.add_argument('name')
+        parser.add_argument('--watch', action='store_true', help='Poll SMART self-test progress until complete')
+        parser.add_argument('--interval', type=int, default=60, help='Polling interval seconds for --watch (default: 60)')
+        try:
+            split_args = shlex.split(arg)
+            args = parser.parse_args(split_args)
+        except argparse.ArgumentError as e:
+            log(str(e), 'ERROR')
+            return
+        except SystemExit:
             return
 
-        name = args[0]
+        name = args.name
+        watch = bool(getattr(args, 'watch', False))
+        interval = int(getattr(args, 'interval', 60) or 60)
+        if interval < 5:
+            interval = 5
         src = self.resolve_target(name, allow_id=True)
         if not src:
             log(f"Unknown target: '{name}'. Use a mapping name or discovery ID (#N).", 'ERROR')
@@ -4833,19 +4905,80 @@ class DiskMgrShell(cmd.Cmd):
 
         run_command(['sudo', '-v'])
 
-        res = run_command(cmd, sudo=True, capture_output=True, check=False)
-        out = (res.stdout or "").rstrip()
-        err = (res.stderr or "").rstrip()
+        log_path = _cmd_log_open("selftest") if (_CMD_LOG_FH is None) else _CMD_LOG_PATH
+        if log_path:
+            print(f"Log: {log_path}")
+        start_ts = time.time()
+        try:
+            res = run_command(cmd, sudo=True, capture_output=True, check=False)
+            out = (res.stdout or "").rstrip()
+            err = (res.stderr or "").rstrip()
 
-        if out:
-            print(out)
-        if err:
-            print(err, file=sys.stderr)
+            if out:
+                print(out)
+            if err:
+                print(err, file=sys.stderr)
 
-        if getattr(res, 'returncode', 0) != 0:
-            log(f"smartctl exit status: {res.returncode} (non-zero may indicate it could not start the test).", 'WARN')
-        else:
-            print(f"\nTo check progress/results: run {Colors.BOLD}health {name}{Colors.ENDC} and look at the SMART Self-test log.")
+            if getattr(res, 'returncode', 0) != 0:
+                log(f"smartctl exit status: {res.returncode} (non-zero may indicate it could not start the test).", 'WARN')
+                return
+
+            if not watch:
+                print(f"\nTo check progress/results: run {Colors.BOLD}health {name}{Colors.ENDC} and look at the SMART Self-test log.")
+                return
+
+            def _parse_remaining_pct(text):
+                # ATA: "Self-test execution status: ... 90% of test remaining."
+                m = re.search(r"(?im)\\b([0-9]{1,3})%\\s+of\\s+test\\s+remaining\\b", text)
+                if m:
+                    try:
+                        return int(m.group(1), 10)
+                    except ValueError:
+                        return None
+                return None
+
+            print(f"\nWatching SMART self-test progress (interval={interval}s). Ctrl+C to stop watching.")
+            last_line = None
+            parse_fail = 0
+            while True:
+                res_p = run_command([smartctl_bin, '-a', disk_dev] if not use_sat else [smartctl_bin, '-d', 'sat', '-a', disk_dev],
+                                    sudo=True, capture_output=True, check=False)
+                txt = ((res_p.stdout or "") + "\n" + (res_p.stderr or "")).strip()
+                rem = _parse_remaining_pct(txt)
+                in_progress = False
+                if rem is not None:
+                    in_progress = True
+                    done = max(0, min(100, 100 - rem))
+                    line = f"SMART self-test: {done}% complete ({rem}% remaining)"
+                else:
+                    # If we can't parse remaining%, fall back to detecting the "in progress" phrase.
+                    if re.search(r"(?im)self-test\\s+routine\\s+in\\s+progress", txt):
+                        in_progress = True
+                        line = "SMART self-test: in progress (unable to parse % remaining)"
+                    else:
+                        in_progress = False
+                        line = "SMART self-test: not in progress (completed or not running)"
+
+                if line != last_line:
+                    print(line)
+                    _cmd_log_write(line)
+                    last_line = line
+
+                if not in_progress:
+                    break
+
+                if rem is None:
+                    parse_fail += 1
+                    if parse_fail >= 3:
+                        print("SMART self-test is in progress but % remaining could not be parsed; use `health` to inspect the self-test log.")
+                        break
+                else:
+                    parse_fail = 0
+
+                time.sleep(interval)
+        finally:
+            print(f"Duration: {_fmt_hms(time.time() - start_ts)}")
+            _cmd_log_close()
 
     def get_mountpoint(self, name):
         '''Resolves the current mountpoint for a friendly name.'''
@@ -6488,54 +6621,74 @@ class DiskMgrShell(cmd.Cmd):
             return
 
         run_command(['sudo', '-v'])
+        log_path = _cmd_log_open("convert") if (_CMD_LOG_FH is None) else _CMD_LOG_PATH
+        if log_path:
+            print(f"Log: {log_path}")
         start_ts = time.time()
 
-        btrfs_convert_bin = _find_tool_or_common_paths('btrfs-convert', [
-            '/usr/sbin/btrfs-convert',
-            '/sbin/btrfs-convert',
-            '/usr/local/sbin/btrfs-convert',
-            '/usr/bin/btrfs-convert',
-            '/bin/btrfs-convert',
-        ])
-        if btrfs_convert_bin is None:
-            log("btrfs-convert not found. Install 'btrfs-progs' and retry.", 'ERROR')
-            print(f"Duration: {_fmt_hms(time.time() - start_ts)}")
-            return
-
-        e2fsck_bin = _find_tool_or_common_paths('e2fsck', [
-            '/usr/sbin/e2fsck',
-            '/sbin/e2fsck',
-            '/usr/local/sbin/e2fsck',
-            '/usr/bin/e2fsck',
-            '/bin/e2fsck',
-        ])
-        if e2fsck_bin:
-            log(f"Running pre-conversion fsck: {e2fsck_bin} -f -p {convert_dev}")
-            res_ck = run_command([e2fsck_bin, '-f', '-p', convert_dev], sudo=True, capture_output=True, check=False)
-            if (getattr(res_ck, 'stdout', '') or '').strip():
-                print((getattr(res_ck, 'stdout', '') or '').rstrip())
-            if (getattr(res_ck, 'stderr', '') or '').strip():
-                print((getattr(res_ck, 'stderr', '') or '').rstrip(), file=sys.stderr)
-            if getattr(res_ck, 'returncode', 0) not in (0, 1):
-                log(f"Pre-conversion fsck failed with exit code {res_ck.returncode}. Aborting conversion.", 'ERROR')
-                print(f"Duration: {_fmt_hms(time.time() - start_ts)}")
+        try:
+            btrfs_convert_bin = _find_tool_or_common_paths('btrfs-convert', [
+                '/usr/sbin/btrfs-convert',
+                '/sbin/btrfs-convert',
+                '/usr/local/sbin/btrfs-convert',
+                '/usr/bin/btrfs-convert',
+                '/bin/btrfs-convert',
+            ])
+            if btrfs_convert_bin is None:
+                log("btrfs-convert not found. Install 'btrfs-progs' and retry.", 'ERROR')
                 return
 
-        log(f"Running in-place conversion: {btrfs_convert_bin} {convert_dev}")
-        res_cv = run_command([btrfs_convert_bin, convert_dev], sudo=True, capture_output=True, check=False)
-        if (getattr(res_cv, 'stdout', '') or '').strip():
-            print((getattr(res_cv, 'stdout', '') or '').rstrip())
-        if (getattr(res_cv, 'stderr', '') or '').strip():
-            print((getattr(res_cv, 'stderr', '') or '').rstrip(), file=sys.stderr)
+            e2fsck_bin = _find_tool_or_common_paths('e2fsck', [
+                '/usr/sbin/e2fsck',
+                '/sbin/e2fsck',
+                '/usr/local/sbin/e2fsck',
+                '/usr/bin/e2fsck',
+                '/bin/e2fsck',
+            ])
+            if e2fsck_bin:
+                log(f"Running pre-conversion fsck: {e2fsck_bin} -f -p {convert_dev}")
+                res_ck = run_command([e2fsck_bin, '-f', '-p', convert_dev], sudo=True, capture_output=True, check=False)
+                if (getattr(res_ck, 'stdout', '') or '').strip():
+                    print((getattr(res_ck, 'stdout', '') or '').rstrip())
+                if (getattr(res_ck, 'stderr', '') or '').strip():
+                    print((getattr(res_ck, 'stderr', '') or '').rstrip(), file=sys.stderr)
+                if getattr(res_ck, 'returncode', 0) not in (0, 1):
+                    log(f"Pre-conversion fsck failed with exit code {res_ck.returncode}. Aborting conversion.", 'ERROR')
+                    return
 
-        if getattr(res_cv, 'returncode', 0) != 0:
-            log(f"Conversion failed with exit code {res_cv.returncode}.", 'ERROR')
+            log(f"Running in-place conversion (streaming output): {btrfs_convert_bin} {convert_dev}")
+            _cmd_log_write(f"CMD: sudo {btrfs_convert_bin} {convert_dev}")
+            proc = subprocess.Popen(
+                ['sudo', btrfs_convert_bin, convert_dev],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
+            try:
+                if proc.stdout is not None:
+                    for line in proc.stdout:
+                        # Keep output live so conversions continue safely over flaky SSH.
+                        print(line, end='', flush=True)
+                        _cmd_log_write(line.rstrip("\n"))
+            finally:
+                try:
+                    if proc.stdout is not None:
+                        proc.stdout.close()
+                except Exception:
+                    pass
+            rc = proc.wait()
+            _cmd_log_write(f"RC: {rc}")
+
+            if rc != 0:
+                log(f"Conversion failed with exit code {rc}.", 'ERROR')
+                return
+
+            log("Conversion complete: ext4 -> btrfs.")
+            log("Rollback data is kept by btrfs-convert. Avoid btrfs balance if you may need rollback.", 'WARN')
+        finally:
             print(f"Duration: {_fmt_hms(time.time() - start_ts)}")
-            return
-
-        log("Conversion complete: ext4 -> btrfs.")
-        log("Rollback data is kept by btrfs-convert. Avoid btrfs balance if you may need rollback.", 'WARN')
-        print(f"Duration: {_fmt_hms(time.time() - start_ts)}")
+            _cmd_log_close()
 
     def do_format(self, arg):
         '''Format a superfloppy disk/partition volume: format <name/id> [options]
