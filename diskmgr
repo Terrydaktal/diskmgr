@@ -2258,14 +2258,14 @@ class DiskMgrShell(cmd.Cmd):
             return size
         if col == "FSUSE%":
             fsuse = str(row.get("FSUSE%", "") or "")
-            used = self._bytes_to_gib_tib(row.get("FSUSED-BYTES", "")) or self._format_used_as_gib_tib(row.get("FS-USED", ""))
+            used = self._bytes_to_gib_tib_with_metric(row.get("FSUSED-BYTES", "")) or self._format_used_as_gib_tib(row.get("FS-USED", ""))
             if fsuse and fsuse != "-" and used and used != "-":
-                return f"{fsuse} ({used})"
+                return f"{fsuse} {used}"
             return fsuse
         return str(row.get(col, "") or "")
 
-    def _bytes_to_gib_tib(self, value):
-        """Convert a raw byte-count string into GiB/TiB (binary) with 3 decimals."""
+    def _bytes_to_gib_tib_with_metric(self, value):
+        """Convert a raw byte-count string into 'GiB/TiB (GB/TB)' with 3-decimal binary precision."""
         raw = str(value or "").strip()
         if not raw:
             return "-"
@@ -2276,8 +2276,24 @@ class DiskMgrShell(cmd.Cmd):
         if n < 0:
             return "-"
         if n >= 1024 ** 4:
-            return f"{(n / float(1024 ** 4)):.3f} TiB"
-        return f"{(n / float(1024 ** 3)):.3f} GiB"
+            bin_val = n / float(1024 ** 4)
+            met_val = n / float(1000 ** 4)
+            bin_s = f"{bin_val:.3f} TiB"
+            met_unit = "TB"
+        else:
+            bin_val = n / float(1024 ** 3)
+            met_val = n / float(1000 ** 3)
+            bin_s = f"{bin_val:.3f} GiB"
+            met_unit = "GB"
+
+        if met_val >= 100:
+            met_s = f"{met_val:.0f}{met_unit}"
+        elif met_val >= 10:
+            met_s = f"{met_val:.1f}{met_unit}"
+        else:
+            met_s = f"{met_val:.2f}{met_unit}"
+
+        return f"{bin_s} ({met_s})"
 
     def _format_used_as_gib_tib(self, value):
         """
