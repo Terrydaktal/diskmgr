@@ -23,7 +23,7 @@ except ImportError:
 # Configuration
 MAP_FILENAME = 'diskmap.tsv'
 PASSGEN_BIN = 'passgen'
-VERSION = '2.9.2'
+VERSION = '3.0.7'
 HISTORY_FILE_ENV = 'DISKMGR_HISTORY'
 DEFAULT_HISTORY_FILE = Path.home() / '.local' / 'state' / 'diskmgr' / 'history'
 MAX_HISTORY_ENTRIES = 5000
@@ -47,6 +47,13 @@ def log(msg, level='INFO'):
         print(f"{Colors.WARNING}WARNING: {msg}{Colors.ENDC}", file=sys.stderr)
     else:
         print(f"{Colors.OKBLUE}diskmgr: {msg}{Colors.ENDC}")
+
+def _fmt_hms(total_seconds):
+    s = int(max(total_seconds, 0))
+    h = s // 3600
+    m = (s % 3600) // 60
+    sec = s % 60
+    return f"{h:02d}:{m:02d}:{sec:02d}"
 
 def run_command(command, check=True, input_str=None, capture_output=True, sudo=False):
     if sudo:
@@ -3958,10 +3965,16 @@ class DiskMgrShell(cmd.Cmd):
 
         run_command(['sudo', '-v'])
 
-        if secure_erase_disk(real_target):
-            log("Secure erase completed successfully.")
-        else:
-            log("Secure erase failed.", 'ERROR')
+        start_ts = time.time()
+        ok = False
+        try:
+            ok = bool(secure_erase_disk(real_target))
+            if ok:
+                log("Secure erase completed successfully.")
+            else:
+                log("Secure erase failed.", 'ERROR')
+        finally:
+            print(f"Duration: {_fmt_hms(time.time() - start_ts)}")
 
     def do_clone(self, arg):
         '''Clone one disk or partition to another: clone <src_name/id> <dst_name/id>
@@ -4114,6 +4127,7 @@ class DiskMgrShell(cmd.Cmd):
 
         run_command(['sudo', '-v'])
         log(f"Cloning {src_name} -> {dst_name}...")
+        start_ts = time.time()
         
         # Perform clone
         try:
@@ -4156,6 +4170,8 @@ class DiskMgrShell(cmd.Cmd):
                 log(f"ddrescue exit status: pass1={rc1}, retry={rc2} (non-zero can indicate read errors even if output is usable).", 'WARN')
         except Exception as e:
             log(f"Cloning failed: {e}", 'ERROR')
+        finally:
+            print(f"Duration: {_fmt_hms(time.time() - start_ts)}")
 
     def do_health(self, arg):
         '''Display SMART health for a mapped disk: health <name/id>
@@ -4927,6 +4943,7 @@ class DiskMgrShell(cmd.Cmd):
 
         run_command(['sudo', '-v'])
         log(f"Starting rsync: {primary} -> {secondary}...")
+        start_ts = time.time()
         
         try:
             # Ensure trailing slashes for rsync to sync directory CONTENTS
@@ -4939,6 +4956,8 @@ class DiskMgrShell(cmd.Cmd):
             log("Sync complete.")
         except Exception as e:
             log(f"Sync failed: {e}", 'ERROR')
+        finally:
+            print(f"Duration: {_fmt_hms(time.time() - start_ts)}")
 
     def do_diff(self, arg):
         '''Preview differences between two mounted filesystems: diff <primary_name> <secondary_name> [--depth N] [-d] [--fast] [--checksum]
@@ -5598,6 +5617,7 @@ class DiskMgrShell(cmd.Cmd):
 
         try:
             if fstype == "ext4":
+                start_ts = time.time()
                 if compress_mode:
                     log("--compress applies to btrfs only; ignoring for ext4.", 'WARN')
                 if e4defrag_bin is None:
@@ -5605,10 +5625,12 @@ class DiskMgrShell(cmd.Cmd):
                     return
                 log(f"Running: {e4defrag_bin} {mnt}")
                 run_command([e4defrag_bin, mnt], sudo=True, capture_output=False, check=False)
+                print(f"Duration: {_fmt_hms(time.time() - start_ts)}")
             else:
                 if btrfs_bin is None:
                     log("btrfs not found. Install 'btrfs-progs' and retry.", 'ERROR')
                     return
+                start_ts_total = time.time()
                 start_ts = time.time()
                 log_path = f"/tmp/diskmgr_btrfs_defrag_{os.getpid()}_{int(start_ts)}.log"
                 cmd = ['sudo', btrfs_bin, 'filesystem', 'defragment', '-r', '-v']
@@ -5618,13 +5640,6 @@ class DiskMgrShell(cmd.Cmd):
                 cmd_str = " ".join(cmd[1:])
                 log(f"Running: {cmd_str}")
                 log(f"Progress log: {log_path}")
-
-                def _fmt_hms(total_seconds):
-                    s = int(max(total_seconds, 0))
-                    h = s // 3600
-                    m = (s % 3600) // 60
-                    sec = s % 60
-                    return f"{h:02d}:{m:02d}:{sec:02d}"
 
                 total_done = 0
                 current_dir = "Scanning..."
@@ -5724,6 +5739,7 @@ class DiskMgrShell(cmd.Cmd):
             # Record timestamp in xattr on mountpoint root.
             if setfattr_bin is None:
                 log("setfattr not found. Install 'attr' and retry to record last_defrag.", 'WARN')
+                print(f"Duration: {_fmt_hms(time.time() - start_ts_total)}")
                 return
 
             ds = ""
@@ -5737,6 +5753,7 @@ class DiskMgrShell(cmd.Cmd):
 
             run_command([setfattr_bin, '-n', 'user.last_defrag', '-v', ds, mnt], sudo=True, check=False)
             log(f"Recorded xattr: user.last_defrag={ds} on {mnt}")
+            print(f"Duration: {_fmt_hms(time.time() - start_ts_total)}")
         except Exception as e:
             log(f"Defrag failed: {e}", 'ERROR')
 
@@ -6150,6 +6167,7 @@ class DiskMgrShell(cmd.Cmd):
             return
 
         run_command(['sudo', '-v'])
+        start_ts = time.time()
 
         btrfs_bin = _find_tool_or_common_paths('btrfs', [
             '/usr/sbin/btrfs',
@@ -6319,6 +6337,8 @@ class DiskMgrShell(cmd.Cmd):
             log(f"Recorded xattr: user.last_scrub={ds} on {mnt}")
         except Exception as e:
             log(f"Scrub failed: {e}", 'ERROR')
+        finally:
+            print(f"Duration: {_fmt_hms(time.time() - start_ts)}")
 
     def do_convert(self, arg):
         '''Convert ext4 -> btrfs in place (no data copy): convert <name/id>
@@ -6468,6 +6488,7 @@ class DiskMgrShell(cmd.Cmd):
             return
 
         run_command(['sudo', '-v'])
+        start_ts = time.time()
 
         btrfs_convert_bin = _find_tool_or_common_paths('btrfs-convert', [
             '/usr/sbin/btrfs-convert',
@@ -6478,6 +6499,7 @@ class DiskMgrShell(cmd.Cmd):
         ])
         if btrfs_convert_bin is None:
             log("btrfs-convert not found. Install 'btrfs-progs' and retry.", 'ERROR')
+            print(f"Duration: {_fmt_hms(time.time() - start_ts)}")
             return
 
         e2fsck_bin = _find_tool_or_common_paths('e2fsck', [
@@ -6496,6 +6518,7 @@ class DiskMgrShell(cmd.Cmd):
                 print((getattr(res_ck, 'stderr', '') or '').rstrip(), file=sys.stderr)
             if getattr(res_ck, 'returncode', 0) not in (0, 1):
                 log(f"Pre-conversion fsck failed with exit code {res_ck.returncode}. Aborting conversion.", 'ERROR')
+                print(f"Duration: {_fmt_hms(time.time() - start_ts)}")
                 return
 
         log(f"Running in-place conversion: {btrfs_convert_bin} {convert_dev}")
@@ -6507,10 +6530,12 @@ class DiskMgrShell(cmd.Cmd):
 
         if getattr(res_cv, 'returncode', 0) != 0:
             log(f"Conversion failed with exit code {res_cv.returncode}.", 'ERROR')
+            print(f"Duration: {_fmt_hms(time.time() - start_ts)}")
             return
 
         log("Conversion complete: ext4 -> btrfs.")
         log("Rollback data is kept by btrfs-convert. Avoid btrfs balance if you may need rollback.", 'WARN')
+        print(f"Duration: {_fmt_hms(time.time() - start_ts)}")
 
     def do_format(self, arg):
         '''Format a superfloppy disk/partition volume: format <name/id> [options]
