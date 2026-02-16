@@ -1133,7 +1133,7 @@ class DiskMgrShell(cmd.Cmd):
             dev_path = f"/dev/{d_name}"
             try:
                 ls_res = run_command(['lsblk', '-J', '-b', '-f', '-o',
-                                      'NAME,KNAME,TYPE,SIZE,FSTYPE,FSVER,LABEL,UUID,FSAVAIL,FSUSE%,MOUNTPOINTS,WWN',
+                                      'NAME,KNAME,TYPE,SIZE,FSTYPE,FSVER,LABEL,UUID,FSAVAIL,FSUSE%,FSUSED,MOUNTPOINTS,WWN',
                                       dev_path], sudo=True, check=False)
                 rows = []
                 if (getattr(ls_res, 'stdout', '') or '').strip():
@@ -2115,6 +2115,7 @@ class DiskMgrShell(cmd.Cmd):
             fsavail_raw = dev.get('fsavail') or ""
             fsavail = self._format_bytes_binary_with_metric(fsavail_raw)
             fsuse = dev.get('fsuse%') or ""
+            fsused_bytes_raw = str(dev.get('fsused') or "").strip()
             # Partitions often don't carry WWN/EUI in lsblk output; inherit from parent disk when missing.
             wwn = dev.get('wwn') or parent_wwn or ""
 
@@ -2191,6 +2192,7 @@ class DiskMgrShell(cmd.Cmd):
                 "FSUUID": uuid,
                 "FSAVAIL": fsavail,
                 "FSUSE%": fsuse,
+                "FSUSED-BYTES": fsused_bytes_raw,
                 "FSMOUNTPOINTS": mounts,
                 "SOURCE": mount_source,
                 "FS-OPTIONS": fs_options,
@@ -2256,11 +2258,26 @@ class DiskMgrShell(cmd.Cmd):
             return size
         if col == "FSUSE%":
             fsuse = str(row.get("FSUSE%", "") or "")
-            used = self._format_used_as_gib_tib(row.get("FS-USED", ""))
+            used = self._bytes_to_gib_tib(row.get("FSUSED-BYTES", "")) or self._format_used_as_gib_tib(row.get("FS-USED", ""))
             if fsuse and fsuse != "-" and used and used != "-":
                 return f"{fsuse} ({used})"
             return fsuse
         return str(row.get(col, "") or "")
+
+    def _bytes_to_gib_tib(self, value):
+        """Convert a raw byte-count string into GiB/TiB (binary) with 3 decimals."""
+        raw = str(value or "").strip()
+        if not raw:
+            return "-"
+        try:
+            n = int(raw, 10)
+        except (TypeError, ValueError):
+            return "-"
+        if n < 0:
+            return "-"
+        if n >= 1024 ** 4:
+            return f"{(n / float(1024 ** 4)):.3f} TiB"
+        return f"{(n / float(1024 ** 3)):.3f} GiB"
 
     def _format_used_as_gib_tib(self, value):
         """
