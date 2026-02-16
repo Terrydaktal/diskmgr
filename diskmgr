@@ -910,9 +910,9 @@ class DiskMgrShell(cmd.Cmd):
         print("Mappings point to persistent device paths so names remain stable across reboots/ports.\n")
 
         print(f"{Colors.BOLD}all:{Colors.ENDC}")
-        print(f"  {Colors.OKGREEN}list [standard|concise|verbose] [list]{Colors.ENDC}")
-        print("      Displays disk layout (standard table by default).")
-        print("      Use concise for fewer columns, verbose for full columns, or list mode for key/value entries.")
+        print(f"  {Colors.OKGREEN}list [verbose]{Colors.ENDC}")
+        print("      Displays disk layout (table by default).")
+        print("      Use verbose for key/value entries (formerly: list list).")
         print(f"  {Colors.OKGREEN}boot{Colors.ENDC}")
         print("      Displays boot entries/submenus from GRUB and /etc/fstab detection per partition.")
 
@@ -1046,10 +1046,7 @@ class DiskMgrShell(cmd.Cmd):
         '''Display the physical partition layout and free space for all plugged-in disks.
         Usage:
           list            -> standard table (default)
-          list standard   -> explicit standard table
-          list verbose    -> full verbose table (includes FSTAB ENTRY details)
-          list concise    -> compact table (#, NAME, DEVICE, TYPE, MOUNTPOINT, PERSISTENT PATH)
-          list list       -> list-style entries (key/value) with full verbose fields
+          list verbose    -> verbose key/value entries (formerly: list list)
         
         UNDER THE HOOD:
         1.  Hardware Scan: Identifies all physical 'disk' devices (excluding partitions).
@@ -1063,33 +1060,25 @@ class DiskMgrShell(cmd.Cmd):
             - Calculates MiB and GiB values from sector counts.
         '''
         argv = shlex.split(arg) if arg else []
-        mode = 'standard'
         render_mode = 'table'
         for token in argv:
             t = token.strip().lower()
-            if t in ('standard', '--standard', '-s'):
-                mode = 'standard'
-            elif t in ('concise', '--concise', '-c'):
-                mode = 'concise'
-            elif t in ('verbose', '--verbose', '-v'):
-                mode = 'verbose'
+            if t in ('verbose', '--verbose', '-v'):
+                # verbose now means list-style key/value entries
+                render_mode = 'list'
             elif t in ('list', '--list', '-l'):
+                # Back-compat: list list
                 render_mode = 'list'
             elif t in ('table', '--table', '-t'):
                 render_mode = 'table'
             else:
-                log(f"Unknown list option: {token}. Use: list [standard|concise|verbose] [list]", 'ERROR')
+                log(f"Unknown list option: {token}. Use: list [verbose]", 'ERROR')
                 return
 
         if render_mode == 'list':
             selected_cols = self._lsblk_verbose_cols()
         else:
-            if mode == 'concise':
-                selected_cols = self._lsblk_concise_cols()
-            elif mode == 'verbose':
-                selected_cols = self._lsblk_verbose_cols()
-            else:
-                selected_cols = self._lsblk_standard_cols()
+            selected_cols = self._lsblk_standard_cols()
 
         all_devs = self.get_disk_info()
         disks = [d for d in all_devs if d.get('type') == 'disk']
@@ -1169,6 +1158,31 @@ class DiskMgrShell(cmd.Cmd):
             d_name = d.get('name', '')
             all_rows.extend(disk_rows.get(d_name, []))
 
+        # Display rows: standard table needs different numeric formatting.
+        display_disk_rows = disk_rows
+        display_all_rows = all_rows
+        if render_mode == 'table':
+            display_disk_rows = {}
+            display_all_rows = []
+            for d in disks:
+                d_name = d.get('name', '')
+                out = []
+                for r in disk_rows.get(d_name, []):
+                    rr = dict(r)
+                    # list (table): show SIZE with 2dp and no metric bracket.
+                    try:
+                        rr["SIZE"] = self._format_bytes_binary(rr.get("SIZE-BYTES", ""), decimals=2) or rr.get("SIZE", "")
+                    except Exception:
+                        pass
+                    # list (table): show FSAVAIL with 2dp and NO metric bracket.
+                    try:
+                        rr["FSAVAIL"] = self._format_bytes_binary(rr.get("FSAVAIL-BYTES", ""), decimals=2) or rr.get("FSAVAIL", "")
+                    except Exception:
+                        pass
+                    out.append(rr)
+                display_disk_rows[d_name] = out
+                display_all_rows.extend(out)
+
         # Discovery cache for map #N:
         # keep only unmapped disk/partition entries and bind to displayed "#" IDs.
         self.unmapped_cache = []
@@ -1195,8 +1209,8 @@ class DiskMgrShell(cmd.Cmd):
 
         widths_global = None
         if render_mode == 'table':
-            widths_global = self._lsblk_col_widths(all_rows, cols=selected_cols)
-            separator_width = max(1, self._lsblk_rendered_width(all_rows, widths=widths_global, cols=selected_cols))
+            widths_global = self._lsblk_col_widths(display_all_rows, cols=selected_cols)
+            separator_width = max(1, self._lsblk_rendered_width(display_all_rows, widths=widths_global, cols=selected_cols))
         else:
             separator_width = max(1, self._lsblk_rendered_list_width(all_rows, cols=selected_cols))
         separator_line = "-" * separator_width
@@ -1252,7 +1266,7 @@ class DiskMgrShell(cmd.Cmd):
                         print(f"{Colors.OKGREEN}[ {d_name} {disk_fstype} {total_logical_sectors}s ({size_info}) ]{Colors.ENDC}")
 
                     # Still show lsblk hierarchy so the user can see what's on the disk.
-                    rows = disk_rows.get(d_name, [])
+                    rows = display_disk_rows.get(d_name, [])
                     if rows:
                         print("")
                         if render_mode == 'list':
@@ -1357,7 +1371,7 @@ class DiskMgrShell(cmd.Cmd):
                 # 4. Print lsblk hierarchy at the bottom
                 print("")
                 try:
-                    rows = disk_rows.get(d_name, [])
+                    rows = display_disk_rows.get(d_name, [])
                     if rows:
                         if render_mode == 'list':
                             self._print_lsblk_rows_list(rows, cols=selected_cols)
@@ -1441,7 +1455,6 @@ class DiskMgrShell(cmd.Cmd):
             "DEVICE",
             "TYPE",
             "FSTYPE",
-            "FSVER",
             "FSLABEL",
             "FSUUID",
             "SIZE",
@@ -2034,6 +2047,32 @@ class DiskMgrShell(cmd.Cmd):
             value /= 1024.0
             idx += 1
         return f"{value:.3f} {units[idx]}"
+
+    def _format_bytes_binary(self, byte_value, decimals=2):
+        """Format a raw byte count using binary units (B, KiB, MiB, GiB, TiB...) with fixed decimals."""
+        raw = str(byte_value or '').strip()
+        if not raw or raw == "-":
+            return ""
+        try:
+            n = int(raw, 10)
+        except (TypeError, ValueError):
+            return raw
+        if n < 0:
+            return ""
+
+        units = ["B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB"]
+        idx = 0
+        value = float(n)
+        while idx < len(units) - 1 and value >= 1024.0:
+            value /= 1024.0
+            idx += 1
+        while idx < len(units) - 1 and round(value, decimals) >= 1024.0:
+            value /= 1024.0
+            idx += 1
+
+        if units[idx] == "B":
+            return f"{int(value)} B"
+        return f"{value:.{decimals}f} {units[idx]}"
 
     def _format_bytes_binary_with_metric(self, byte_value):
         """
