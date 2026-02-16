@@ -35,11 +35,11 @@ A utility to manage mapped disks/partitions, encrypted containers, and filesyste
 Mappings point to persistent device paths so names remain stable across reboots/ports.
 
 all:
-  list [concise|verbose] [list]
-      Displays disk layout (verbose table by default).
-      Use concise for fewer columns, or list mode for key/value entries.
+  list [verbose]
+      Displays disk layout (table by default).
+      Use verbose for key/value entries (alias: list list).
   boot
-      Displays all boot entries and submenus from GRUB.
+      Displays boot entries/submenus from GRUB and /etc/fstab detection per partition.
 
 disk:
   create <name/id> [--gpt|--mbr] [--partition] [--start X] [--end Y]
@@ -50,7 +50,7 @@ disk:
       Safety policy for table creation: disk must be erased first (run: erase <name>).
   selftest <name/id>
       Starts a SMART long self-test (smartctl -t long) for the underlying disk
-      (USB uses -d sat).
+      (USB uses -d sat). Use: selftest <name/id> --watch to poll progress until complete.
   health <name/id> [alias: smart]
       Shows SMART health (smartctl -a) for the underlying disk (USB uses -d sat).
 
@@ -84,7 +84,8 @@ file system (applied to disk/part entries with mountable FSTYPE):
   open <name/id>
       Opens and mounts a plain or encrypted superfloppy disk/partition.
       For encrypted targets, unlocks LUKS then mounts payload filesystem.
-      Mounts to /media/$USER/<label> (prefers filesystem label over mapping name).
+      Btrfs mounts are enforced with compression (compress=zstd:3).
+      Uses /etc/fstab mountpoint/options when an entry exists; otherwise /media/$USER/<label>.
   close <name/id>
       close <name>: unmounts filesystem(s) and closes /dev/mapper/<name> when present (locks LUKS).
       close #id (example: close #6): unmount-only for that discovered row; does NOT run cryptsetup close.
@@ -92,23 +93,38 @@ file system (applied to disk/part entries with mountable FSTYPE):
   luks <passwd|backup|restore|header>
       LUKS management for mapped containers (grouped under filesystem workflows):
       password change, header backup/print, and header restore.
-  label <name> [new_label]
+  label <name> [new_label] [--fstab]
       Get or set the filesystem label of an OPEN disk.
+      On relabel: removes old LABEL-based fstab entry. With --fstab, adds UUID entry at /mnt/<label>.
+      Generated fstab options: defaults,nofail,x-gvfs-show,x-gvfs-name=<label>.
       For LUKS: acts on payload filesystem when open; errors if locked.
   remount <name>
-      Move an OPEN disk's mount to /media/$USER/<label> and clean old empty mountpoint dirs.
+      Move an OPEN disk's mount to /mnt/<label> when /etc/fstab entry exists;
+      otherwise /media/$USER/<label>, and clean old empty mountpoint dirs.
       For LUKS: acts on payload filesystem when open; errors if locked.
   sync <pri_name> <sec_name>
       Syncs two mounted filesystems (rsync pri -> sec).
+      Primary/source is copied FROM. Secondary/destination is replaced to match source.
+      Shows global rsync progress via --info=progress2.
+      Endpoints may be mapped names or absolute directory paths.
       For LUKS: resolves to payload filesystem when open; errors if locked/not mounted.
-  diff <pri_name> <sec_name> [--depth N]
+  diff <pri_name> <sec_name> [--depth N] [-d] [--fast] [--checksum]
       Dry-run filesystem diff (rsync pri -> sec): shows create/modify/delete counts+bytes,
-      then a per-folder subtree summary (+new, ~updated, -deleted regular files).
+      Primary/source is copied FROM. Secondary/destination is what would be replaced.
+      then a tree-style hierarchy summary of dirs/files (+new, ~updated, -deleted regular files).
       Depth default: 2.
+      Use -d to show directories only.
+      Use --fast to print raw rsync -an --delete --stats output only (no summaries).
+      Use --checksum to compare file contents via rsync checksums (slower, ignores mtime-only changes).
+      In --fast, created(new+updated) regular files = 'Number of regular files transferred'.
+      Unchanged entries are shown uncolored.
+      Endpoints may be mapped names/IDs or absolute directory paths.
       For LUKS: resolves to payload filesystem when open; errors if locked/not mounted.
-  defrag <name>
+  defrag <name> [--compress]
       Defragments a mounted filesystem and records user.last_defrag xattr.
-      On btrfs, runs defragment -r, then balance start -dusage=50.
+      On btrfs, default runs defragment -r -v with live per-directory progress.
+      Use --compress to add -czstd recompression,
+      then balance start -dusage=50 and live balance status monitoring.
       For LUKS: resolves to payload filesystem when open; errors if locked/not mounted.
   fshealth <name>
       Shows filesystem diagnostics, last_defrag/last_scrub xattrs, and extents/files ratios.
@@ -127,6 +143,7 @@ file system (applied to disk/part entries with mountable FSTYPE):
 shell:
   version
       Print diskmgr version.
+      Command history persists across sessions in /home/lewis/.local/state/diskmgr/history (override with $DISKMGR_HISTORY).
   exit / quit / Ctrl+D
       Exit the application.
 ```
@@ -136,10 +153,8 @@ shell:
 ```text
 Display the physical partition layout and free space for all plugged-in disks.
         Usage:
-          list            -> verbose table (default)
-          list verbose    -> explicit verbose table
-          list concise    -> compact table (#, NAME, DEVICE, TYPE, MOUNTPOINT, PERSISTENT PATH)
-          list list       -> list-style entries (key/value) instead of a table
+          list            -> standard table (default)
+          list verbose    -> verbose key/value entries (alias: list list)
 
         UNDER THE HOOD:
         1.  Hardware Scan: Identifies all physical 'disk' devices (excluding partitions).
@@ -153,100 +168,15 @@ Display the physical partition layout and free space for all plugged-in disks.
             - Calculates MiB and GiB values from sector counts.
 ```
 
-### Example Output
-
-```text
-Disk: /dev/sda (ST1000LM035-1RK172) [gpt] [Sector: L512/P4096] [Total Sectors: 1953525168]
-[ GPT Primary 34s (17408.00B) ] [ free 2014s (1007.00KiB) ] [ sda1 - 262144s (128.00MiB) (msftres, no_automount) ] [ sda2 crypto_LUKS 1953259520s (953740.00MiB ≈ 931.4GiB) (msftdata) ] [ free 1423s (711.50KiB) ] [ GPT Backup 33s (16896.00B) ]
-
- #   NAME  DEVICE           TYPE   FSTYPE       FSLABEL  FSUUID                                SIZE    FSAVAIL  FSMOUNTPOINTS       PERSISTENT PATH (IEEE)
- 1   -     sda              disk                                                               931.5G                               /dev/disk/by-id/wwn-0x5000c500a89d6e44
- 2   -     ├─sda1           part                                                               128M                                 /dev/disk/by-id/wwn-0x5000c500a89d6e44-part1
- 3   1a    └─sda2           part   crypto_LUKS           e038a8b5-d3a7-4bbb-bbea-5bed8cc07a04  931.4G                               /dev/disk/by-id/wwn-0x5000c500a89d6e44-part2
- 4   -         └─dm-0 (1a)  crypt  ext4         1a       5933d845-1098-4f16-ad7f-ff1f4a4a2105  931.4G  18.3G    /media/lewis/1a     -
----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-
-Disk: /dev/sdb (ST2000DM008-2FR102) [none] [Sector: L512/P4096] [Total Sectors: 3907029168]
-[ sdb crypto_LUKS 3907029168s (1907729.09MiB ≈ 1863.0GiB) ]
-
- #   NAME  DEVICE           TYPE   FSTYPE       FSLABEL  FSUUID                                SIZE    FSAVAIL  FSMOUNTPOINTS       PERSISTENT PATH (IEEE)
- 5   1b    sdb              disk   crypto_LUKS           885a66c1-6d5f-4d24-adfd-e7c7975dfe65  1.8T                                 /dev/disk/by-id/wwn-0x5000c500e31e6cb2
- 6   -     └─dm-1 (1b)      crypt  btrfs        1b       08aad883-1143-4d5d-84b9-d715665e332a  1.8T    966.8G   /media/lewis/1b     -
----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-
-Disk: /dev/nvme0n1 (WD_BLACK SN8100 2000GB) [msdos] [Sector: L512/P512] [Total Sectors: 3907029168]
-[ MBR 2s (1024.00B) ] [ free 2046s (1023.00KiB) ] [ nvme0n1p1 ext4 3907026944s (1907728.00MiB ≈ 1863.0GiB) (boot) ] [ free 176s (88.00KiB) ]
-
- #   NAME  DEVICE           TYPE   FSTYPE       FSLABEL  FSUUID                                SIZE    FSAVAIL  FSMOUNTPOINTS       PERSISTENT PATH (IEEE)
- 7   -     nvme0n1          disk                                                               1.8T                                 /dev/disk/by-id/nvme-eui.e8238fa6bf530001001b448b42d60852
- 8   os    └─nvme0n1p1      part   ext4                  88f1dad3-95c6-418e-bea8-f5f3e072ea29  1.8T    765.4G   /                   /dev/disk/by-id/nvme-eui.e8238fa6bf530001001b448b42d60852-part1
----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-
-Disk: /dev/nvme1n1 (WD Blue SN570 1TB) [msdos] [Sector: L512/P512] [Total Sectors: 1953525168]
-[ MBR 2s (1024.00B) ] [ free 2046s (1023.00KiB) ] [ nvme1n1p1 ext4 1953523120s (953868.71MiB ≈ 931.5GiB) ]
-
- #   NAME  DEVICE           TYPE   FSTYPE       FSLABEL  FSUUID                                SIZE    FSAVAIL  FSMOUNTPOINTS       PERSISTENT PATH (IEEE)
- 9   -     nvme1n1          disk                                                               931.5G                               /dev/disk/by-id/nvme-eui.e8238fa6bf530001001b444a49598af9
- 10  data  └─nvme1n1p1      part   ext4         data     72c22012-b161-4e2a-a762-94ff7fda47f9  931.5G  194.5G   /media/lewis/data1  /dev/disk/by-id/nvme-eui.e8238fa6bf530001001b444a49598af9-part1
----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-```
-
 ## Command Reference: `boot`
 
 ```text
-Display boot entries from the GRUB configuration of all disks.
+Display boot entries from GRUB and fstab detection for each partition.
 
         UNDER THE HOOD:
-        Scans all block devices. If mounted, it parses /boot/grub/grub.cfg.
+        Scans partition devices. If mounted, it parses /boot/grub/grub.cfg
+        and checks for /etc/fstab inside that mounted partition.
         If unmounted or encrypted, it explains why it cannot yet read the config.
-```
-
-### Example Output
-
-```text
---- System Boot Configuration Scan ---
-
-Device: /dev/sda1 (unknown FS)
-  Result: No recognizable filesystem found.
-------------------------------------------------------------
-
-Device: /dev/sda2 (crypto_LUKS)
-  Result: LUKS container is LOCKED. Please 'open' this disk to scan for boot entries.
-------------------------------------------------------------
-
-Device: /dev/dm-0 (ext4)
-  Result: Mounted at /media/lewis/1a, but no GRUB configuration found.
-------------------------------------------------------------
-
-Device: /dev/dm-1 (btrfs)
-  Result: Mounted at /media/lewis/1b, but no GRUB configuration found.
-------------------------------------------------------------
-
-Device: /dev/nvme0n1p1 (ext4)
-  Result: Found GRUB config at /boot/grub/grub.cfg
-
-Top-level
-  └─ Linux Mint 22.1 Xfce                                                      SEARCH=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]  ROOT=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]
-
-Advanced options for Linux Mint 22.1 Xfce
-  ├─ Linux Mint 22.1 Xfce, with Linux 6.17.9-061709-generic                    SEARCH=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]  ROOT=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]
-  ├─ Linux Mint 22.1 Xfce, with Linux 6.17.9-061709-generic (recovery mode)    SEARCH=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]  ROOT=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]
-  ├─ Linux Mint 22.1 Xfce, with Linux 6.16.12-061612-generic                   SEARCH=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]  ROOT=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]
-  ├─ Linux Mint 22.1 Xfce, with Linux 6.16.12-061612-generic (recovery mode)   SEARCH=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]  ROOT=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]
-  ├─ Linux Mint 22.1 Xfce, with Linux 6.16.0-061600-generic                    SEARCH=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]  ROOT=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]
-  ├─ Linux Mint 22.1 Xfce, with Linux 6.16.0-061600-generic (recovery mode)    SEARCH=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]  ROOT=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]
-  ├─ Linux Mint 22.1 Xfce, with Linux 6.8.0-100-generic                        SEARCH=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]  ROOT=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]
-  ├─ Linux Mint 22.1 Xfce, with Linux 6.8.0-100-generic (recovery mode)        SEARCH=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]  ROOT=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]
-  ├─ Linux Mint 22.1 Xfce, with Linux 6.8.0-88-generic                         SEARCH=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]  ROOT=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]
-  ├─ Linux Mint 22.1 Xfce, with Linux 6.8.0-88-generic (recovery mode)         SEARCH=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]  ROOT=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]
-  ├─ Linux Mint 22.1 Xfce, with Linux 6.8.0-51-generic                         SEARCH=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]  ROOT=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]
-  ├─ Linux Mint 22.1 Xfce, with Linux 6.8.0-51-generic (recovery mode)         SEARCH=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]  ROOT=88f1dad3-95c6-418e-bea8-f5f3e072ea29 [nvme0n1p1]
-  └─ UEFI Firmware Settings                                                    SEARCH=(firmware)                           [-]  ROOT=(firmware)                           [-]
-------------------------------------------------------------
-
-Device: /dev/nvme1n1p1 (ext4)
-  Result: Mounted at /media/lewis/data1, but no GRUB configuration found.
-------------------------------------------------------------
 ```
 
 ## Command Reference: `map`
@@ -513,11 +443,11 @@ Unlock (if encrypted) and mount a disk: open <name/id>
             - Executes 'passgen' to retrieve the passphrase.
             - Pipes the passphrase into 'cryptsetup open' to create a cleartext device in /dev/mapper/.
         5.  Mounting:
-            - Identifies the preferred mountpoint: /media/$USER/<label>.
+            - Uses /etc/fstab mountpoint/options when an entry exists for the device.
+            - Otherwise identifies preferred mountpoint: /media/$USER/<label>.
             - If no hardware label is present, falls back to /media/$USER/<mapping_name>.
-            - Note: Prioritizing the label ensures that the disk mounts to the same
-              path used by standard OS automounters for plain removable media.
             - Ensures the directory exists and attaches the device.
+            - For btrfs, enforces compression (compress=zstd:3) on the mounted filesystem.
         6.  Policy Enforcement: If the disk is already mounted at a non-standard path,
             it unmounts and remounts it to the preferred path.
 
@@ -559,7 +489,7 @@ LUKS encryption management: luks <passwd|backup|restore|header> [options]
 ## Command Reference: `label`
 
 ```text
-Get or set the filesystem label of an OPEN disk: label <name> [new_label]
+Get or set the filesystem label of an OPEN disk: label <name> [new_label] [--fstab]
 
         UNDER THE HOOD:
         1.  Validation: Verifies that the disk is currently open/unlocked.
@@ -568,6 +498,9 @@ Get or set the filesystem label of an OPEN disk: label <name> [new_label]
             - ext4: Uses 'e2label' on the active device.
             - xfs: Requires a temporary unmount, then uses 'xfs_admin -L', then remounts.
         4.  Refresh: Executes 'udevadm trigger' to force tools like 'lsblk' to see the change.
+        5.  Optional fstab update (--fstab):
+            - Removes old label-based /etc/fstab entry.
+            - Adds UUID-based entry with mountpoint /mnt/<new_label>.
 
         The label is written directly to the disk hardware and persists across different computers.
 ```
@@ -578,32 +511,38 @@ Get or set the filesystem label of an OPEN disk: label <name> [new_label]
 Remount an OPEN disk to its label mountpoint: remount <name>
 
         This fixes "mounted twice" and "data1/data2 suffix" issues by moving the mount
-        to the canonical path: /media/$USER/<label>.
+        to the canonical path: /mnt/<label> when the device has an /etc/fstab entry;
+        otherwise /media/$USER/<label>.
 
         SAFETY RULES:
         - Refuses if the target mountpoint is already mounted by a different device.
         - Refuses if the target directory exists, is not a mountpoint, and is non-empty.
-        - Refuses if the filesystem has no LABEL (set one with: label <name> <new_label>).
+        - Refuses only when neither /etc/fstab entry nor filesystem LABEL is available.
 
         UNDER THE HOOD:
         1.  Resolve Device: Uses /dev/mapper/<name> if present, otherwise the mapped source path.
             If the mapping is LUKS and not OPEN, it refuses.
-        2.  Identify Label: Reads the filesystem LABEL via blkid.
-        3.  Preflight: Validates /media/$USER/<label> is safe to use.
+        2.  Target Mountpoint:
+            - If /etc/fstab entry exists, enforce /mnt/<label> (and update the fstab mountpoint if needed).
+            - Otherwise, fall back to /media/$USER/<label>.
+        3.  Preflight: Validates selected mountpoint is safe to use.
         4.  Unmount: Unmounts all current mount targets for the device (if any).
         5.  Cleanup: Removes empty old mountpoint directories under /media/$USER (best-effort rmdir).
-        6.  Mount: Mounts the device at /media/$USER/<label>.
+        6.  Mount: Uses fstab mount when present; otherwise direct mount to LABEL path.
+            For btrfs, compression is enforced (compress=zstd:3).
 ```
 
 ## Command Reference: `sync`
 
 ```text
-Synchronize two mounted disks: sync <primary_name> <secondary_name>
+Synchronize two filesystems: sync <primary> <secondary>
 
         UNDER THE HOOD:
-        1.  Validation: Verifies both disks are mapped and currently mounted.
+        1.  Validation: Verifies both endpoints resolve to directories.
+            - Mapped names must already be mounted.
+            - Absolute paths must exist and be directories.
         2.  Confirmation: Requires solving two math problems (DESTRUCTIVE for secondary).
-        3.  Execution: Runs 'rsync -avh --delete --progress <primary_mnt>/ <secondary_mnt>/'.
+        3.  Execution: Runs 'rsync -avh --delete --info=progress2 <primary_mnt>/ <secondary_mnt>/'.
 
         Note: The SECONDARY disk will be modified to match the PRIMARY disk.
         All files on the secondary that do not exist on the primary will be DELETED.
@@ -612,24 +551,27 @@ Synchronize two mounted disks: sync <primary_name> <secondary_name>
 ## Command Reference: `diff`
 
 ```text
-Preview differences between two mounted filesystems: diff <primary_name> <secondary_name> [--depth N]
+Preview differences between two mounted filesystems: diff <primary_name> <secondary_name> [--depth N] [-d] [--fast] [--checksum]
 
+        Endpoints may be mapping names/IDs (must be mounted) or absolute directory paths.
         Uses rsync dry-run itemized output (primary -> secondary) and prints:
         1) Change counts and byte estimates (created/modified/deleted, net change).
-        2) Folder summary by subtree up to --depth levels.
+        2) Hierarchy summary by subtree up to --depth levels.
 ```
 
 ## Command Reference: `defrag`
 
 ```text
-Defragment a mounted filesystem: defrag <name>
+Defragment a mounted filesystem: defrag <name> [--compress]
 
         UNDER THE HOOD:
         1.  Validation: Verifies the disk is mapped and currently mounted.
         2.  Confirmation: Requires solving two math problems.
         3.  Execution:
             - ext4:  runs 'sudo e4defrag <mountpoint>'
-            - btrfs: runs 'sudo btrfs filesystem defragment -r <mountpoint>'
+            - btrfs: runs 'sudo btrfs filesystem defragment -r -v <mountpoint>'
+                     optional: add '--compress' to use '-czstd' recompression mode.
+                     with live progress counters (total files + current directory),
                      then 'sudo btrfs balance start -dusage=50 <mountpoint>'
         4.  Recording: Stores a timestamp on the mountpoint root via:
               sudo setfattr -n user.last_defrag -v "<date>" <mountpoint>
