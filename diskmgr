@@ -912,7 +912,7 @@ class DiskMgrShell(cmd.Cmd):
         print(f"{Colors.BOLD}all:{Colors.ENDC}")
         print(f"  {Colors.OKGREEN}list [verbose]{Colors.ENDC}")
         print("      Displays disk layout (table by default).")
-        print("      Use verbose for key/value entries (formerly: list list).")
+        print("      Use verbose for key/value entries (alias: list list).")
         print(f"  {Colors.OKGREEN}boot{Colors.ENDC}")
         print("      Displays boot entries/submenus from GRUB and /etc/fstab detection per partition.")
 
@@ -1046,7 +1046,7 @@ class DiskMgrShell(cmd.Cmd):
         '''Display the physical partition layout and free space for all plugged-in disks.
         Usage:
           list            -> standard table (default)
-          list verbose    -> verbose key/value entries (formerly: list list)
+          list verbose    -> verbose key/value entries (alias: list list)
         
         UNDER THE HOOD:
         1.  Hardware Scan: Identifies all physical 'disk' devices (excluding partitions).
@@ -1122,7 +1122,7 @@ class DiskMgrShell(cmd.Cmd):
             dev_path = f"/dev/{d_name}"
             try:
                 ls_res = run_command(['lsblk', '-J', '-b', '-f', '-o',
-                                      'NAME,KNAME,TYPE,SIZE,FSTYPE,FSVER,LABEL,UUID,FSAVAIL,FSUSE%,FSUSED,MOUNTPOINTS,WWN',
+                                      'NAME,KNAME,TYPE,SIZE,FSTYPE,FSVER,LABEL,UUID,PARTUUID,FSAVAIL,FSUSE%,FSUSED,MOUNTPOINTS,WWN',
                                       dev_path], sudo=True, check=False)
                 rows = []
                 if (getattr(ls_res, 'stdout', '') or '').strip():
@@ -1436,6 +1436,7 @@ class DiskMgrShell(cmd.Cmd):
             "FSVER",
             "FSLABEL",
             "FSUUID",
+            "PARTUUID",
             "SIZE",
             "FSAVAIL",
             "FSUSE%",
@@ -2151,6 +2152,7 @@ class DiskMgrShell(cmd.Cmd):
             fsver = dev.get('fsver') or ""
             label = dev.get('label') or ""
             uuid = dev.get('uuid') or ""
+            partuuid = dev.get('partuuid') or ""
             fsavail_raw = dev.get('fsavail') or ""
             fsavail = self._format_bytes_binary_with_metric(fsavail_raw)
             fsuse = dev.get('fsuse%') or ""
@@ -2229,6 +2231,7 @@ class DiskMgrShell(cmd.Cmd):
                 "FSVER": fsver,
                 "FSLABEL": label,
                 "FSUUID": uuid,
+                "PARTUUID": partuuid,
                 "FSAVAIL": fsavail,
                 "FSAVAIL-BYTES": str(fsavail_raw or "").strip(),
                 "FSUSE%": fsuse,
