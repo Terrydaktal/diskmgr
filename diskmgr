@@ -980,6 +980,7 @@ class DiskMgrShell(cmd.Cmd):
         print(f"  {Colors.OKGREEN}sync <pri_name> <sec_name>{Colors.ENDC}")
         print("      Syncs two mounted filesystems (rsync pri -> sec).")
         print("      Primary/source is copied FROM. Secondary/destination is replaced to match source.")
+        print("      Shows global rsync progress via --info=progress2.")
         print("      Endpoints may be mapped names or absolute directory paths.")
         print("      For LUKS: resolves to payload filesystem when open; errors if locked/not mounted.")
         print(f"  {Colors.OKGREEN}diff <pri_name> <sec_name> [--depth N] [-d] [--fast] [--checksum]{Colors.ENDC}")
@@ -4642,7 +4643,7 @@ class DiskMgrShell(cmd.Cmd):
             - Mapped names must already be mounted.
             - Absolute paths must exist and be directories.
         2.  Confirmation: Requires solving two math problems (DESTRUCTIVE for secondary).
-        3.  Execution: Runs 'rsync -avh --delete --progress <primary_mnt>/ <secondary_mnt>/'.
+        3.  Execution: Runs 'rsync -avh --delete --info=progress2 <primary_mnt>/ <secondary_mnt>/'.
         
         Note: The SECONDARY disk will be modified to match the PRIMARY disk.
         All files on the secondary that do not exist on the primary will be DELETED.
@@ -4716,7 +4717,7 @@ class DiskMgrShell(cmd.Cmd):
             src_path = pri_mnt.rstrip('/') + '/'
             dst_path = sec_mnt.rstrip('/') + '/'
             
-            cmd = ['rsync', '-avh', '--delete', '--progress', src_path, dst_path]
+            cmd = ['rsync', '-avh', '--delete', '--info=progress2', src_path, dst_path]
             # Use sudo if mountpoints are owned by root
             run_command(cmd, sudo=True, capture_output=False)
             log("Sync complete.")
