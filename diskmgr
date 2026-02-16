@@ -2053,7 +2053,8 @@ class DiskMgrShell(cmd.Cmd):
             name = dev.get('name', '') or ""
             kname = dev.get('kname', '') or name
             dtype = dev.get('type') or ""
-            size = self._format_size_tib_gib(dev.get('size') or "")
+            size_bytes_raw = str(dev.get('size') or "").strip()
+            size = self._format_size_tib_gib(size_bytes_raw)
             fstype = dev.get('fstype') or ""
             fsver = dev.get('fsver') or ""
             label = dev.get('label') or ""
@@ -2129,6 +2130,7 @@ class DiskMgrShell(cmd.Cmd):
                 "TYPE": dtype,
                 "FSTAB": "y" if in_fstab else "n",
                 "SIZE": size,
+                "SIZE-BYTES": size_bytes_raw,
                 "FSTYPE": fstype,
                 "FSVER": fsver,
                 "FSLABEL": label,
@@ -2194,23 +2196,26 @@ class DiskMgrShell(cmd.Cmd):
         """Return display value for list-mode cells."""
         if col == "SIZE":
             size = str(row.get("SIZE", "") or "")
-            fs_used = self._metric_unit_label(str(row.get("FS-USED", "") or ""))
-            if size and size != "-" and fs_used and fs_used != "-":
-                return f"{size} ({fs_used})"
+            size_gb = self._size_bytes_to_gb_label(row.get("SIZE-BYTES", ""))
+            if size and size != "-" and size_gb and size_gb != "-":
+                return f"{size} ({size_gb})"
             return size
         return str(row.get(col, "") or "")
 
-    def _metric_unit_label(self, value):
-        """Normalize compact metric suffixes (e.g., G -> GB) for display."""
-        v = str(value or "").strip()
-        if not v or v == "-":
-            return v
-        m = re.match(r'^([0-9]+(?:\.[0-9]+)?)\s*([KMGTPE])$', v, re.IGNORECASE)
-        if not m:
-            return v
-        num = m.group(1)
-        unit = m.group(2).upper()
-        return f"{num}{unit}B"
+    def _size_bytes_to_gb_label(self, size_bytes):
+        """Render raw byte size as decimal GB for list-mode SIZE annotations."""
+        try:
+            n = int(str(size_bytes or "").strip(), 10)
+        except (TypeError, ValueError):
+            return "-"
+        if n < 0:
+            return "-"
+        gb = n / float(1000 ** 3)
+        if gb >= 100:
+            return f"{gb:.0f}GB"
+        if gb >= 10:
+            return f"{gb:.1f}GB"
+        return f"{gb:.2f}GB"
 
     def resolve_uuid_to_dev(self, uuid):
         '''Resolves a UUID to a short device name like sda1 or nvme0n1p1.'''
