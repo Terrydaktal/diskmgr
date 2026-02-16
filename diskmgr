@@ -2244,11 +2244,10 @@ class DiskMgrShell(cmd.Cmd):
             cols = self._lsblk_verbose_cols()
         for i, r in enumerate(rows, start=1):
             print(f"{Colors.BOLD}Entry {i}{Colors.ENDC}")
-            for c in cols:
-                print(f"  {c}: {self._lsblk_list_value(r, c)}")
 
             # Make filesystem space accounting explicit: FSAVAIL from lsblk/df excludes reserved blocks.
             # For ext4 this is often ~5% reserved + metadata. Show the remainder so it "adds up".
+            missing_disp = None
             try:
                 size_b = int(str(r.get("SIZE-BYTES") or "").strip() or "0", 10)
                 used_b = int(str(r.get("FSUSED-BYTES") or "").strip() or "0", 10)
@@ -2257,9 +2256,13 @@ class DiskMgrShell(cmd.Cmd):
                     missing_b = size_b - used_b - avail_b
                     if missing_b > 0:
                         missing_disp = self._format_bytes_binary_with_metric(str(missing_b))
-                        print(f"  FSRESERVED/META: {missing_disp}")
             except Exception:
-                pass
+                missing_disp = None
+
+            for c in cols:
+                print(f"  {c}: {self._lsblk_list_value(r, c)}")
+                if c == "FSUSE%" and missing_disp:
+                    print(f"  FSRESERVED/META: {missing_disp}")
             if i != len(rows):
                 print("")
 
