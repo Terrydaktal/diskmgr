@@ -245,11 +245,15 @@ def _parse_smart_attr_raw(out, attr_id):
         if not s.startswith(str(attr_id) + " "):
             continue
         parts = s.split()
-        if len(parts) < 2:
+        if len(parts) < 2 or parts[0] != str(attr_id):
             continue
-        if parts[0] != str(attr_id):
-            continue
-        # RAW_VALUE is conventionally the last column.
+        # Old format: ID NAME FLAG VALUE WORST THRESH TYPE UPDATED WHEN_FAILED RAW...
+        if len(parts) >= 10 and re.fullmatch(r"0x[0-9a-fA-F]+", parts[2]):
+            return " ".join(parts[9:]).strip()
+        # Brief format: ID NAME FLAGS VALUE WORST THRESH FAIL RAW...
+        if len(parts) >= 8:
+            return " ".join(parts[7:]).strip()
+        # Fallback
         return parts[-1]
     return None
 
@@ -257,26 +261,47 @@ def _parse_smart_attr_row(out, attr_id):
     """
     Parse a smartctl -a attribute table row for a given attribute ID.
 
-    Typical format:
-      ID# ATTRIBUTE_NAME FLAG VALUE WORST THRESH TYPE UPDATED WHEN_FAILED RAW_VALUE
+    Supports both smartctl ATA table formats:
+      old:   ID# ATTRIBUTE_NAME FLAG VALUE WORST THRESH TYPE UPDATED WHEN_FAILED RAW_VALUE
+      brief: ID# ATTRIBUTE_NAME FLAGS VALUE WORST THRESH FAIL RAW_VALUE
     RAW_VALUE may contain spaces (e.g. temperatures with Min/Max), so we capture the tail.
     """
     if not out:
         return None
-    m = re.search(
-        rf"(?m)^\s*{attr_id}\s+(\S+)\s+0x[0-9a-fA-F]+\s+(\d+)\s+(\d+)\s+(\d+)\s+\S+\s+\S+\s+\S+\s+(.+)$",
-        str(out),
-    )
-    if not m:
-        return None
-    return {
-        "id": int(attr_id),
-        "name": m.group(1),
-        "value": int(m.group(2)),
-        "worst": int(m.group(3)),
-        "thresh": int(m.group(4)),
-        "raw": m.group(5).strip(),
-    }
+    for line in str(out).splitlines():
+        s = line.strip()
+        if not s or not s.startswith(str(attr_id) + " "):
+            continue
+        parts = s.split()
+        if len(parts) < 8 or parts[0] != str(attr_id):
+            continue
+
+        name = parts[1]
+        try:
+            # Old format has a hex flag in column 3.
+            if re.fullmatch(r"0x[0-9a-fA-F]+", parts[2]) and len(parts) >= 10:
+                value = int(parts[3], 10)
+                worst = int(parts[4], 10)
+                thresh = int(parts[5], 10)
+                raw = " ".join(parts[9:]).strip()
+            else:
+                # Brief format.
+                value = int(parts[3], 10)
+                worst = int(parts[4], 10)
+                thresh = int(parts[5], 10)
+                raw = " ".join(parts[7:]).strip()
+        except ValueError:
+            continue
+
+        return {
+            "id": int(attr_id),
+            "name": name,
+            "value": value,
+            "worst": worst,
+            "thresh": thresh,
+            "raw": raw,
+        }
+    return None
 
 def _first_int_from_text(s):
     if s is None:
