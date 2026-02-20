@@ -23,7 +23,7 @@ except ImportError:
 # Configuration
 MAP_FILENAME = 'diskmap.tsv'
 PASSGEN_BIN = 'passgen'
-VERSION = '3.0.9'
+VERSION = '3.1.6'
 HISTORY_FILE_ENV = 'DISKMGR_HISTORY'
 DEFAULT_HISTORY_FILE = Path.home() / '.local' / 'state' / 'diskmgr' / 'history'
 MAX_HISTORY_ENTRIES = 5000
@@ -2213,7 +2213,7 @@ class DiskMgrShell(cmd.Cmd):
 
         return f"{bin_s} ({met_s})"
 
-    def _collect_lsblk_rows(self, devices, indent="", is_root=True, parent_wwn="", friendly_map=None, fstab_real_set=None, fstab_uuid_set=None, fstab_detail_real=None, fstab_detail_uuid=None, findmnt_lookup=None):
+    def _collect_lsblk_rows(self, devices, indent="", is_root=True, parent_wwn="", friendly_map=None, fstab_real_set=None, fstab_uuid_set=None, fstab_detail_real=None, fstab_detail_uuid=None, findmnt_lookup=None, include_ext4_details=True):
         """
         Collect an lsblk JSON tree into flat rows, while preserving the tree glyphs in NAME.
         Returns a list of dicts with consistent string keys.
@@ -2308,7 +2308,7 @@ class DiskMgrShell(cmd.Cmd):
             fs_used_metric = str(findmnt_row.get('FS-USED') or '-')
             fs_reserved = "-"
             fs_meta = "-"
-            if str(fstype).strip().lower() == "ext4":
+            if include_ext4_details and str(fstype).strip().lower() == "ext4":
                 fs_reserved, fs_meta = self._ext4_reserved_and_meta(
                     dev_real=dev_real,
                     size_bytes_raw=size_bytes_raw,
@@ -2318,6 +2318,7 @@ class DiskMgrShell(cmd.Cmd):
             rows.append({
                 "#": "-",
                 "KNAME": kname,
+                "PKNAME": str(dev.get('pkname') or ""),
                 "NAME": friendly,
                 "DEVICE": tree_part,
                 "PERSISTENT PATH (IEEE)": pdp,
@@ -2356,9 +2357,138 @@ class DiskMgrShell(cmd.Cmd):
                     fstab_uuid_set=fstab_uuid_set,
                     fstab_detail_real=fstab_detail_real,
                     fstab_detail_uuid=fstab_detail_uuid,
-                    findmnt_lookup=findmnt_lookup
+                    findmnt_lookup=findmnt_lookup,
+                    include_ext4_details=include_ext4_details
                 ))
         return rows
+
+    def _build_list_rows_snapshot(self, include_ext4_details=True):
+        """
+        Build current list rows in the same shape as `list verbose`.
+        Returns flat rows with global # numbering for disk/part/crypt entries.
+        """
+        all_devs = self.get_disk_info()
+        disks = [d for d in all_devs if d.get('type') == 'disk']
+        if not disks:
+            return []
+
+        friendly_map = {}
+        try:
+            self.mappings = read_luks_map()
+            for friendly, target in (self.mappings or {}).items():
+                try:
+                    if target and os.path.exists(target):
+                        friendly_map[os.path.realpath(target)] = friendly
+                except Exception:
+                    continue
+        except Exception:
+            friendly_map = {}
+
+        fstab_real_set, fstab_uuid_set, fstab_detail_real, fstab_detail_uuid = self._fstab_lookup()
+        findmnt_lookup = self._findmnt_lookup()
+
+        rows = []
+        for d in disks:
+            d_name = d.get('name', '')
+            if not d_name:
+                continue
+            dev_path = f"/dev/{d_name}"
+            try:
+                ls_res = run_command(['lsblk', '-J', '-b', '-f', '-o',
+                                      'NAME,KNAME,PKNAME,TYPE,SIZE,FSTYPE,FSVER,LABEL,UUID,PARTUUID,FSAVAIL,FSUSE%,FSUSED,MOUNTPOINTS,WWN',
+                                      dev_path], sudo=True, check=False)
+                if (getattr(ls_res, 'stdout', '') or '').strip():
+                    data = json.loads(ls_res.stdout)
+                    blockdevices = data.get('blockdevices', [])
+                    rows.extend(self._collect_lsblk_rows(
+                        blockdevices,
+                        friendly_map=friendly_map,
+                        fstab_real_set=fstab_real_set,
+                        fstab_uuid_set=fstab_uuid_set,
+                        fstab_detail_real=fstab_detail_real,
+                        fstab_detail_uuid=fstab_detail_uuid,
+                        findmnt_lookup=findmnt_lookup,
+                        include_ext4_details=include_ext4_details,
+                    ))
+            except Exception:
+                continue
+
+        idx = 1
+        for r in rows:
+            if (r.get('TYPE') or '') in ('disk', 'part', 'crypt'):
+                r['#'] = str(idx)
+                idx += 1
+            else:
+                r['#'] = '-'
+        return rows
+
+    def _show_target_entries_for_confirmation(self, target_name):
+        """
+        Print current list-list entry/entries for the target before math confirmation.
+        Also includes an open crypt child when target is a LUKS container parent.
+        """
+        try:
+            rows = self._build_list_rows_snapshot(include_ext4_details=True)
+            if not rows:
+                return
+
+            target_paths = set()
+            text = str(target_name or "").strip()
+
+            # Any explicit /dev paths embedded in the confirmation label.
+            for p in re.findall(r"/dev/[A-Za-z0-9._/-]+", text):
+                p = p.rstrip("),]")
+                if os.path.exists(p):
+                    target_paths.add(os.path.realpath(p))
+
+            # Direct path input.
+            if text and os.path.exists(text):
+                target_paths.add(os.path.realpath(text))
+
+            token = text.split()[0].strip("[](),") if text else ""
+            if token:
+                try:
+                    resolved = self.resolve_target(token, allow_id=True)
+                except Exception:
+                    resolved = None
+                if resolved and os.path.exists(resolved):
+                    target_paths.add(os.path.realpath(resolved))
+
+                mapper_path = f"/dev/mapper/{token}"
+                if os.path.exists(mapper_path):
+                    target_paths.add(os.path.realpath(mapper_path))
+
+            if not target_paths:
+                return
+
+            matched_knames = set()
+            selected = []
+            for r in rows:
+                kname = str(r.get('KNAME') or "").strip()
+                if not kname:
+                    continue
+                devreal = os.path.realpath(f"/dev/{kname}")
+                if devreal in target_paths:
+                    selected.append(r)
+                    matched_knames.add(kname)
+
+            # If a matched row is a LUKS container parent, include open crypt child row too.
+            for r in rows:
+                if (r.get('TYPE') or '') != 'crypt':
+                    continue
+                pk = str(r.get('PKNAME') or "").strip()
+                if pk and pk in matched_knames and str(r.get('KNAME') or '') not in matched_knames:
+                    selected.append(r)
+                    matched_knames.add(str(r.get('KNAME') or ''))
+
+            if not selected:
+                return
+
+            print(f"\n{Colors.BOLD}Target entry snapshot:{Colors.ENDC}")
+            self._print_lsblk_rows_list(selected, cols=self._lsblk_verbose_cols())
+        except Exception:
+            # Confirmation should continue even if snapshot rendering fails.
+            pass
 
     def _print_lsblk_rows(self, rows, widths=None, cols=None):
         """
@@ -2826,6 +2956,7 @@ class DiskMgrShell(cmd.Cmd):
             print(f"You are about to perform a DESTRUCTIVE operation on: {Colors.WARNING}{target_name}{Colors.ENDC}")
         else:
             print(f"You are about to perform a HIGH-IMPACT operation on: {Colors.WARNING}{target_name}{Colors.ENDC}")
+        self._show_target_entries_for_confirmation(target_name)
         print("To proceed, you must answer two math questions correctly.")
         
         for i in range(2):
