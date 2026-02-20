@@ -990,7 +990,7 @@ class DiskMgrShell(cmd.Cmd):
         print("      Starts a SMART long self-test (smartctl -t long) for the underlying disk")
         print("      (USB uses -d sat). Use: selftest <name/id> --watch to poll progress until complete.")
         print(f"  {Colors.OKGREEN}health <name/id> [alias: smart]{Colors.ENDC}")
-        print("      Shows SMART health (smartctl -a) for the underlying disk (USB uses -d sat).")
+        print("      Shows SMART health (smartctl -x) for the underlying disk (USB uses -d sat).")
 
         print(f"\n{Colors.BOLD}disk/part (applied to mapped disk/partition targets):{Colors.ENDC}")
         print(f"  {Colors.OKGREEN}map <name/id> <name>{Colors.ENDC}")
@@ -4237,7 +4237,7 @@ class DiskMgrShell(cmd.Cmd):
         Runs smartctl against the underlying DISK device for the mapping.
         - If the mapping points to a partition, diskmgr automatically targets the parent disk.
         - If the disk transport is USB and the device is /dev/sdX, diskmgr uses:
-              smartctl -d sat -a /dev/sdX
+              smartctl -d sat -x /dev/sdX
           (common for USB-SATA bridges).
         '''
         args = arg.split()
@@ -4283,9 +4283,9 @@ class DiskMgrShell(cmd.Cmd):
             tran = ""
 
         use_sat = (tran == 'usb' and os.path.basename(disk_dev).startswith('sd'))
-        cmd = [smartctl_bin, '-a', disk_dev]
+        cmd = [smartctl_bin, '-x', disk_dev]
         if use_sat:
-            cmd = [smartctl_bin, '-d', 'sat', '-a', disk_dev]
+            cmd = [smartctl_bin, '-d', 'sat', '-x', disk_dev]
 
         run_command(['sudo', '-v'])
 
@@ -4296,7 +4296,7 @@ class DiskMgrShell(cmd.Cmd):
         # If SAT probing fails on a USB bridge, retry without -d sat as a best-effort fallback.
         if use_sat and res.returncode != 0 and ("Unknown USB bridge" in (out + err) or "Please specify device type" in (out + err)):
             log("smartctl -d sat failed on this USB bridge; retrying without '-d sat'...", 'WARN')
-            cmd = [smartctl_bin, '-a', disk_dev]
+            cmd = [smartctl_bin, '-x', disk_dev]
             res = run_command(cmd, sudo=True, capture_output=True, check=False)
             out = (res.stdout or "")
             err = (res.stderr or "")
@@ -4314,6 +4314,7 @@ class DiskMgrShell(cmd.Cmd):
         ])
         temp = _find_first([
             r"^Current Temperature:\s*([0-9]+)\s*C",
+            r"^Current Drive Temperature:\s*([0-9]+)\s*C",
             r"^Temperature:\s*([0-9]+)\s*C",
             r"^\s*194\s+Temperature_Celsius\s+.*\s([0-9]+)\s*$",
             r"^\s*190\s+Airflow_Temperature_Cel\s+.*\s([0-9]+)\s*$",
@@ -4326,7 +4327,23 @@ class DiskMgrShell(cmd.Cmd):
         pending = _find_first([r"^\s*197\s+Current_Pending_Sector\s+.*\s([0-9]+)\s*$"])
         offline_unc = _find_first([r"^\s*198\s+Offline_Uncorrectable\s+.*\s([0-9]+)\s*$"])
 
-        mode = "-d sat" if ('-d' in cmd) else "-a"
+        # Prefer SCT lifetime min/max (from -x) over attribute 194 Min/Max.
+        temp_life_min = None
+        temp_life_max = None
+        temp_life_src = None
+        m_sct = re.search(r"(?im)^\s*Lifetime\s+Min/Max\s+Temperature:\s*([0-9]+)\s*/\s*([0-9]+)\s*Celsius\s*$", out)
+        if m_sct:
+            temp_life_min = m_sct.group(1)
+            temp_life_max = m_sct.group(2)
+            temp_life_src = "SCT"
+        else:
+            m_194 = re.search(r"(?im)^\s*194\s+Temperature_Celsius\s+.*\(\s*Min/Max\s*([0-9]+)\s*/\s*([0-9]+)\s*\)\s*$", out)
+            if m_194:
+                temp_life_min = m_194.group(1)
+                temp_life_max = m_194.group(2)
+                temp_life_src = "attr194"
+
+        mode = "-d sat -x" if ('-d' in cmd) else "-x"
         extra = f"{tran}" if tran else "unknown transport"
         print(f"\n{Colors.HEADER}{Colors.BOLD}=== SMART health: {name} ({extra}, smartctl {mode}) ==={Colors.ENDC}")
         print(f"{Colors.BOLD}Mapped device:{Colors.ENDC} {mapped_dev}")
@@ -4834,6 +4851,8 @@ class DiskMgrShell(cmd.Cmd):
                 print(f"\n{Colors.BOLD}Overall:{Colors.ENDC} {_color_overall(overall)}")
             if temp:
                 print(f"{Colors.BOLD}Temp:{Colors.ENDC} {_color_val('temp', temp)} C")
+            if temp_life_min is not None and temp_life_max is not None:
+                print(f"{Colors.BOLD}Lifetime temp min/max:{Colors.ENDC} {temp_life_min}/{temp_life_max} C ({temp_life_src})")
             if poh:
                 print(f"{Colors.BOLD}Power-on hours:{Colors.ENDC} {poh}")
             if realloc:
