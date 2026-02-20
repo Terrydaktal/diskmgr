@@ -23,7 +23,7 @@ except ImportError:
 # Configuration
 MAP_FILENAME = 'diskmap.tsv'
 PASSGEN_BIN = 'passgen'
-VERSION = '3.1.6'
+VERSION = '3.1.7'
 HISTORY_FILE_ENV = 'DISKMGR_HISTORY'
 DEFAULT_HISTORY_FILE = Path.home() / '.local' / 'state' / 'diskmgr' / 'history'
 MAX_HISTORY_ENTRIES = 5000
@@ -2601,6 +2601,11 @@ class DiskMgrShell(cmd.Cmd):
 
     def _lsblk_list_value(self, row, col):
         """Return display value for list-mode cells."""
+        if col == "DEVICE":
+            dev = str(row.get("DEVICE", "") or "")
+            # list-list only: remove lsblk tree glyph prefix (table view keeps glyphs).
+            dev = re.sub(r"^[\s│]*[├└]─\s*", "", dev)
+            return dev
         if col == "SIZE":
             size = str(row.get("SIZE", "") or "")
             size_gb = self._size_bytes_to_gb_label(row.get("SIZE-BYTES", ""))
