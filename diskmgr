@@ -1020,7 +1020,7 @@ class DiskMgrShell(cmd.Cmd):
 
         print(f"\n{Colors.BOLD}file system (applied to disk/part entries with mountable FSTYPE):{Colors.ENDC}")
         print(f"  {Colors.OKGREEN}open <name/id>{Colors.ENDC}")
-        print("      Opens and mounts a plain or encrypted superfloppy disk/partition.")
+        print("      Opens and mounts a plain or encrypted partition or superfloppy.")
         print("      For encrypted targets, unlocks LUKS then mounts payload filesystem.")
         print("      Btrfs mounts are enforced with compression (compress=zstd:3).")
         print("      Uses /etc/fstab mountpoint/options when an entry exists; otherwise /media/$USER/<label>.")
@@ -1050,12 +1050,10 @@ class DiskMgrShell(cmd.Cmd):
         print("      Dry-run filesystem diff (rsync pri -> sec): shows create/modify/delete counts+bytes,")
         print("      Primary/source is copied FROM. Secondary/destination is what would be replaced.")
         print("      then a tree-style hierarchy summary of dirs/files (+new, ~updated, -deleted regular files).")
-        print("      Depth default: 2.")
-        print("      Use -d to show directories only.")
+        print("      Depth default: 2. Use -d to show directories only. ")
         print("      Use --fast to print raw rsync -an --delete --stats output only (no summaries).")
+        print("      In --fast created(new+updated) regular files = 'Number of regular files transferred'.")
         print("      Use --checksum to compare file contents via rsync checksums (slower, ignores mtime-only changes).")
-        print("      In --fast, created(new+updated) regular files = 'Number of regular files transferred'.")
-        print("      Unchanged entries are shown uncolored.")
         print("      Endpoints may be mapped names/IDs or absolute directory paths.")
         print("      For LUKS: resolves to payload filesystem when open; errors if locked/not mounted.")
         print(f"  {Colors.OKGREEN}defrag <name> [--compress]{Colors.ENDC}")
@@ -4619,11 +4617,13 @@ class DiskMgrShell(cmd.Cmd):
                 return f"{Colors.OKGREEN}{t}{Colors.ENDC}"
             return f"{Colors.FAIL}{t}{Colors.ENDC}"
 
+        is_seagate = _smartctl_looks_seagate(out)
+
         # Fix Seagate SMART 188 formatting: decode packed 48-bit value into real counters.
         cmd188_disp = cmd188
         cmd188_for_color = cmd188
         d188 = None
-        if _smartctl_looks_seagate(out):
+        if is_seagate:
             d188 = _decode_seagate_command_timeout(cmd188)
             if d188 and d188["raw_int"] > 0xFFFF:
                 cmd188_for_color = d188["timeouts"]
@@ -4679,7 +4679,7 @@ class DiskMgrShell(cmd.Cmd):
 
         def _fmt_smart_value(aid):
             # Single-line value formatting (no multi-line blocks).
-            if aid == 188 and _smartctl_looks_seagate(out) and d188 and d188.get("raw_int") is not None and d188["raw_int"] > 0xFFFF:
+            if aid == 188 and is_seagate and d188 and d188.get("raw_int") is not None and d188["raw_int"] > 0xFFFF:
                 v = f"{d188['timeouts']} (decoded: >5s={d188['gt_5s']}, >7.5s={d188['gt_7_5s']}; raw={d188['hex']})"
                 return _color_val('timeout', d188['timeouts']) + v[len(str(d188['timeouts'])):]
 
@@ -4688,7 +4688,7 @@ class DiskMgrShell(cmd.Cmd):
                 return "-"
 
             raw = row.get("raw", "-")
-            if aid in (1, 7) and _smartctl_looks_seagate(out):
+            if aid in (1, 7) and is_seagate:
                 # Common Seagate packing: hi16=error_count, lo32=op_count.
                 d = _decode_seagate_hi16_lo32(raw)
                 if d:
@@ -4758,6 +4758,17 @@ class DiskMgrShell(cmd.Cmd):
                 return _color_val('temp', raw_i)
             return f"{Colors.OKGREEN}{raw}{Colors.ENDC}"
 
+        rr_meaning = (
+            "Seagate RAW is often packed; treat normalized VALUE trend as primary. diskmgr shows decoded ops+errors when possible."
+            if is_seagate else
+            "Vendor-specific RAW encoding is common; prioritize normalized VALUE/WORST/THRESH trend."
+        )
+        seek_meaning = (
+            "Seagate RAW is often packed; treat normalized VALUE trend as primary. diskmgr shows decoded ops+errors when possible."
+            if is_seagate else
+            "Vendor-specific RAW encoding is common; prioritize normalized VALUE/WORST/THRESH trend."
+        )
+
         ranked = [
             (1, 187, "Reported_Uncorrect", "Uncorrectable errors reached the OS/host; corruption has already happened."),
             (2, 198, "Offline_Uncorrectable", "Unrecoverable sectors found during offline scan/self-test; physical defects confirmed."),
@@ -4765,8 +4776,8 @@ class DiskMgrShell(cmd.Cmd):
             (4, 197, "Current_Pending_Sector", "Unstable sectors awaiting re-read/rewrite; data at risk until resolved."),
             (5, 184, "End-to-End_Error", "Internal data-path corruption (cache/buffer <-> media); logic/RAM path issues."),
             (6, 10, "Spin_Retry_Count", "Spin-up retries; motor/bearing/power trouble can trap data permanently."),
-            (7, 1, "Raw_Read_Error_Rate", "Seagate RAW is often packed; treat normalized VALUE trend as primary. diskmgr shows decoded ops+errors when possible."),
-            (8, 7, "Seek_Error_Rate", "Seagate RAW is often packed; treat normalized VALUE trend as primary. diskmgr shows decoded ops+errors when possible."),
+            (7, 1, "Raw_Read_Error_Rate", rr_meaning),
+            (8, 7, "Seek_Error_Rate", seek_meaning),
             (9, 3, "Spin_Up_Time", "Drive taking longer to become ready; can indicate wear (trend matters)."),
             (10, 188, "Command_Timeout", "Drive commands timing out/hanging; often link/power/bridge issues (trend matters)."),
             (11, 199, "UDMA_CRC_Error_Count", "Interface CRC errors; usually cable/port/bridge noise, not platter damage."),
