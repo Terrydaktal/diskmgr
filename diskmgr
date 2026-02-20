@@ -882,6 +882,7 @@ class DiskMgrShell(cmd.Cmd):
         self.mappings = read_luks_map()
         self.unmapped_cache = []
         self.id_cache = {}
+        self._ext4_tune2fs_cache = {}
         self.history_file = Path(os.environ.get(HISTORY_FILE_ENV, str(DEFAULT_HISTORY_FILE))).expanduser()
         self.history_enabled = False
         self._init_history()
@@ -1526,6 +1527,8 @@ class DiskMgrShell(cmd.Cmd):
             "SIZE",
             "FSAVAIL",
             "FSUSE%",
+            "FSRESERVED",
+            "FSMETA",
             "FSMOUNTPOINTS",
             "SOURCE",
             "FS-OPTIONS",
@@ -2303,6 +2306,15 @@ class DiskMgrShell(cmd.Cmd):
             fs_options = str(findmnt_row.get('FS-OPTIONS') or '-')
             vfs_options = str(findmnt_row.get('VFS-OPTIONS') or '-')
             fs_used_metric = str(findmnt_row.get('FS-USED') or '-')
+            fs_reserved = "-"
+            fs_meta = "-"
+            if str(fstype).strip().lower() == "ext4":
+                fs_reserved, fs_meta = self._ext4_reserved_and_meta(
+                    dev_real=dev_real,
+                    size_bytes_raw=size_bytes_raw,
+                    fsused_bytes_raw=fsused_bytes_raw,
+                    fsavail_bytes_raw=str(fsavail_raw or "").strip(),
+                )
             rows.append({
                 "#": "-",
                 "KNAME": kname,
@@ -2321,6 +2333,8 @@ class DiskMgrShell(cmd.Cmd):
                 "FSAVAIL": fsavail,
                 "FSAVAIL-BYTES": str(fsavail_raw or "").strip(),
                 "FSUSE%": fsuse,
+                "FSRESERVED": fs_reserved,
+                "FSMETA": fs_meta,
                 "FSUSED-BYTES": fsused_bytes_raw,
                 "FSMOUNTPOINTS": mounts,
                 "SOURCE": mount_source,
@@ -2373,26 +2387,87 @@ class DiskMgrShell(cmd.Cmd):
         for i, r in enumerate(rows, start=1):
             print(f"{Colors.BOLD}Entry {i}{Colors.ENDC}")
 
-            # Make filesystem space accounting explicit: FSAVAIL from lsblk/df excludes reserved blocks.
-            # For ext4 this is often ~5% reserved + metadata. Show the remainder so it "adds up".
-            missing_disp = None
-            try:
-                size_b = int(str(r.get("SIZE-BYTES") or "").strip() or "0", 10)
-                used_b = int(str(r.get("FSUSED-BYTES") or "").strip() or "0", 10)
-                avail_b = int(str(r.get("FSAVAIL-BYTES") or "").strip() or "0", 10)
-                if size_b > 0 and (used_b > 0 or avail_b > 0):
-                    missing_b = size_b - used_b - avail_b
-                    if missing_b > 0:
-                        missing_disp = self._format_bytes_binary_with_metric(str(missing_b))
-            except Exception:
-                missing_disp = None
-
             for c in cols:
                 print(f"  {c}: {self._lsblk_list_value(r, c)}")
-                if c == "FSUSE%" and missing_disp:
-                    print(f"  FSRESERVED/META: {missing_disp}")
             if i != len(rows):
                 print("")
+
+    def _ext4_reserved_and_meta(self, dev_real, size_bytes_raw, fsused_bytes_raw, fsavail_bytes_raw):
+        """
+        Return (FSRESERVED, FSMETA) strings for an ext4 filesystem.
+        FSRESERVED comes from tune2fs reserved block counters.
+        FSMETA is metadata overhead estimate (prefers Overhead clusters when available).
+        """
+        key = (
+            str(dev_real or ""),
+            str(size_bytes_raw or ""),
+            str(fsused_bytes_raw or ""),
+            str(fsavail_bytes_raw or ""),
+        )
+        if key in self._ext4_tune2fs_cache:
+            return self._ext4_tune2fs_cache[key]
+
+        def _fmt_int(v):
+            if v is None:
+                return "-"
+            return f"{int(v):,}"
+
+        reserved_disp = "-"
+        meta_disp = "-"
+        try:
+            res = run_command(['tune2fs', '-l', dev_real], sudo=True, capture_output=True, check=False)
+            txt = (getattr(res, 'stdout', '') or '') + "\n" + (getattr(res, 'stderr', '') or '')
+            if getattr(res, 'returncode', 1) != 0 or not txt.strip():
+                self._ext4_tune2fs_cache[key] = (reserved_disp, meta_disp)
+                return reserved_disp, meta_disp
+
+            def _grab_int(pattern):
+                m = re.search(pattern, txt, re.MULTILINE | re.IGNORECASE)
+                if not m:
+                    return None
+                return _first_int_from_text(m.group(1))
+
+            block_count = _grab_int(r"^\s*Block count:\s*([0-9,]+)\s*$")
+            block_size = _grab_int(r"^\s*Block size:\s*([0-9,]+)\s*$")
+            cluster_size = _grab_int(r"^\s*Cluster size:\s*([0-9,]+)\s*$")
+            reserved_block_count = _grab_int(r"^\s*Reserved block count:\s*([0-9,]+)\s*$")
+            reserved_pct = _grab_int(r"^\s*Reserved block percentage:\s*([0-9,]+)")
+            overhead_clusters = _grab_int(r"^\s*Overhead clusters:\s*([0-9,]+)\s*$")
+
+            reserved_bytes = None
+            if reserved_block_count is not None and block_size is not None:
+                reserved_bytes = int(reserved_block_count) * int(block_size)
+                reserved_h = self._format_bytes_binary_with_metric(str(reserved_bytes))
+                pct_txt = f"{reserved_pct}%" if reserved_pct is not None else "-"
+                reserved_disp = f"{reserved_h} (rbc={_fmt_int(reserved_block_count)}, {pct_txt})"
+
+            meta_bytes = None
+            # Prefer ext4's explicit overhead clusters if available.
+            if overhead_clusters is not None:
+                unit = cluster_size if cluster_size is not None else block_size
+                if unit is not None:
+                    meta_bytes = int(overhead_clusters) * int(unit)
+            # Fallback: derive metadata remainder from size-used-avail minus reserve.
+            if meta_bytes is None:
+                size_b = _first_int_from_text(size_bytes_raw)
+                used_b = _first_int_from_text(fsused_bytes_raw)
+                avail_b = _first_int_from_text(fsavail_bytes_raw)
+                if size_b is not None and used_b is not None and avail_b is not None:
+                    rem = int(size_b) - int(used_b) - int(avail_b)
+                    if reserved_bytes is not None:
+                        rem -= int(reserved_bytes)
+                    meta_bytes = max(0, rem)
+
+            if meta_bytes is not None:
+                meta_h = self._format_bytes_binary_with_metric(str(meta_bytes))
+                meta_disp = f"{meta_h} (bc={_fmt_int(block_count)}, bs={_fmt_int(block_size)})"
+
+        except Exception:
+            reserved_disp = "-"
+            meta_disp = "-"
+
+        self._ext4_tune2fs_cache[key] = (reserved_disp, meta_disp)
+        return reserved_disp, meta_disp
 
     def _lsblk_list_value(self, row, col):
         """Return display value for list-mode cells."""
