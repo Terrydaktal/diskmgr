@@ -4677,6 +4677,22 @@ class DiskMgrShell(cmd.Cmd):
                 return Colors.OKCYAN
             return Colors.OKGREEN
 
+        def _norm_suffix(row, include_worst=False):
+            """Append normalized VALUE/THRESH (and WORST when requested)."""
+            if not row:
+                return ""
+            value = row.get('value', '-')
+            worst = row.get('worst', '-')
+            thresh = row.get('thresh', '-')
+            t_i = _first_int_from_text(thresh)
+            if include_worst:
+                if t_i is not None and t_i > 0:
+                    return f" (VALUE {value}, WORST {worst}, THRESH {thresh})"
+                return f" (VALUE {value}, WORST {worst})"
+            if t_i is not None and t_i > 0:
+                return f" (VALUE {value}, THRESH {thresh})"
+            return f" (VALUE {value})"
+
         def _fmt_smart_value(aid):
             # Single-line value formatting (no multi-line blocks).
             if aid == 188 and is_seagate and d188 and d188.get("raw_int") is not None and d188["raw_int"] > 0xFFFF:
@@ -4712,51 +4728,51 @@ class DiskMgrShell(cmd.Cmd):
                 return v
             if aid == 187:
                 raw_i = _first_int_from_text(raw)
-                v = f"{raw} (VALUE {row.get('value', '-')})"
+                v = f"{raw}{_norm_suffix(row)}"
                 return (_color_val('reported', raw_i if raw_i is not None else raw)) + v[len(str(raw_i if raw_i is not None else raw)):]
             if aid == 188:
                 raw_i = cmd188_timeouts or _first_int_from_text(raw)
-                v = f"{raw} (VALUE {row.get('value', '-')}, WORST {row.get('worst', '-')})"
+                v = f"{raw}{_norm_suffix(row, include_worst=True)}"
                 return (_color_val('timeout', raw_i if raw_i is not None else raw)) + v[len(str(raw_i if raw_i is not None else raw)):]
             if aid == 3:
-                return f"{Colors.OKGREEN}{raw}{Colors.ENDC} (VALUE {row.get('value', '-')})"
+                return f"{Colors.OKGREEN}{raw}{Colors.ENDC}{_norm_suffix(row)}"
             if aid == 193:
                 rv = _first_int_from_text(raw)
                 if rv is not None:
                     col = Colors.WARNING if rv > 300000 else Colors.OKGREEN
-                    return f"{col}{rv:,}{Colors.ENDC} (VALUE {row.get('value', '-')})"
-                return f"{Colors.OKGREEN}{raw}{Colors.ENDC} (VALUE {row.get('value', '-')})"
+                    return f"{col}{rv:,}{Colors.ENDC}{_norm_suffix(row)}"
+                return f"{Colors.OKGREEN}{raw}{Colors.ENDC}{_norm_suffix(row)}"
             if aid in (241, 242):
                 rv = _first_int_from_text(raw)
                 tb = _tb_from_lbas(rv) if rv is not None else None
                 if tb is not None:
-                    return f"{Colors.OKGREEN}{raw}{Colors.ENDC} (~{tb:.2f} TiB)"
-                return f"{Colors.OKGREEN}{raw}{Colors.ENDC}"
+                    return f"{Colors.OKGREEN}{raw}{Colors.ENDC} (~{tb:.2f} TiB){_norm_suffix(row)}"
+                return f"{Colors.OKGREEN}{raw}{Colors.ENDC}{_norm_suffix(row)}"
             if aid in (197, 198, 184):
                 raw_i = _first_int_from_text(raw)
                 v = str(raw)
                 kind = 'pending' if aid == 197 else 'unc'
                 if aid == 184:
                     kind = 'reported'
-                return _color_val(kind, raw_i if raw_i is not None else raw)
+                return _color_val(kind, raw_i if raw_i is not None else raw) + _norm_suffix(row)
             if aid in (199, 191, 254, 189, 192, 4, 12, 9, 240):
                 raw_i = _first_int_from_text(raw)
                 if aid in (199, 191, 254, 189, 192):
                     kind = 'crc' if aid == 199 else 'timeout'
                     # treat these as medium signals when non-zero
-                    return _color_val('timeout', raw_i if raw_i is not None else raw)
-                return f"{Colors.OKGREEN}{raw}{Colors.ENDC}"
+                    return _color_val('timeout', raw_i if raw_i is not None else raw) + _norm_suffix(row)
+                return f"{Colors.OKGREEN}{raw}{Colors.ENDC}{_norm_suffix(row)}"
             if aid in (190, 194):
                 raw_i = _first_int_from_text(raw)
                 if raw_i is None:
-                    return f"{Colors.OKGREEN}{raw}{Colors.ENDC}"
+                    return f"{Colors.OKGREEN}{raw}{Colors.ENDC}{_norm_suffix(row)}"
                 s = str(raw)
                 head = str(raw_i)
                 # Preserve the full raw field (including Min/Max etc) but color the leading temperature.
                 if s.startswith(head):
-                    return _color_val('temp', raw_i) + s[len(head):]
-                return _color_val('temp', raw_i)
-            return f"{Colors.OKGREEN}{raw}{Colors.ENDC}"
+                    return _color_val('temp', raw_i) + s[len(head):] + _norm_suffix(row)
+                return _color_val('temp', raw_i) + _norm_suffix(row)
+            return f"{Colors.OKGREEN}{raw}{Colors.ENDC}{_norm_suffix(row)}"
 
         rr_meaning = (
             "Seagate RAW is often packed; treat normalized VALUE trend as primary. diskmgr shows decoded ops+errors when possible."
