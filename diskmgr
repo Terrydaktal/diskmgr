@@ -5542,14 +5542,14 @@ class DiskMgrShell(cmd.Cmd):
                                 shown_pct = pct
                                 done_disp = self._format_bytes_binary(str(done_bytes), decimals=2)
                                 total_disp = self._format_bytes_binary(str(planned_bytes), decimals=2)
-                                print(f"Real progress: {pct:3d}% ({done_disp} / {total_disp})")
+                                print(f"Progress: {pct:3d}% ({done_disp} / {total_disp})")
                     elif line.strip():
                         print(line)
 
             rc_sync = proc.wait()
             if planned_bytes > 0 and shown_pct < 100 and rc_sync in (0, 24):
                 total_disp = self._format_bytes_binary(str(planned_bytes), decimals=2)
-                print(f"Real progress: 100% ({total_disp} / {total_disp})")
+                print(f"Progress: 100% ({total_disp} / {total_disp})")
 
             if rc_sync == 0:
                 log("Sync complete.")
