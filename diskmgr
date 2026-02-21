@@ -23,7 +23,7 @@ except ImportError:
 # Configuration
 MAP_FILENAME = 'diskmap.tsv'
 PASSGEN_BIN = 'passgen'
-VERSION = '3.1.7'
+VERSION = '3.2.0'
 HISTORY_FILE_ENV = 'DISKMGR_HISTORY'
 DEFAULT_HISTORY_FILE = Path.home() / '.local' / 'state' / 'diskmgr' / 'history'
 MAX_HISTORY_ENTRIES = 5000
@@ -1550,6 +1550,7 @@ class DiskMgrShell(cmd.Cmd):
             "NAME",
             "DEVICE",
             "TYPE",
+            "STATE",
             "FSTYPE",
             "FSVER",
             "FSLABEL",
@@ -2285,6 +2286,7 @@ class DiskMgrShell(cmd.Cmd):
                 mounts = ", ".join([m for m in mp if m])
             else:
                 mounts = str(mp or "")
+            mounts_clean = mounts.strip()
 
             # Persistent path: prefer IEEE identifier by-id links (WWN/EUI) when possible.
             pdp = "-"
@@ -2346,6 +2348,15 @@ class DiskMgrShell(cmd.Cmd):
                     fsused_bytes_raw=fsused_bytes_raw,
                     fsavail_bytes_raw=str(fsavail_raw or "").strip(),
                 )
+            fstype_l = str(fstype or "").strip().lower()
+            state = "-"
+            if fstype_l == "crypto_luks":
+                children = dev.get('children') or []
+                has_crypt_child = any((str(ch.get('type') or "").strip().lower() == "crypt") for ch in children if isinstance(ch, dict))
+                state = "OPEN" if has_crypt_child else "CLOSED"
+            elif fstype_l:
+                # Plain filesystem entries and open LUKS child filesystems.
+                state = "MOUNTED" if mounts_clean else "UNMOUNTED"
             rows.append({
                 "#": "-",
                 "KNAME": kname,
@@ -2354,6 +2365,7 @@ class DiskMgrShell(cmd.Cmd):
                 "DEVICE": tree_part,
                 "PERSISTENT PATH (IEEE)": pdp,
                 "TYPE": dtype,
+                "STATE": state,
                 "FSTAB": "y" if in_fstab else "n",
                 "SIZE": size,
                 "SIZE-BYTES": size_bytes_raw,
