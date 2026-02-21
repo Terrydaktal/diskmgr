@@ -5889,6 +5889,7 @@ class DiskMgrShell(cmd.Cmd):
         del_dirs = 0
         new_bytes = 0
         mod_bytes = 0
+        mod_transfer_bytes = 0
         del_bytes = 0
         pending_delete_paths = []
         modified_entries = []
@@ -5995,6 +5996,7 @@ class DiskMgrShell(cmd.Cmd):
                 mod_files += 1
                 total_upd += 1
                 modified_entries.append((relp, size_b))
+                mod_transfer_bytes += size_b
                 _add_subtree('upd', relp, seen, c)
                 continue
 
@@ -6003,6 +6005,7 @@ class DiskMgrShell(cmd.Cmd):
                 mod_files += 1
                 total_upd += 1
                 mod_bytes += size_b
+                mod_transfer_bytes += size_b
                 _add_subtree('upd', relp, seen, c)
                 _add_subtree_bytes('upd', relp, seen, cb, size_b)
                 _add_file_change('upd', relp, fc, fb, size_b)
@@ -6042,10 +6045,11 @@ class DiskMgrShell(cmd.Cmd):
         print(f"Deleted dirs:   {del_dirs}")
         print("-----------------------")
         print(f"New Data:       {new_bytes:,} bytes")
-        print(f"Updated Data:   {mod_bytes:,} bytes")
+        print(f"Updated Data:   {mod_bytes:,} bytes ({mod_transfer_bytes:,} bytes transferred)")
         print(f"Deleted Data:   {del_bytes:,} bytes")
         print("-----------------------")
-        print(f"Net Change:     {new_bytes + mod_bytes - del_bytes:,} bytes")
+        true_transfer_total = new_bytes + mod_transfer_bytes
+        print(f"Net Change:     {new_bytes + mod_bytes - del_bytes:,} bytes ({true_transfer_total:,} true transfer bytes)")
         print("")
 
         print("Rsync dry-run change summary by hierarchy")
