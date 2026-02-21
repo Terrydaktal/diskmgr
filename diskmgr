@@ -5478,8 +5478,15 @@ class DiskMgrShell(cmd.Cmd):
             
             cmd = ['rsync', '-avh', '--delete', '--info=progress2', src_path, dst_path]
             # Use sudo if mountpoints are owned by root
-            run_command(cmd, sudo=True, capture_output=False)
-            log("Sync complete.")
+            res_sync = run_command(cmd, sudo=True, capture_output=False, check=False)
+            rc_sync = getattr(res_sync, 'returncode', 0)
+            if rc_sync == 0:
+                log("Sync complete.")
+            elif rc_sync == 24:
+                log("Sync completed with warnings: some source files vanished during transfer (rsync exit 24).", 'WARN')
+                log("This is expected on active trees (e.g., browser cache, temp files). Re-run sync to converge.", 'WARN')
+            else:
+                log(f"Sync failed: rsync exited with status {rc_sync}.", 'ERROR')
         except Exception as e:
             log(f"Sync failed: {e}", 'ERROR')
         finally:
