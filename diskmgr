@@ -1101,7 +1101,7 @@ class DiskMgrShell(cmd.Cmd):
         print(f"  {Colors.OKGREEN}sync <pri_name> <sec_name>{Colors.ENDC}")
         print("      Syncs two mounted filesystems (rsync pri -> sec).")
         print("      Primary/source is copied FROM. Secondary/destination is replaced to match source.")
-        print("      Shows global rsync progress via --info=progress2.")
+        print("      Runs a dry-run pre-scan first and shows real progress from planned-bytes completed.")
         print("      Endpoints may be mapped names or absolute directory paths.")
         print("      For LUKS: resolves to payload filesystem when open; errors if locked/not mounted.")
         print(f"  {Colors.OKGREEN}diff <pri_name> <sec_name> [--depth N] [-d] [--fast] [--checksum]{Colors.ENDC}")
@@ -5406,8 +5406,9 @@ class DiskMgrShell(cmd.Cmd):
         1.  Validation: Verifies both endpoints resolve to directories.
             - Mapped names must already be mounted.
             - Absolute paths must exist and be directories.
-        2.  Confirmation: Requires solving two math problems (DESTRUCTIVE for secondary).
-        3.  Execution: Runs 'rsync -avh --delete --info=progress2 <primary_mnt>/ <secondary_mnt>/'.
+        2.  Pre-scan: Runs rsync dry-run stats to compute planned transfer bytes.
+        3.  Confirmation: Requires solving two math problems (DESTRUCTIVE for secondary).
+        4.  Execution: Runs rsync and reports real progress as bytes_done / planned_bytes.
         
         Note: The SECONDARY disk will be modified to match the PRIMARY disk.
         All files on the secondary that do not exist on the primary will be DELETED.
@@ -5462,24 +5463,94 @@ class DiskMgrShell(cmd.Cmd):
         except Exception:
             pass
 
-        print(f"Syncing: {Colors.BOLD}{pri_mnt}/{Colors.ENDC} -> {Colors.WARNING}{sec_mnt}/{Colors.ENDC}")
-        
+        # Ensure trailing slashes so rsync copies directory CONTENTS.
+        src_path = pri_mnt.rstrip('/') + '/'
+        dst_path = sec_mnt.rstrip('/') + '/'
+
+        print(f"Syncing: {Colors.BOLD}{src_path}{Colors.ENDC} -> {Colors.WARNING}{dst_path}{Colors.ENDC}")
+        run_command(['sudo', '-v'])
+
+        # Pre-scan before confirmation to compute planned bytes for stable progress.
+        log("Running pre-scan (dry-run) to compute planned transfer...")
+        pre_cmd = ['rsync', '-an', '--delete', '--stats', src_path, dst_path]
+        pre_res = run_command(pre_cmd, sudo=True, check=False)
+        pre_rc = getattr(pre_res, 'returncode', 0)
+        pre_out = (getattr(pre_res, 'stdout', '') or '') + "\n" + (getattr(pre_res, 'stderr', '') or '')
+        if pre_rc not in (0, 24):
+            log(f"Pre-scan failed: rsync exited with status {pre_rc}.", 'ERROR')
+            if pre_out.strip():
+                print(pre_out.rstrip())
+            return
+
+        def _parse_stat_int(label):
+            m = re.search(rf"^\s*{re.escape(label)}:\s*([0-9,]+)\b", pre_out, re.MULTILINE)
+            if not m:
+                return 0
+            try:
+                return int(m.group(1).replace(',', ''))
+            except Exception:
+                return 0
+
+        planned_bytes = _parse_stat_int("Total transferred file size")
+        planned_files = _parse_stat_int("Number of regular files transferred")
+        if planned_files <= 0:
+            planned_files = _parse_stat_int("Number of files transferred")
+        planned_deletes = _parse_stat_int("Number of deleted files")
+
+        print("Pre-scan summary (dry-run):")
+        print(f"  Planned file transfers: {planned_files:,}")
+        print(f"  Planned deletions:      {planned_deletes:,}")
+        print(f"  Planned transfer bytes: {planned_bytes:,} ({self._format_bytes_binary(str(planned_bytes), decimals=2)})")
+
         if not self.extensive_confirm(secondary):
             return
 
         run_command(['sudo', '-v'])
         log(f"Starting rsync: {primary} -> {secondary}...")
         start_ts = time.time()
-        
+
         try:
-            # Ensure trailing slashes for rsync to sync directory CONTENTS
-            src_path = pri_mnt.rstrip('/') + '/'
-            dst_path = sec_mnt.rstrip('/') + '/'
-            
-            cmd = ['rsync', '-avh', '--delete', '--info=progress2', src_path, dst_path]
-            # Use sudo if mountpoints are owned by root
-            res_sync = run_command(cmd, sudo=True, capture_output=False, check=False)
-            rc_sync = getattr(res_sync, 'returncode', 0)
+            cmd = [
+                'sudo', 'rsync', '-aHh', '--delete',
+                '--info=stats2,name0',
+                '--out-format=%l\t%n',
+                src_path, dst_path
+            ]
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1
+            )
+
+            done_bytes = 0
+            shown_pct = -1
+
+            if proc.stdout is not None:
+                for raw in proc.stdout:
+                    line = raw.rstrip('\n')
+                    m = re.match(r'^\s*([0-9,]+)\t(.*)$', line)
+                    if m:
+                        try:
+                            done_bytes += int(m.group(1).replace(',', ''))
+                        except Exception:
+                            pass
+                        if planned_bytes > 0:
+                            pct = int(min(100.0, (done_bytes * 100.0) / planned_bytes))
+                            if pct != shown_pct:
+                                shown_pct = pct
+                                done_disp = self._format_bytes_binary(str(done_bytes), decimals=2)
+                                total_disp = self._format_bytes_binary(str(planned_bytes), decimals=2)
+                                print(f"Real progress: {pct:3d}% ({done_disp} / {total_disp})")
+                    elif line.strip():
+                        print(line)
+
+            rc_sync = proc.wait()
+            if planned_bytes > 0 and shown_pct < 100 and rc_sync in (0, 24):
+                total_disp = self._format_bytes_binary(str(planned_bytes), decimals=2)
+                print(f"Real progress: 100% ({total_disp} / {total_disp})")
+
             if rc_sync == 0:
                 log("Sync complete.")
             elif rc_sync == 24:
