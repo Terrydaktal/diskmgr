@@ -875,10 +875,15 @@ class CmdArgumentParser(argparse.ArgumentParser):
 
 class DiskMgrShell(cmd.Cmd):
     intro = 'Welcome to diskmgr. Type help or ? to list commands.\n'
-    prompt = f'{Colors.OKGREEN}(diskmgr) {Colors.ENDC}'
+    prompt = '(diskmgr) '
     
     def __init__(self):
         super().__init__()
+        if readline is not None:
+            # Mark ANSI escapes as non-printing so readline cursor math stays correct.
+            self.prompt = f'\001{Colors.OKGREEN}\002(diskmgr) \001{Colors.ENDC}\002'
+        else:
+            self.prompt = f'{Colors.OKGREEN}(diskmgr) {Colors.ENDC}'
         self.mappings = read_luks_map()
         self.unmapped_cache = []
         self.id_cache = {}
