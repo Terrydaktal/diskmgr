@@ -23,7 +23,7 @@ except ImportError:
 # Configuration
 MAP_FILENAME = 'diskmap.tsv'
 PASSGEN_BIN = 'passgen'
-VERSION = '3.2.0'
+VERSION = '3.2.1'
 HISTORY_FILE_ENV = 'DISKMGR_HISTORY'
 DEFAULT_HISTORY_FILE = Path.home() / '.local' / 'state' / 'diskmgr' / 'history'
 MAX_HISTORY_ENTRIES = 5000
@@ -887,6 +887,7 @@ class DiskMgrShell(cmd.Cmd):
         self.mappings = read_luks_map()
         self.unmapped_cache = []
         self.id_cache = {}
+        self.missing_map_id_cache = {}
         self._ext4_tune2fs_cache = {}
         self.history_file = Path(os.environ.get(HISTORY_FILE_ENV, str(DEFAULT_HISTORY_FILE))).expanduser()
         self.history_enabled = False
@@ -1228,6 +1229,7 @@ class DiskMgrShell(cmd.Cmd):
         except Exception:
             friendly_map = {}
             missing_mappings = []
+        self.missing_map_id_cache = {}
 
         fstab_real_set, fstab_uuid_set, fstab_detail_real, fstab_detail_uuid = self._fstab_lookup()
         findmnt_lookup = self._findmnt_lookup()
@@ -1276,9 +1278,50 @@ class DiskMgrShell(cmd.Cmd):
             d_name = d.get('name', '')
             all_rows.extend(disk_rows.get(d_name, []))
 
+        missing_rows = []
+        missing_idx = idx
+        for friendly, target in missing_mappings:
+            rid = str(missing_idx)
+            missing_idx += 1
+            friendly_name = str(friendly or "")
+            target_path = str(target or "")
+            self.missing_map_id_cache[rid] = friendly_name
+            missing_rows.append({
+                "#": rid,
+                "KNAME": "",
+                "PKNAME": "",
+                "NAME": friendly_name,
+                "DEVICE": "-",
+                "PERSISTENT PATH (IEEE)": target_path,
+                "TYPE": "missing",
+                "STATE": "MISSING",
+                "FSTAB": "n",
+                "SIZE": "-",
+                "SIZE-BYTES": "",
+                "FSTYPE": "-",
+                "FSVER": "-",
+                "FSLABEL": "-",
+                "FSUUID": "-",
+                "PARTUUID": "-",
+                "FSAVAIL": "-",
+                "FSAVAIL-BYTES": "",
+                "FSUSE%": "-",
+                "FSRESERVED": "-",
+                "FSMETA": "-",
+                "FSUSED-BYTES": "",
+                "FSMOUNTPOINTS": "-",
+                "SOURCE": "-",
+                "FS-OPTIONS": "-",
+                "VFS-OPTIONS": "-",
+                "FS-USED": "-",
+                "MOUNTPOINT": "-",
+                "FSTAB ENTRY": "-",
+            })
+
         # Display rows: standard table needs different numeric formatting.
         display_disk_rows = disk_rows
         display_all_rows = all_rows
+        display_missing_rows = [dict(r) for r in missing_rows]
         if render_mode == 'table':
             display_disk_rows = {}
             display_all_rows = []
@@ -1327,12 +1370,15 @@ class DiskMgrShell(cmd.Cmd):
 
         widths_global = None
         if render_mode == 'table':
-            widths_global = self._lsblk_col_widths(display_all_rows, cols=selected_cols)
-            separator_width = max(1, self._lsblk_rendered_width(display_all_rows, widths=widths_global, cols=selected_cols))
+            width_rows = display_all_rows + display_missing_rows
+            widths_global = self._lsblk_col_widths(width_rows, cols=selected_cols)
+            separator_width = max(1, self._lsblk_rendered_width(width_rows, widths=widths_global, cols=selected_cols))
         else:
-            separator_width = max(1, self._lsblk_rendered_list_width(all_rows, cols=selected_cols))
+            width_rows = all_rows + missing_rows
+            separator_width = max(1, self._lsblk_rendered_list_width(width_rows, cols=selected_cols))
         separator_line = "-" * separator_width
 
+        list_entry_cursor = 1
         for disk in disks:
             d_name = disk['name']
             dev_path = f"/dev/{d_name}"
@@ -1388,7 +1434,8 @@ class DiskMgrShell(cmd.Cmd):
                     if rows:
                         print("")
                         if render_mode == 'list':
-                            self._print_lsblk_rows_list(rows, cols=selected_cols)
+                            self._print_lsblk_rows_list(rows, cols=selected_cols, start_index=list_entry_cursor)
+                            list_entry_cursor += len(rows)
                         else:
                             self._print_lsblk_rows(rows, widths=widths_global, cols=selected_cols)
                     print(separator_line)
@@ -1492,7 +1539,8 @@ class DiskMgrShell(cmd.Cmd):
                     rows = display_disk_rows.get(d_name, [])
                     if rows:
                         if render_mode == 'list':
-                            self._print_lsblk_rows_list(rows, cols=selected_cols)
+                            self._print_lsblk_rows_list(rows, cols=selected_cols, start_index=list_entry_cursor)
+                            list_entry_cursor += len(rows)
                         else:
                             self._print_lsblk_rows(rows, widths=widths_global, cols=selected_cols)
                 except Exception as e:
@@ -1501,6 +1549,16 @@ class DiskMgrShell(cmd.Cmd):
             except Exception as e:
                 print(f"\n{Colors.BOLD}Disk: {dev_path} ({model}){Colors.ENDC}")
                 log(f"Could not read layout for {dev_path}: {e}", 'WARN')
+        if display_missing_rows:
+            print(f"{Colors.HEADER}Non-present mappings ({get_map_file_path()}){Colors.ENDC}")
+            try:
+                if render_mode == 'list':
+                    self._print_lsblk_rows_list(display_missing_rows, cols=selected_cols, start_index=list_entry_cursor)
+                else:
+                    self._print_lsblk_rows(display_missing_rows, widths=widths_global, cols=selected_cols)
+            except Exception as e:
+                log(f"Could not render missing mappings: {e}", 'DEBUG')
+            print(separator_line)
         print("")
 
     def do_layout(self, arg):
@@ -1576,6 +1634,7 @@ class DiskMgrShell(cmd.Cmd):
             "NAME",
             "DEVICE",
             "TYPE",
+            "STATE",
             "FSTYPE",
             "FSLABEL",
             "FSUUID",
@@ -2553,12 +2612,12 @@ class DiskMgrShell(cmd.Cmd):
             line = "".join([_cell(str(r.get(c, '') or ''), widths[c]) for c in cols]).rstrip()
             print(line)
 
-    def _print_lsblk_rows_list(self, rows, cols=None):
+    def _print_lsblk_rows_list(self, rows, cols=None, start_index=1):
         """Print rows as list-style key/value entries."""
         if cols is None:
             cols = self._lsblk_verbose_cols()
         for i, r in enumerate(rows, start=1):
-            print(f"{Colors.BOLD}Entry {i}{Colors.ENDC}")
+            print(f"{Colors.BOLD}Entry {start_index + i - 1}{Colors.ENDC}")
 
             for c in cols:
                 print(f"  {c}: {self._lsblk_list_value(r, c)}")
@@ -3107,23 +3166,36 @@ class DiskMgrShell(cmd.Cmd):
 
         target, name = args
         self.mappings = read_luks_map() # Refresh
-        
-        # 1. Check for Rename (target is a mapping name)
+
+        clean_target = target.strip('[]')
+        old_name = None
+        real_target = None
+
+        # 1. Rename by current mapping name.
         if target in self.mappings:
+            old_name = target
             real_target = self.mappings[target]
             log(f"Renaming mapping {target} -> {name}")
-            del self.mappings[target]
         else:
-            # 2. Check for New Map (target is a discovery ID)
+            # 2. Rename by missing-mapping list ID (#N) from latest `list`.
+            if clean_target.startswith('#') and clean_target[1:].isdigit():
+                missing_old = self.missing_map_id_cache.get(clean_target[1:])
+                if missing_old and missing_old in self.mappings:
+                    old_name = missing_old
+                    real_target = self.mappings[missing_old]
+                    log(f"Renaming missing mapping {missing_old} -> {name}")
+
+        # 3. New map (target is a normal discovery ID/path).
+        if real_target is None:
             real_target = self.resolve_target(target)
             if not real_target:
                 log(f"Invalid target: '{target}'. Use a Discovery ID (e.g., [#1]) or an existing name.", 'ERROR')
                 return
             log(f"Resolved {target} -> {real_target}")
-        
-        if name in self.mappings:
-             log(f"Mapping '{name}' already exists.", 'ERROR')
-             return
+
+        if name in self.mappings and name != old_name:
+            log(f"Mapping '{name}' already exists.", 'ERROR')
+            return
 
         # Collision Prevention: Prevent names that look like IDs
         clean_name = name.strip('[]')
@@ -3135,6 +3207,8 @@ class DiskMgrShell(cmd.Cmd):
             log(f"Invalid name: '{name}'. Names cannot be simple numbers or match discovery ID formats like '#1'.", 'ERROR')
             return
 
+        if old_name and old_name in self.mappings:
+            del self.mappings[old_name]
         self.mappings[name] = real_target
         save_luks_map(self.mappings)
         log(f"Mapping saved: {name} -> {real_target}")
