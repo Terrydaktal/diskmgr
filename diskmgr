@@ -920,6 +920,32 @@ class DiskMgrShell(cmd.Cmd):
             # Best-effort: do not block shell exit on history write errors.
             pass
 
+    def _input_no_history(self, prompt):
+        """
+        Read one line from stdin without leaving the entered text in readline history.
+        Used for confirmation/math answers so command history stays clean.
+        """
+        if readline is None:
+            return input(prompt)
+
+        try:
+            before = int(readline.get_current_history_length() or 0)
+        except Exception:
+            before = 0
+
+        try:
+            val = input(prompt)
+        finally:
+            # Best-effort: strip any entries added during this prompt.
+            try:
+                after = int(readline.get_current_history_length() or 0)
+                while after > before:
+                    readline.remove_history_item(after - 1)
+                    after -= 1
+            except Exception:
+                pass
+        return val
+
     def get_disk_info(self):
         # Use lsblk -J for JSON output
         cmd = ['lsblk', '-J', '-e', '7', '-o', 'NAME,KNAME,TYPE,RM,SIZE,FSTYPE,LABEL,MOUNTPOINT,MODEL,WWN,PKNAME,TRAN,DISC-MAX']
@@ -2979,7 +3005,7 @@ class DiskMgrShell(cmd.Cmd):
                 ans = a - b
             
             try:
-                user_ans = input(f"Question {i+1}/2: What is {a} {op} {b}? ")
+                user_ans = self._input_no_history(f"Question {i+1}/2: What is {a} {op} {b}? ")
                 if not user_ans or int(user_ans) != ans:
                     log("Incorrect answer. Aborting operation.", 'ERROR')
                     return False
