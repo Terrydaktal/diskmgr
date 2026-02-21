@@ -5449,21 +5449,15 @@ class DiskMgrShell(cmd.Cmd):
         if not pri_mnt or not sec_mnt:
             return
 
-        # Block syncing to/from the system root drive.
+        # Block syncing TO the system root drive (destination only).
+        # Source on root is allowed for backup use-cases like /home -> external disk.
         try:
             if sec_kind == 'mapping':
                 res_s = run_command(['findmnt', '-rn', '-M', sec_mnt, '-o', 'SOURCE'], check=False)
             else:
                 res_s = run_command(['findmnt', '-rn', '-T', sec_mnt, '-o', 'SOURCE'], check=False)
             sec_src = (getattr(res_s, 'stdout', '') or '').strip()
-            if pri_kind == 'mapping':
-                res_p = run_command(['findmnt', '-rn', '-M', pri_mnt, '-o', 'SOURCE'], check=False)
-            else:
-                res_p = run_command(['findmnt', '-rn', '-T', pri_mnt, '-o', 'SOURCE'], check=False)
-            pri_src = (getattr(res_p, 'stdout', '') or '').strip()
             if sec_src and self._block_if_root_drive(os.path.realpath(sec_src), f"sync {primary} {secondary}"):
-                return
-            if pri_src and self._block_if_root_drive(os.path.realpath(pri_src), f"sync {primary} {secondary}"):
                 return
         except Exception:
             pass
