@@ -3,15 +3,22 @@ import re
 import subprocess
 
 def strip_ansi(text):
-    """Strip ANSI escape sequences from text."""
-    return re.sub(r'\x1b\[([0-9,;]*[mGJKHF])', '', text)
+    """Strip ANSI escape sequences and invisible control characters from text."""
+    # Robust ANSI sequence stripper
+    ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+    text = ansi_escape.sub('', text)
+    # Strip \x01 and \x02 (often used as prompt delimiters)
+    text = re.sub(r'[\x01\x02]', '', text)
+    return text
 
 def get_help(cmd_name=None):
     """Run diskmgr help and return the cleaned output."""
     cmd = ["./diskmgr"]
     input_str = f"help {cmd_name}\nexit\n" if cmd_name else "help\nexit\n"
     try:
-        res = subprocess.run(cmd, input=input_str, capture_output=True, text=True, timeout=10)
+        env = os.environ.copy()
+        env['LC_ALL'] = 'C.UTF-8'
+        res = subprocess.run(cmd, input=input_str, capture_output=True, text=True, timeout=10, env=env)
         return strip_ansi(res.stdout)
     except Exception as e:
         return f"Error capturing help: {e}"
@@ -21,7 +28,9 @@ def get_example(cmd_name):
     cmd = ["./diskmgr"]
     input_str = f"{cmd_name}\nexit\n"
     try:
-        res = subprocess.run(cmd, input=input_str, capture_output=True, text=True, timeout=15)
+        env = os.environ.copy()
+        env['LC_ALL'] = 'C.UTF-8'
+        res = subprocess.run(cmd, input=input_str, capture_output=True, text=True, timeout=15, env=env)
         return strip_ansi(res.stdout)
     except Exception as e:
         return ""
@@ -44,7 +53,15 @@ def clean_diskmgr_output(raw_content):
                 content_lines.append(clean_line)
         else:
             content_lines.append(line.rstrip())
-    return "\n".join(content_lines).strip()
+    
+    # Optional: replace common UTF-8 symbols with ASCII if they cause issues for the user
+    result = "\n".join(content_lines).strip()
+    result = result.replace('≈', '~')
+    result = result.replace('├─', '|--')
+    result = result.replace('└─', '`--')
+    result = result.replace('│', '|')
+    
+    return result
 
 def main():
     commands = [
@@ -61,10 +78,10 @@ def main():
     readme_content += "## Project Structure\n\n"
     readme_content += "```text\n"
     readme_content += ".\n"
-    readme_content += "├── diskmap.tsv      # Configuration file storing disk mappings\n"
-    readme_content += "├── diskmgr          # Main Python-based interactive CLI tool\n"
-    readme_content += "├── gen_readme.py    # Script to regenerate this documentation\n"
-    readme_content += "└── README.md        # This file\n"
+    readme_content += "|-- diskmap.tsv      # Configuration file storing disk mappings\n"
+    readme_content += "|-- diskmgr          # Main Python-based interactive CLI tool\n"
+    readme_content += "|-- gen_readme.py    # Script to regenerate this documentation\n"
+    readme_content += "`-- README.md        # This file\n"
     readme_content += "```\n\n"
 
     # File Descriptions

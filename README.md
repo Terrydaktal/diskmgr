@@ -6,10 +6,10 @@ A utility designed to simplify the management of encrypted and plain removable m
 
 ```text
 .
-├── diskmap.tsv      # Configuration file storing disk mappings
-├── diskmgr          # Main Python-based interactive CLI tool
-├── gen_readme.py    # Script to regenerate this documentation
-└── README.md        # This file
+|-- diskmap.tsv      # Configuration file storing disk mappings
+|-- diskmgr          # Main Python-based interactive CLI tool
+|-- gen_readme.py    # Script to regenerate this documentation
+`-- README.md        # This file
 ```
 
 ## File Descriptions
@@ -31,7 +31,6 @@ A utility designed to simplify the management of encrypted and plain removable m
 ## Overview
 
 ```text
-
 A utility to manage mapped disks/partitions, encrypted containers, and filesystems.
 Mappings point to persistent device paths so names remain stable across reboots/ports.
 
@@ -145,13 +144,12 @@ shell:
       Command history persists across sessions in /home/lewis/.local/state/diskmgr/history (override with $DISKMGR_HISTORY).
   exit / quit / Ctrl+D
       Exit the application.
-
 ```
 
 ## Command Reference: `list`
 
 ```text
-Display the physical partition layout and free space for all plugged-in disks.
+Display the physical partition layout and free space for all plugged-in disks.
         Usage:
           list            -> standard table (default)
           list verbose    -> verbose key/value entries (alias: list list)
@@ -166,70 +164,23 @@ shell:
             - Adds GPT metadata blocks (Primary/Backup) if applicable.
             - Identifies 'free' space segments.
             - Calculates MiB and GiB values from sector counts.
-
-
-```
-
-### Example Output
-
-```text
-Disk: /dev/sda (ST1000LM024 HN-M101MBB) [none] [Sector: L512/P4096] [Total Sectors: 1953525168]
-[ sda crypto_LUKS 1953525168s (953869.71MiB ≈ 931.5GiB) ]
-
- #   NAME  DEVICE       TYPE     STATE    FSTYPE       FSLABEL  FSUUID                                SIZE        FSAVAIL      FSMOUNTPOINTS    PERSISTENT PATH (IEEE)
- 1   2a    sda          disk     CLOSED   crypto_LUKS           d3d6abb8-223b-4d02-b72f-e1ccda3aad00  931.51 GiB                                /dev/disk/by-id/wwn-0x50004cf20836ca17
----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-
-Disk: /dev/sdb (ST2000DM008-2FR102) [none] [Sector: L512/P4096] [Total Sectors: 3907029168]
-[ sdb crypto_LUKS 3907029168s (1907729.09MiB ≈ 1863.0GiB (1.819 TiB)) ]
-
- #   NAME  DEVICE       TYPE     STATE    FSTYPE       FSLABEL  FSUUID                                SIZE        FSAVAIL      FSMOUNTPOINTS    PERSISTENT PATH (IEEE)
- 2   1b    sdb          disk     OPEN     crypto_LUKS           885a66c1-6d5f-4d24-adfd-e7c7975dfe65  1.82 TiB                                  /dev/disk/by-id/wwn-0x5000c500e31e6cb2
- 3   -     └─dm-1 (1b)  crypt    MOUNTED  btrfs        1b       08aad883-1143-4d5d-84b9-d715665e332a  1.82 TiB    1.07 TiB     /media/lewis/1b  -
----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-
-Disk: /dev/nvme0n1 (WD_BLACK SN8100 2000GB) [msdos] [Sector: L512/P512] [Total Sectors: 3907029168]
-[ MBR 2s (1024.00B) ] [ free 2046s (1023.00KiB) ] [ nvme0n1p1 ext4 3907026944s (1907728.00MiB ≈ 1863.0GiB (1.819 TiB)) (boot) ] [ free 176s (88.00KiB) ]
-
- #   NAME  DEVICE       TYPE     STATE    FSTYPE       FSLABEL  FSUUID                                SIZE        FSAVAIL      FSMOUNTPOINTS    PERSISTENT PATH (IEEE)
- 4   -     nvme0n1      disk     -                                                                    1.82 TiB                                  /dev/disk/by-id/nvme-eui.e8238fa6bf530001001b448b42d60852
- 5   os    └─nvme0n1p1  part     MOUNTED  ext4                  88f1dad3-95c6-418e-bea8-f5f3e072ea29  1.82 TiB    1005.26 GiB  /                /dev/disk/by-id/nvme-eui.e8238fa6bf530001001b448b42d60852-part1
----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-
-Disk: /dev/nvme1n1 (WD Blue SN570 1TB) [msdos] [Sector: L512/P512] [Total Sectors: 1953525168]
-[ MBR 2s (1024.00B) ] [ free 2046s (1023.00KiB) ] [ nvme1n1p1 ext4 1953523120s (953868.71MiB ≈ 931.5GiB) ]
-
- #   NAME  DEVICE       TYPE     STATE    FSTYPE       FSLABEL  FSUUID                                SIZE        FSAVAIL      FSMOUNTPOINTS    PERSISTENT PATH (IEEE)
- 6   -     nvme1n1      disk     -                                                                    931.51 GiB                                /dev/disk/by-id/nvme-eui.e8238fa6bf530001001b444a49598af9
- 7   data  └─nvme1n1p1  part     MOUNTED  ext4         data     72c22012-b161-4e2a-a762-94ff7fda47f9  931.51 GiB  435.34 GiB   /mnt/data        /dev/disk/by-id/nvme-eui.e8238fa6bf530001001b444a49598af9-part1
----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-Non-present mappings (/home/lewis/Dev/diskmgr/diskmap.tsv)
- #   NAME  DEVICE       TYPE     STATE    FSTYPE       FSLABEL  FSUUID                                SIZE        FSAVAIL      FSMOUNTPOINTS    PERSISTENT PATH (IEEE)
- 8   1a    -            missing  MISSING  -            -        -                                     -           -            -                /dev/disk/by-id/wwn-0x5000c500a89d6e44-part2
- 9   2b    -            missing  MISSING  -            -        -                                     -           -            -                /dev/disk/by-id/wwn-0x5000cca8c0d68e12
- 10  3a    -            missing  MISSING  -            -        -                                     -           -            -                /dev/disk/by-id/wwn-0x5000c500ab9fa51b
----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-
-
 ```
 
 ## Command Reference: `boot`
 
 ```text
-Display boot entries from GRUB and fstab detection for each partition.
+Display boot entries from GRUB and fstab detection for each partition.
 
         UNDER THE HOOD:
         Scans partition devices. If mounted, it parses /boot/grub/grub.cfg
         and checks for /etc/fstab inside that mounted partition.
         If unmounted or encrypted, it explains why it cannot yet read the config.
-
-
 ```
 
 ## Command Reference: `map`
 
 ```text
-Create or modify a persistent mapping: map <name/id> <name>
+Create or modify a persistent mapping: map <name/id> <name>
 
         Usage:
           map [#1] backup    Assigns friendly name to discovery ID (e.g., map #1 backup)
@@ -246,14 +197,12 @@ Non-present mappings (/home/lewis/Dev/diskmgr/diskmap.tsv)
         4.  Persistence: Writes the [Name <TAB> PDP] pair to diskmap.tsv.
 
         This ensures the disk is recognized correctly regardless of USB port or device node changes.
-
-
 ```
 
 ## Command Reference: `unmap`
 
 ```text
-Remove a persistent mapping: unmap <name/id>
+Remove a persistent mapping: unmap <name/id>
 
         UNDER THE HOOD:
         1.  Resolution:
@@ -261,14 +210,12 @@ Non-present mappings (/home/lewis/Dev/diskmgr/diskmap.tsv)
             - ID mode (#N): resolves to a device and removes mapping(s) pointing to that device.
         2.  Removal: Deletes the [Name <TAB> PDP] pair(s) from the internal dictionary.
         3.  Persistence: Re-writes diskmap.tsv with the mapping(s) removed.
-
-
 ```
 
 ## Command Reference: `create`
 
 ```text
-Create partition table or partition on a whole disk: create <name/id> [--gpt|--mbr] [--partition] [--start X] [--end Y]
+Create partition table or partition on a whole disk: create <name/id> [--gpt|--mbr] [--partition] [--start X] [--end Y]
 
         Scope:
           - Whole disks only (not partitions).
@@ -290,14 +237,12 @@ Non-present mappings (/home/lewis/Dev/diskmgr/diskmap.tsv)
           create 1b --partition
           create 1b --partition --start 500GiB --end 100%
           create #4 --mbr --partition
-
-
 ```
 
 ## Command Reference: `format`
 
 ```text
-Format a superfloppy disk/partition volume: format <name/id> [options]
+Format a superfloppy disk/partition volume: format <name/id> [options]
 
         Note: You must 'map' a disk first to give it a name before initializing it.
 
@@ -332,14 +277,12 @@ Non-present mappings (/home/lewis/Dev/diskmgr/diskmap.tsv)
         5.  Persistence: Adds the new disk's PDP to diskmap.tsv automatically (best-effort).
 
         Note: This is a DESTRUCTIVE operation. Solving two math problems is MANDATORY to proceed.
-
-
 ```
 
 ## Command Reference: `erase`
 
 ```text
-Fast metadata wipe (soft erase): erase <name/id> [--soft]
+Fast metadata wipe (soft erase): erase <name/id> [--soft]
 
         This is a fast "re-provisioning" wipe. It removes recognizable signatures and zaps GPT/MBR metadata
         (when the target is a whole disk). It is NOT a secure wipe.
@@ -350,14 +293,12 @@ Non-present mappings (/home/lewis/Dev/diskmgr/diskmap.tsv)
           - sfdisk (MBR)
 
         Note: This is a DESTRUCTIVE operation. Solving two math problems is MANDATORY to proceed.
-
-
 ```
 
 ## Command Reference: `nuke`
 
 ```text
-Securely erase a disk: nuke <name/id>
+Securely erase a disk: nuke <name/id>
 
         Note: You must 'map' a disk first to give it a name before erasing it.
 
@@ -386,54 +327,46 @@ Non-present mappings (/home/lewis/Dev/diskmgr/diskmap.tsv)
         Note: This is a DESTRUCTIVE operation. Solving two math problems is MANDATORY to proceed.
 
         WARNING: This operation is IRREVERSIBLE.
-
-
 ```
 
 ## Command Reference: `remove`
 
 ```text
-Remove a partition from its parent disk: remove <name/id>
+Remove a partition from its parent disk: remove <name/id>
 
         Scope:
           - Partition targets only.
           - Whole-disk targets are refused.
-
-
 ```
 
 ## Command Reference: `selftest`
 
 ```text
-Start a SMART long self-test: selftest <name/id>
+Start a SMART long self-test: selftest <name/id>
 
         Runs smartctl long test against the underlying DISK device for the mapping.
         - If the mapping points to a partition, diskmgr targets the parent disk.
         - If the disk transport is USB and the device is /dev/sdX, diskmgr uses:
               smartctl -d sat -t long /dev/sdX
           (common for USB-SATA bridges).
-
-
 ```
 
 ## Command Reference: `health`
 
 ```text
-Display SMART health for a mapped disk: health <name/id>
+Display SMART health for a mapped disk: health <name/id>
 
         Runs smartctl against the underlying DISK device for the mapping.
         - If the mapping points to a partition, diskmgr automatically targets the parent disk.
         - If the disk transport is USB and the device is /dev/sdX, diskmgr uses:
               smartctl -d sat -x /dev/sdX
           (common for USB-SATA bridges).
-
-
 ```
 
 ## Command Reference: `clone`
 
 ```text
-Clone one disk or partition to another: clone <src_name/id> <dst_name/id>
+Clone one disk or partition to another: clone <src_name/id> <dst_name/id>
 
         WARNING (DATA DESTRUCTION):
         - This command writes directly to the destination block device (like running ddrescue/dd).
@@ -488,14 +421,12 @@ Non-present mappings (/home/lewis/Dev/diskmgr/diskmap.tsv)
         - Source is MAPPER (e.g., clone dm-0 sdb):
           Performs a "Strip-and-Clone." The destination receives RAW DECRYPTED
           DATA. The resulting clone will be completely UNENCRYPTED.
-
-
 ```
 
 ## Command Reference: `open`
 
 ```text
-Unlock (if encrypted) and mount a disk: open <name/id>
+Unlock (if encrypted) and mount a disk: open <name/id>
 
         UNDER THE HOOD:
         1.  Identity Resolution: Looks up the friendly name in diskmap.tsv.
@@ -523,14 +454,12 @@ Non-present mappings (/home/lewis/Dev/diskmgr/diskmap.tsv)
           lives on a partition (e.g. /dev/sda2), diskmgr will only auto-select a partition when
           it is unambiguous (exactly one candidate). Otherwise it will refuse and ask you to map
           the correct partition explicitly.
-
-
 ```
 
 ## Command Reference: `close`
 
 ```text
-Unmount and lock (if encrypted) a disk: close <name/id>
+Unmount and lock (if encrypted) a disk: close <name/id>
 
         UNDER THE HOOD:
         1.  Unmounting (Encrypted & Plain):
@@ -541,28 +470,24 @@ Non-present mappings (/home/lewis/Dev/diskmgr/diskmap.tsv)
             - Commands the kernel to wipe encryption keys from RAM.
             - Removes the virtual cleartext device from /dev/mapper/.
         3.  Audit: Checks and displays remaining active mappings for security awareness.
-
-
 ```
 
 ## Command Reference: `luks`
 
 ```text
-LUKS encryption management: luks <passwd|backup|restore|header> [options]
+LUKS encryption management: luks <passwd|backup|restore|header> [options]
 
         Subcommands:
           passwd <name>           Change the LUKS passphrase.
           backup <name> [file]    Save the LUKS header to a file.
           restore <name> <file>   Restore the LUKS header from a file (Destructive).
           header <name>           Print the current LUKS header (cryptsetup luksDump).
-
-
 ```
 
 ## Command Reference: `label`
 
 ```text
-Get or set the filesystem label of an OPEN disk: label <name> [new_label] [--fstab]
+Get or set the filesystem label of an OPEN disk: label <name> [new_label] [--fstab]
 
         UNDER THE HOOD:
         1.  Validation: Verifies that the disk is currently open/unlocked.
@@ -576,14 +501,12 @@ Non-present mappings (/home/lewis/Dev/diskmgr/diskmap.tsv)
             - Adds UUID-based entry with mountpoint /mnt/<new_label>.
 
         The label is written directly to the disk hardware and persists across different computers.
-
-
 ```
 
 ## Command Reference: `remount`
 
 ```text
-Remount an OPEN disk to its label mountpoint: remount <name>
+Remount an OPEN disk to its label mountpoint: remount <name>
 
         This fixes "mounted twice" and "data1/data2 suffix" issues by moving the mount
         to the canonical path: /mnt/<label> when the device has an /etc/fstab entry;
@@ -605,14 +528,12 @@ Non-present mappings (/home/lewis/Dev/diskmgr/diskmap.tsv)
         5.  Cleanup: Removes empty old mountpoint directories under /media/$USER (best-effort rmdir).
         6.  Mount: Uses fstab mount when present; otherwise direct mount to LABEL path.
             For btrfs, compression is enforced (compress=zstd:3).
-
-
 ```
 
 ## Command Reference: `sync`
 
 ```text
-Synchronize two filesystems: sync <primary> <secondary>
+Synchronize two filesystems: sync <primary> <secondary>
 
         UNDER THE HOOD:
         1.  Validation: Verifies both endpoints resolve to directories.
@@ -623,27 +544,23 @@ Non-present mappings (/home/lewis/Dev/diskmgr/diskmap.tsv)
 
         Note: The SECONDARY disk will be modified to match the PRIMARY disk.
         All files on the secondary that do not exist on the primary will be DELETED.
-
-
 ```
 
 ## Command Reference: `diff`
 
 ```text
-Preview differences between two mounted filesystems: diff <primary_name> <secondary_name> [--depth N] [-d] [--fast] [--checksum]
+Preview differences between two mounted filesystems: diff <primary_name> <secondary_name> [--depth N] [-d] [--fast] [--checksum]
 
         Endpoints may be mapping names/IDs (must be mounted) or absolute directory paths.
         Uses rsync dry-run itemized output (primary -> secondary) and prints:
         1) Change counts and byte estimates (created/modified/deleted, net change).
         2) Hierarchy summary by subtree up to --depth levels.
-
-
 ```
 
 ## Command Reference: `defrag`
 
 ```text
-Defragment a mounted filesystem: defrag <name> [--compress]
+Defragment a mounted filesystem: defrag <name> [--compress]
 
         UNDER THE HOOD:
         1.  Validation: Verifies the disk is mapped and currently mounted.
@@ -656,14 +573,12 @@ Non-present mappings (/home/lewis/Dev/diskmgr/diskmap.tsv)
                      then 'sudo btrfs balance start -dusage=50 <mountpoint>'
         4.  Recording: Stores a timestamp on the mountpoint root via:
               sudo setfattr -n user.last_defrag -v "<date>" <mountpoint>
-
-
 ```
 
 ## Command Reference: `fshealth`
 
 ```text
-Filesystem health/diagnostics: fshealth <name>
+Filesystem health/diagnostics: fshealth <name>
 
         Shows filesystem-specific diagnostic output and local "maintenance" timestamps.
 
@@ -679,14 +594,12 @@ Non-present mappings (/home/lewis/Dev/diskmgr/diskmap.tsv)
 
         Also reads xattrs from the mountpoint root:
           user.last_defrag, user.last_scrub
-
-
 ```
 
 ## Command Reference: `scrub`
 
 ```text
-Scrub a mounted btrfs filesystem: scrub <name> [--no-watch]
+Scrub a mounted btrfs filesystem: scrub <name> [--no-watch]
 
         UNDER THE HOOD:
         1.  Validation: Verifies the disk is mapped and currently mounted.
@@ -702,28 +615,23 @@ Non-present mappings (/home/lewis/Dev/diskmgr/diskmap.tsv)
           to resolve those to paths via:
             btrfs inspect-internal logical-resolve <logical> <mountpoint>
             btrfs inspect-internal inode-resolve <ino> <mountpoint>
-
-
 ```
 
 ## Command Reference: `version`
 
 ```text
-Print diskmgr version
-
+Print diskmgr version
 ```
 
 ## Command Reference: `convert`
 
 ```text
-Convert ext4 -> btrfs in place (no data copy): convert <name/id>
+Convert ext4 -> btrfs in place (no data copy): convert <name/id>
 
         Uses btrfs-convert on an UNMOUNTED ext4 filesystem.
         - Plain ext4 targets are supported directly.
         - If target is crypto_LUKS, diskmgr tries to resolve the open payload device
           (e.g. /dev/mapper/<name> or a crypt child) and convert that.
-
-
 ```
 
 ## Configuration
