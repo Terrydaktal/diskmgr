@@ -25,7 +25,7 @@ except ImportError:
 # Configuration
 MAP_FILENAME = 'diskmap.tsv'
 PASSGEN_BIN = 'passgen'
-VERSION = '3.3.0'
+VERSION = '3.3.3'
 HISTORY_FILE_ENV = 'DISKMGR_HISTORY'
 DEFAULT_HISTORY_FILE = Path.home() / '.local' / 'state' / 'diskmgr' / 'history'
 MAX_HISTORY_ENTRIES = 5000
@@ -5608,10 +5608,10 @@ class DiskMgrShell(cmd.Cmd):
                     dt = max(now - last_ts, 1e-6)
                     speed = (cur_bytes - last_bytes) / dt
                     if planned_bytes > 0:
-                        pct = int(min(100.0, (cur_bytes * 100.0) / planned_bytes))
+                        pct = min(100.0, (cur_bytes * 100.0) / planned_bytes)
                         cur_disp = self._format_bytes_binary(str(cur_bytes), decimals=2)
                         total_disp = self._format_bytes_binary(str(planned_bytes), decimals=2)
-                        print(f"Progress: {pct:3d}% ({cur_disp} / {total_disp}) | Speed: {_fmt_speed_bps(speed)}/s", flush=True)
+                        print(f"Progress: {pct:6.2f}% ({cur_disp} / {total_disp}) | Speed: {_fmt_speed_bps(speed)}/s", flush=True)
                     else:
                         cur_disp = self._format_bytes_binary(str(cur_bytes), decimals=2)
                         print(f"Progress: ---% ({cur_disp}) | Speed: {_fmt_speed_bps(speed)}/s", flush=True)
@@ -5641,10 +5641,10 @@ class DiskMgrShell(cmd.Cmd):
             with progress_lock:
                 final_done = int(done_bytes)
             if planned_bytes > 0:
-                pct = int(min(100.0, (final_done * 100.0) / planned_bytes))
+                pct = min(100.0, (final_done * 100.0) / planned_bytes)
                 cur_disp = self._format_bytes_binary(str(final_done), decimals=2)
                 total_disp = self._format_bytes_binary(str(planned_bytes), decimals=2)
-                print(f"Progress: {pct:3d}% ({cur_disp} / {total_disp}) | Speed: 0 B/s", flush=True)
+                print(f"Progress: {pct:6.2f}% ({cur_disp} / {total_disp}) | Speed: 0 B/s", flush=True)
             else:
                 cur_disp = self._format_bytes_binary(str(final_done), decimals=2)
                 print(f"Progress: ---% ({cur_disp}) | Speed: 0 B/s", flush=True)
