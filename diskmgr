@@ -14,6 +14,8 @@ import shutil
 import datetime
 import threading
 import atexit
+import pwd
+import grp
 from pathlib import Path
 try:
     import readline
@@ -23,7 +25,7 @@ except ImportError:
 # Configuration
 MAP_FILENAME = 'diskmap.tsv'
 PASSGEN_BIN = 'passgen'
-VERSION = '3.2.8'
+VERSION = '3.3.0'
 HISTORY_FILE_ENV = 'DISKMGR_HISTORY'
 DEFAULT_HISTORY_FILE = Path.home() / '.local' / 'state' / 'diskmgr' / 'history'
 MAX_HISTORY_ENTRIES = 5000
@@ -1063,6 +1065,7 @@ class DiskMgrShell(cmd.Cmd):
         print("      then mkfs the decrypted payload filesystem inside the LUKS container.")
         print("      Whole disks must be unpartitioned. format never creates, deletes, resizes, or moves partitions;")
         print("      it only writes a filesystem/LUKS+filesystem inside the selected disk or partition target.")
+        print("      Newly created filesystem roots are chowned to the invoking user.")
         print("      Use: erase <name> first if the whole disk is currently partitioned.")
         print(f"  {Colors.OKGREEN}erase <name/id>{Colors.ENDC}")
         print("      Fast metadata wipe for re-provisioning (wipefs + zap GPT/MBR metadata) on disk/part.")
@@ -1945,6 +1948,43 @@ class DiskMgrShell(cmd.Cmd):
 
         if dev_fstype == 'btrfs' or use_fstab:
             self._ensure_btrfs_compression_on_mount(mountpoint)
+
+    def _invoking_user_group(self):
+        """
+        Return (user, group) for ownership operations.
+        Prefer the invoking non-root user when diskmgr itself is launched via sudo.
+        """
+        user = (os.environ.get('SUDO_USER') or os.environ.get('USER') or '').strip()
+        if user:
+            try:
+                pw = pwd.getpwnam(user)
+                gid = int(pw.pw_gid)
+                try:
+                    group = grp.getgrgid(gid).gr_name
+                except KeyError:
+                    group = str(gid)
+                return user, group
+            except Exception:
+                pass
+
+        uid = os.getuid()
+        gid = os.getgid()
+        return str(uid), str(gid)
+
+    def _chown_new_filesystem_root(self, mountpoint):
+        """
+        Set ownership of a newly-created filesystem root directory to the invoking user.
+        Non-recursive by design.
+        """
+        mp = str(mountpoint or '').strip()
+        if not mp:
+            return
+        user, group = self._invoking_user_group()
+        try:
+            run_command(['chown', f'{user}:{group}', mp], sudo=True, check=False)
+            log(f"Set new filesystem ownership: {mp} -> {user}:{group}")
+        except Exception as e:
+            log(f"Could not set ownership on new filesystem root {mp}: {e}", 'WARN')
 
     def _desired_fstab_options(self, label, fstype=None):
         gvfs_name = str(label or "").replace(",", "_")
@@ -7337,6 +7377,7 @@ class DiskMgrShell(cmd.Cmd):
                 return
 
         self._mount_device(fs_target, mountpoint, use_fstab=use_fstab_mount)
+        self._chown_new_filesystem_root(mountpoint)
 
         # Update map if needed
         self.mappings = read_luks_map()
