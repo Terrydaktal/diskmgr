@@ -1298,6 +1298,7 @@ class DiskMgrShell(cmd.Cmd):
                 "PERSISTENT PATH (IEEE)": target_path,
                 "TYPE": "missing",
                 "STATE": "MISSING",
+                "OWNER": "-",
                 "FSTAB": "n",
                 "SIZE": "-",
                 "SIZE-BYTES": "",
@@ -1612,6 +1613,7 @@ class DiskMgrShell(cmd.Cmd):
             "DEVICE",
             "TYPE",
             "STATE",
+            "OWNER",
             "FSTYPE",
             "FSVER",
             "FSLABEL",
@@ -2381,11 +2383,31 @@ class DiskMgrShell(cmd.Cmd):
             wwn = dev.get('wwn') or parent_wwn or ""
 
             mp = dev.get('mountpoints', [])
+            owner_probe_mount = ""
             if isinstance(mp, list):
-                mounts = ", ".join([m for m in mp if m])
+                mount_list = [m for m in mp if m]
+                mounts = ", ".join(mount_list)
+                if mount_list:
+                    owner_probe_mount = mount_list[0]
             else:
                 mounts = str(mp or "")
+                owner_probe_mount = mounts.split(",")[0].strip() if mounts else ""
             mounts_clean = mounts.strip()
+            owner = "-"
+            if owner_probe_mount:
+                try:
+                    st = os.stat(owner_probe_mount)
+                    try:
+                        owner_user = pwd.getpwuid(int(st.st_uid)).pw_name
+                    except Exception:
+                        owner_user = str(int(st.st_uid))
+                    try:
+                        owner_group = grp.getgrgid(int(st.st_gid)).gr_name
+                    except Exception:
+                        owner_group = str(int(st.st_gid))
+                    owner = f"{owner_user} {owner_group}"
+                except Exception:
+                    owner = "-"
 
             # Persistent path: prefer IEEE identifier by-id links (WWN/EUI) when possible.
             pdp = "-"
@@ -2465,6 +2487,7 @@ class DiskMgrShell(cmd.Cmd):
                 "PERSISTENT PATH (IEEE)": pdp,
                 "TYPE": dtype,
                 "STATE": state,
+                "OWNER": owner,
                 "FSTAB": "y" if in_fstab else "n",
                 "SIZE": size,
                 "SIZE-BYTES": size_bytes_raw,
