@@ -5588,7 +5588,38 @@ class DiskMgrShell(cmd.Cmd):
             )
 
             done_bytes = 0
-            shown_pct = -1
+            progress_stop = threading.Event()
+            progress_lock = threading.Lock()
+
+            def _fmt_speed_bps(bps):
+                try:
+                    b = max(0, int(float(bps)))
+                except Exception:
+                    b = 0
+                return self._format_bytes_binary(str(b), decimals=2)
+
+            def _progress_reporter():
+                last_bytes = 0
+                last_ts = time.time()
+                while not progress_stop.wait(0.5):
+                    now = time.time()
+                    with progress_lock:
+                        cur_bytes = int(done_bytes)
+                    dt = max(now - last_ts, 1e-6)
+                    speed = (cur_bytes - last_bytes) / dt
+                    if planned_bytes > 0:
+                        pct = int(min(100.0, (cur_bytes * 100.0) / planned_bytes))
+                        cur_disp = self._format_bytes_binary(str(cur_bytes), decimals=2)
+                        total_disp = self._format_bytes_binary(str(planned_bytes), decimals=2)
+                        print(f"Progress: {pct:3d}% ({cur_disp} / {total_disp}) | Speed: {_fmt_speed_bps(speed)}/s", flush=True)
+                    else:
+                        cur_disp = self._format_bytes_binary(str(cur_bytes), decimals=2)
+                        print(f"Progress: ---% ({cur_disp}) | Speed: {_fmt_speed_bps(speed)}/s", flush=True)
+                    last_bytes = cur_bytes
+                    last_ts = now
+
+            progress_thread = threading.Thread(target=_progress_reporter, daemon=True)
+            progress_thread.start()
 
             if proc.stdout is not None:
                 for raw in proc.stdout:
@@ -5596,23 +5627,27 @@ class DiskMgrShell(cmd.Cmd):
                     m = re.match(r'^\s*([0-9,]+)\t(.*)$', line)
                     if m:
                         try:
-                            done_bytes += int(m.group(1).replace(',', ''))
+                            with progress_lock:
+                                done_bytes += int(m.group(1).replace(',', ''))
                         except Exception:
                             pass
-                        if planned_bytes > 0:
-                            pct = int(min(100.0, (done_bytes * 100.0) / planned_bytes))
-                            if pct != shown_pct:
-                                shown_pct = pct
-                                done_disp = self._format_bytes_binary(str(done_bytes), decimals=2)
-                                total_disp = self._format_bytes_binary(str(planned_bytes), decimals=2)
-                                print(f"Progress: {pct:3d}% ({done_disp} / {total_disp})")
                     elif line.strip():
                         print(line)
 
             rc_sync = proc.wait()
-            if planned_bytes > 0 and shown_pct < 100 and rc_sync in (0, 24):
+            progress_stop.set()
+            progress_thread.join(timeout=1.0)
+
+            with progress_lock:
+                final_done = int(done_bytes)
+            if planned_bytes > 0:
+                pct = int(min(100.0, (final_done * 100.0) / planned_bytes))
+                cur_disp = self._format_bytes_binary(str(final_done), decimals=2)
                 total_disp = self._format_bytes_binary(str(planned_bytes), decimals=2)
-                print(f"Progress: 100% ({total_disp} / {total_disp})")
+                print(f"Progress: {pct:3d}% ({cur_disp} / {total_disp}) | Speed: 0 B/s", flush=True)
+            else:
+                cur_disp = self._format_bytes_binary(str(final_done), decimals=2)
+                print(f"Progress: ---% ({cur_disp}) | Speed: 0 B/s", flush=True)
 
             if rc_sync == 0:
                 log("Sync complete.")
