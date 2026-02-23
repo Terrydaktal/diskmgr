@@ -67,6 +67,7 @@ disk/part (applied to mapped disk/partition targets):
       then mkfs the decrypted payload filesystem inside the LUKS container.
       Whole disks must be unpartitioned. format never creates, deletes, resizes, or moves partitions;
       it only writes a filesystem/LUKS+filesystem inside the selected disk or partition target.
+      Newly created filesystem roots are chowned to the invoking user.
       Use: erase <name> first if the whole disk is currently partitioned.
   erase <name/id>
       Fast metadata wipe for re-provisioning (wipefs + zap GPT/MBR metadata) on disk/part.
@@ -105,7 +106,7 @@ file system (applied to disk/part entries with mountable FSTYPE):
   sync <pri_name> <sec_name>
       Syncs two mounted filesystems (rsync pri -> sec).
       Primary/source is copied FROM. Secondary/destination is replaced to match source.
-      Shows global rsync progress via --info=progress2.
+      Runs a dry-run pre-scan first and shows real progress from planned-bytes completed.
       Endpoints may be mapped names or absolute directory paths.
       For LUKS: resolves to payload filesystem when open; errors if locked/not mounted.
   diff <pri_name> <sec_name> [--depth N] [-d] [--fast] [--checksum]
@@ -113,7 +114,7 @@ file system (applied to disk/part entries with mountable FSTYPE):
       Primary/source is copied FROM. Secondary/destination is what would be replaced.
       then a tree-style hierarchy summary of dirs/files (+new, ~updated, -deleted regular files).
       Depth default: 2. Use -d to show directories only.
-      Use --fast to print raw rsync -an --delete --stats output only (no summaries).
+      Use --fast to print raw rsync -anH --delete --stats output only (no summaries).
       In --fast created(new+updated) regular files = 'Number of regular files transferred'.
       Use --checksum to compare file contents via rsync checksums (slower, ignores mtime-only changes).
       Endpoints may be mapped names/IDs or absolute directory paths.
@@ -164,6 +165,48 @@ Display the physical partition layout and free space for all plugged-in disks.
             - Adds GPT metadata blocks (Primary/Backup) if applicable.
             - Identifies 'free' space segments.
             - Calculates MiB and GiB values from sector counts.
+```
+
+### Example Output
+
+```text
+Disk: /dev/sda (ST1000LM024 HN-M101MBB) [none] [Sector: L512/P4096] [Total Sectors: 1953525168]
+[ sda crypto_LUKS 1953525168s (953869.71MiB ~ 931.5GiB) ]
+
+ #   NAME  DEVICE       TYPE     STATE    FSTYPE       FSLABEL  FSUUID                                SIZE        FSAVAIL     FSMOUNTPOINTS    PERSISTENT PATH (IEEE)
+ 1   2a    sda          disk     OPEN     crypto_LUKS           d3d6abb8-223b-4d02-b72f-e1ccda3aad00  931.51 GiB                               /dev/disk/by-id/wwn-0x50004cf20836ca17
+ 2   -     `--dm-0 (2a)  crypt    MOUNTED  btrfs        2a       852e8d1e-211b-4571-9179-a9f3def8219d  931.50 GiB  356.43 GiB  /media/lewis/2a  -
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+Disk: /dev/sdb (ST2000DM008-2FR102) [none] [Sector: L512/P4096] [Total Sectors: 3907029168]
+[ sdb crypto_LUKS 3907029168s (1907729.09MiB ~ 1863.0GiB (1.819 TiB)) ]
+
+ #   NAME  DEVICE       TYPE     STATE    FSTYPE       FSLABEL  FSUUID                                SIZE        FSAVAIL     FSMOUNTPOINTS    PERSISTENT PATH (IEEE)
+ 3   1b    sdb          disk     OPEN     crypto_LUKS           885a66c1-6d5f-4d24-adfd-e7c7975dfe65  1.82 TiB                                 /dev/disk/by-id/wwn-0x5000c500e31e6cb2
+ 4   -     `--dm-1 (1b)  crypt    MOUNTED  btrfs        1b       08aad883-1143-4d5d-84b9-d715665e332a  1.82 TiB    879.47 GiB  /media/lewis/1b  -
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+Disk: /dev/nvme0n1 (WD_BLACK SN8100 2000GB) [msdos] [Sector: L512/P512] [Total Sectors: 3907029168]
+[ MBR 2s (1024.00B) ] [ free 2046s (1023.00KiB) ] [ nvme0n1p1 ext4 3907026944s (1907728.00MiB ~ 1863.0GiB (1.819 TiB)) (boot) ] [ free 176s (88.00KiB) ]
+
+ #   NAME  DEVICE       TYPE     STATE    FSTYPE       FSLABEL  FSUUID                                SIZE        FSAVAIL     FSMOUNTPOINTS    PERSISTENT PATH (IEEE)
+ 5   -     nvme0n1      disk     -                                                                    1.82 TiB                                 /dev/disk/by-id/nvme-eui.e8238fa6bf530001001b448b42d60852
+ 6   os    `--nvme0n1p1  part     MOUNTED  ext4                  88f1dad3-95c6-418e-bea8-f5f3e072ea29  1.82 TiB    970.19 GiB  /                /dev/disk/by-id/nvme-eui.e8238fa6bf530001001b448b42d60852-part1
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+Disk: /dev/nvme1n1 (WD Blue SN570 1TB) [msdos] [Sector: L512/P512] [Total Sectors: 1953525168]
+[ MBR 2s (1024.00B) ] [ free 2046s (1023.00KiB) ] [ nvme1n1p1 ext4 1953523120s (953868.71MiB ~ 931.5GiB) ]
+
+ #   NAME  DEVICE       TYPE     STATE    FSTYPE       FSLABEL  FSUUID                                SIZE        FSAVAIL     FSMOUNTPOINTS    PERSISTENT PATH (IEEE)
+ 7   -     nvme1n1      disk     -                                                                    931.51 GiB                               /dev/disk/by-id/nvme-eui.e8238fa6bf530001001b444a49598af9
+ 8   data  `--nvme1n1p1  part     MOUNTED  ext4         data     72c22012-b161-4e2a-a762-94ff7fda47f9  931.51 GiB  353.06 GiB  /mnt/data        /dev/disk/by-id/nvme-eui.e8238fa6bf530001001b444a49598af9-part1
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+Non-present mappings (/home/lewis/Dev/diskmgr/diskmap.tsv)
+ #   NAME  DEVICE       TYPE     STATE    FSTYPE       FSLABEL  FSUUID                                SIZE        FSAVAIL     FSMOUNTPOINTS    PERSISTENT PATH (IEEE)
+ 9   1a    -            missing  MISSING  -            -        -                                     -           -           -                /dev/disk/by-id/wwn-0x5000c500a89d6e44-part2
+ 10  2b    -            missing  MISSING  -            -        -                                     -           -           -                /dev/disk/by-id/wwn-0x5000cca8c0d68e12
+ 11  3a    -            missing  MISSING  -            -        -                                     -           -           -                /dev/disk/by-id/wwn-0x5000c500ab9fa51b
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 ```
 
 ## Command Reference: `boot`
@@ -539,8 +582,9 @@ Synchronize two filesystems: sync <primary> <secondary>
         1.  Validation: Verifies both endpoints resolve to directories.
             - Mapped names must already be mounted.
             - Absolute paths must exist and be directories.
-        2.  Confirmation: Requires solving two math problems (DESTRUCTIVE for secondary).
-        3.  Execution: Runs 'rsync -avh --delete --info=progress2 <primary_mnt>/ <secondary_mnt>/'.
+        2.  Pre-scan: Runs rsync dry-run stats to compute planned transfer bytes.
+        3.  Confirmation: Requires solving two math problems (DESTRUCTIVE for secondary).
+        4.  Execution: Runs rsync and reports real progress as bytes_done / planned_bytes.
 
         Note: The SECONDARY disk will be modified to match the PRIMARY disk.
         All files on the secondary that do not exist on the primary will be DELETED.

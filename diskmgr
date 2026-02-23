@@ -25,7 +25,7 @@ except ImportError:
 # Configuration
 MAP_FILENAME = 'diskmap.tsv'
 PASSGEN_BIN = 'passgen'
-VERSION = '3.3.3'
+VERSION = '3.3.5'
 HISTORY_FILE_ENV = 'DISKMGR_HISTORY'
 DEFAULT_HISTORY_FILE = Path.home() / '.local' / 'state' / 'diskmgr' / 'history'
 MAX_HISTORY_ENTRIES = 5000
@@ -1112,7 +1112,7 @@ class DiskMgrShell(cmd.Cmd):
         print("      Primary/source is copied FROM. Secondary/destination is what would be replaced.")
         print("      then a tree-style hierarchy summary of dirs/files (+new, ~updated, -deleted regular files).")
         print("      Depth default: 2. Use -d to show directories only. ")
-        print("      Use --fast to print raw rsync -an --delete --stats output only (no summaries).")
+        print("      Use --fast to print raw rsync -anH --delete --stats output only (no summaries).")
         print("      In --fast created(new+updated) regular files = 'Number of regular files transferred'.")
         print("      Use --checksum to compare file contents via rsync checksums (slower, ignores mtime-only changes).")
         print("      Endpoints may be mapped names/IDs or absolute directory paths.")
@@ -5535,7 +5535,7 @@ class DiskMgrShell(cmd.Cmd):
 
         # Pre-scan before confirmation to compute planned bytes for stable progress.
         log("Running pre-scan (dry-run) to compute planned transfer...")
-        pre_cmd = ['rsync', '-an', '--delete', '--stats', src_path, dst_path]
+        pre_cmd = ['rsync', '-anH', '--delete', '--stats', src_path, dst_path]
         pre_res = run_command(pre_cmd, sudo=True, check=False)
         pre_rc = getattr(pre_res, 'returncode', 0)
         pre_out = (getattr(pre_res, 'stdout', '') or '') + "\n" + (getattr(pre_res, 'stderr', '') or '')
@@ -5674,7 +5674,7 @@ class DiskMgrShell(cmd.Cmd):
         parser.add_argument('secondary_name')
         parser.add_argument('--depth', type=int, default=2, help='Hierarchy depth for subtree summary (default: 2)')
         parser.add_argument('-d', '--dirs-only', action='store_true', help='Show directories only in hierarchy output')
-        parser.add_argument('--fast', action='store_true', help='Show raw rsync -an --delete --stats output only')
+        parser.add_argument('--fast', action='store_true', help='Show raw rsync -anH --delete --stats output only')
         parser.add_argument('--checksum', action='store_true', help='Compare file content using checksums (slower)')
         try:
             split_args = shlex.split(arg)
@@ -5739,7 +5739,7 @@ class DiskMgrShell(cmd.Cmd):
             if depth != 2:
                 log("--fast ignores --depth.", 'WARN')
 
-            fast_cmd = ['rsync', '-an']
+            fast_cmd = ['rsync', '-anH']
             if checksum_mode:
                 fast_cmd.append('-c')
             fast_cmd.extend(['--delete', '--stats', src_path, dst_path])
