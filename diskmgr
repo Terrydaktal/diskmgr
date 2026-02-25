@@ -3481,7 +3481,52 @@ class DiskMgrShell(cmd.Cmd):
             if not mapping_name:
                 log("ID target points to a LUKS container. Map it first (map #N <name>) and run open <name>.", 'ERROR')
                 return
-            if not os.path.exists(mapper_path):
+            needs_open = True
+            if os.path.exists(mapper_path):
+                # Validate that the existing mapper is still backed by the expected source device.
+                expected_src_real = os.path.realpath(src)
+                mapper_real = os.path.realpath(mapper_path)
+                dm_name = os.path.basename(mapper_real)
+                slaves_dir = f"/sys/class/block/{dm_name}/slaves"
+                mapper_is_stale = False
+                stale_reason = ""
+                try:
+                    expected_kname = os.path.basename(expected_src_real)
+                    slaves = sorted(os.listdir(slaves_dir)) if os.path.isdir(slaves_dir) else []
+                    if not slaves:
+                        mapper_is_stale = True
+                        stale_reason = "no backing slave device"
+                    elif expected_kname and expected_kname not in slaves:
+                        mapper_is_stale = True
+                        stale_reason = f"backing slave mismatch (expected {expected_kname}, got {', '.join(slaves)})"
+                except Exception as e:
+                    mapper_is_stale = True
+                    stale_reason = f"unable to validate mapper backing ({e})"
+
+                if mapper_is_stale:
+                    log(f"Existing mapping {mapping_name} looks stale: {stale_reason}. Recycling mapping...")
+                    stale_targets = find_mount_targets(mapper_path)
+                    for mp in stale_targets:
+                        log(f"Unmounting stale target {mp}...")
+                        res_um = run_command(['umount', mp], sudo=True, check=False)
+                        if getattr(res_um, 'returncode', 1) != 0:
+                            # Detached/removed media can leave mountpoints that need a lazy detach.
+                            log(f"Normal unmount failed for {mp}; trying lazy unmount.", 'WARN')
+                            run_command(['umount', '-l', mp], sudo=True, check=False)
+                        cleanup_mountpoint_dir(mp)
+                    run_command(['cryptsetup', 'close', mapping_name], sudo=True, check=False)
+                    for _ in range(20):
+                        if not os.path.exists(mapper_path):
+                            break
+                        time.sleep(0.1)
+                    if os.path.exists(mapper_path):
+                        log(f"Failed to recycle stale mapping {mapping_name}; mapper still exists.", 'ERROR')
+                        return
+                else:
+                    log("Mapping already exists.")
+                    needs_open = False
+
+            if needs_open:
                 log(f"Opening LUKS mapping {mapping_name}...")
                 # Use passgen
                 pg_cmd = subprocess.Popen([PASSGEN_BIN], stdout=subprocess.PIPE, text=True)
@@ -3497,8 +3542,6 @@ class DiskMgrShell(cmd.Cmd):
                 except Exception as e:
                     log(f"Failed to open LUKS: {e}", 'ERROR')
                     return
-            else:
-                log("Mapping already exists.")
         else:
             # Plain disk
             target_to_mount = devnode
@@ -3535,6 +3578,14 @@ class DiskMgrShell(cmd.Cmd):
         current_targets = find_mount_targets(target_to_mount)
 
         if not current_targets:
+            # If a prior empty mountpoint dir was left behind, clean it before remount.
+            # Non-empty dirs are reused as-is to avoid deleting user data.
+            if os.path.isdir(mountpoint) and run_command(['findmnt', '-rn', '-M', mountpoint], check=False).returncode != 0:
+                try:
+                    if not os.listdir(mountpoint):
+                        cleanup_mountpoint_dir(mountpoint)
+                except Exception:
+                    pass
             log(f"Mounting {target_to_mount} to {mountpoint}...")
             self._mount_device(target_to_mount, mountpoint, use_fstab=use_fstab_mount, announce_btrfs=True)
             log("Mounted.")
