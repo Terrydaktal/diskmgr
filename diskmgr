@@ -3546,12 +3546,17 @@ class DiskMgrShell(cmd.Cmd):
             # Plain disk
             target_to_mount = devnode
 
-        # Detect label for fallback mountpoint
+        # Determine fallback mountpoint name.
+        # Hardened behavior: when opening by a mapped name, keep that mapped name
+        # as the fallback directory (/media/$USER/<mapping>) even if FS label differs.
         mount_name = mapping_name if mapping_name else os.path.basename(devnode)
+        fs_label = ""
         try:
             res_b = run_command(['blkid', '-o', 'value', '-s', 'LABEL', target_to_mount], sudo=True, check=False)
             if res_b.stdout.strip():
-                mount_name = res_b.stdout.strip()
+                fs_label = res_b.stdout.strip()
+                if not mapping_name:
+                    mount_name = fs_label
         except:
             pass
 
@@ -3559,7 +3564,7 @@ class DiskMgrShell(cmd.Cmd):
         mountpoint, use_fstab_mount, fstab_entry = self._select_mountpoint_for_device(
             target_to_mount,
             fallback_mountpoint,
-            preferred_label=mount_name
+            preferred_label=(fs_label or mount_name)
         )
         if use_fstab_mount:
             log(f"Using fstab mount for {target_to_mount}: {fstab_entry['spec']} -> {mountpoint}")
