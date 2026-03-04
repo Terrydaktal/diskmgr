@@ -25,7 +25,7 @@ except ImportError:
 # Configuration
 MAP_FILENAME = 'diskmap.tsv'
 PASSGEN_BIN = 'passgen'
-VERSION = '3.3.5'
+VERSION = '3.4.1'
 HISTORY_FILE_ENV = 'DISKMGR_HISTORY'
 DEFAULT_HISTORY_FILE = Path.home() / '.local' / 'state' / 'diskmgr' / 'history'
 MAX_HISTORY_ENTRIES = 5000
@@ -3637,6 +3637,50 @@ class DiskMgrShell(cmd.Cmd):
             log("Usage: close <name/id>", 'ERROR')
             return
 
+        def _log_mount_holders(mp):
+            """Best-effort diagnostics: show processes holding a busy mount."""
+            holder_shown = False
+            fuser_bin = shutil.which('fuser')
+            if fuser_bin:
+                res_f = run_command(['fuser', '-vm', mp], sudo=True, check=False)
+                out_f = (getattr(res_f, 'stdout', '') or '').strip()
+                err_f = (getattr(res_f, 'stderr', '') or '').strip()
+                combined = "\n".join([x for x in (out_f, err_f) if x]).strip()
+                if combined:
+                    log(f"Holders for {mp} (fuser -vm):", 'WARN')
+                    print(combined)
+                    holder_shown = True
+
+            if not holder_shown:
+                lsof_bin = shutil.which('lsof')
+                if lsof_bin:
+                    res_l = run_command(['lsof', '+D', mp], sudo=True, check=False)
+                    out_l = (getattr(res_l, 'stdout', '') or '').strip()
+                    err_l = (getattr(res_l, 'stderr', '') or '').strip()
+                    combined = "\n".join([x for x in (out_l, err_l) if x]).strip()
+                    if combined:
+                        log(f"Holders for {mp} (lsof +D):", 'WARN')
+                        print(combined)
+                        holder_shown = True
+
+            if not holder_shown:
+                log(f"Could not determine mount holders for {mp}.", 'WARN')
+
+        def _try_unmount(mp):
+            """Best-effort unmount; shows holders when unmount fails."""
+            log(f"Unmounting {mp}...")
+            res_um = run_command(['umount', mp], sudo=True, check=False)
+            if getattr(res_um, 'returncode', 1) == 0:
+                return True
+
+            err = (getattr(res_um, 'stderr', '') or '').strip()
+            if err:
+                log(f"Unmount failed for {mp}: {err}", 'ERROR')
+            else:
+                log(f"Unmount failed for {mp}.", 'ERROR')
+            _log_mount_holders(mp)
+            return False
+
         # Support discovery IDs (#N) from the latest `list` output.
         if target.startswith('#') and target[1:].isdigit():
             rid = target[1:]
@@ -3665,12 +3709,14 @@ class DiskMgrShell(cmd.Cmd):
                 return
 
             run_command(['sudo', '-v'])  # Refresh sudo
+            run_command(['sync'], sudo=True, check=False)
 
             targets = find_mount_targets(dev_from_id)
             unmounted_targets = []
             for mp in targets:
-                log(f"Unmounting {mp}...")
-                run_command(['umount', mp], sudo=True)
+                if not _try_unmount(mp):
+                    log("Close aborted: target is still mounted/in use.", 'ERROR')
+                    return
                 unmounted_targets.append(mp)
             for mp in unmounted_targets:
                 cleanup_mountpoint_dir(mp)
@@ -3700,6 +3746,7 @@ class DiskMgrShell(cmd.Cmd):
         mount_guess = f"/media/{os.environ.get('USER', 'root')}/{name}"
 
         run_command(['sudo', '-v']) # Refresh sudo
+        run_command(['sync'], sudo=True, check=False)
 
         # Unmount
         unmounted = False
@@ -3708,8 +3755,9 @@ class DiskMgrShell(cmd.Cmd):
         targets = find_mount_targets(mapper_path)
         if targets:
             for mp in targets:
-                log(f"Unmounting {mp}...")
-                run_command(['umount', mp], sudo=True)
+                if not _try_unmount(mp):
+                    log("Close aborted: mapper target is still mounted/in use.", 'ERROR')
+                    return
                 unmounted_targets.append(mp)
             unmounted = True
         
@@ -3721,16 +3769,18 @@ class DiskMgrShell(cmd.Cmd):
                 targets = find_mount_targets(src)
                 if targets:
                     for mp in targets:
-                        log(f"Unmounting {mp}...")
-                        run_command(['umount', mp], sudo=True)
+                        if not _try_unmount(mp):
+                            log("Close aborted: source target is still mounted/in use.", 'ERROR')
+                            return
                         unmounted_targets.append(mp)
                     unmounted = True
 
         # 3. Try by guess
         if not unmounted:
             if run_command(['findmnt', '-rn', '-M', mount_guess], check=False).returncode == 0:
-                 log(f"Unmounting {mount_guess}...")
-                 run_command(['umount', mount_guess], sudo=True)
+                 if not _try_unmount(mount_guess):
+                     log("Close aborted: guessed target is still mounted/in use.", 'ERROR')
+                     return
                  unmounted_targets.append(mount_guess)
                  unmounted = True
 
