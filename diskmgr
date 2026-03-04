@@ -25,7 +25,7 @@ except ImportError:
 # Configuration
 MAP_FILENAME = 'diskmap.tsv'
 PASSGEN_BIN = 'passgen'
-VERSION = '3.4.1'
+VERSION = '3.4.2'
 HISTORY_FILE_ENV = 'DISKMGR_HISTORY'
 DEFAULT_HISTORY_FILE = Path.home() / '.local' / 'state' / 'diskmgr' / 'history'
 MAX_HISTORY_ENTRIES = 5000
@@ -1089,9 +1089,10 @@ class DiskMgrShell(cmd.Cmd):
         print("      For encrypted targets, unlocks LUKS then mounts payload filesystem.")
         print("      Btrfs mounts are enforced with compression (compress=zstd:3).")
         print("      Uses /etc/fstab mountpoint/options when an entry exists; otherwise /media/$USER/<label>.")
-        print(f"  {Colors.OKGREEN}close <name/id>{Colors.ENDC}")
+        print(f"  {Colors.OKGREEN}close <name/id> [--force]{Colors.ENDC}")
         print("      close <name>: unmounts filesystem(s) and closes /dev/mapper/<name> when present (locks LUKS).")
         print("      close #id (example: close #6): unmount-only for that discovered row; does NOT run cryptsetup close.")
+        print("      With --force, kills mount-holder processes (SIGKILL) if unmount is busy, then retries unmount.")
         print("      Use #id if you want to close only the payload filesystem and keep the LUKS container open.")
         print(f"  {Colors.OKGREEN}luks <passwd|backup|restore|header>{Colors.ENDC}")
         print("      LUKS management for mapped containers (grouped under filesystem workflows):")
@@ -3620,7 +3621,7 @@ class DiskMgrShell(cmd.Cmd):
                 log(f"Failed to override mount: {e}. It may be in use.", 'WARN')
 
     def do_close(self, arg):
-        '''Unmount and lock (if encrypted) a disk: close <name/id>
+        '''Unmount and lock (if encrypted) a disk: close <name/id> [--force]
         
         UNDER THE HOOD:
         1.  Unmounting (Encrypted & Plain): 
@@ -3632,10 +3633,23 @@ class DiskMgrShell(cmd.Cmd):
             - Removes the virtual cleartext device from /dev/mapper/.
         3.  Audit: Checks and displays remaining active mappings for security awareness.
         '''
-        target = arg.strip()
-        if not target:
-            log("Usage: close <name/id>", 'ERROR')
+        argv = shlex.split(arg) if arg else []
+        force = False
+        positional = []
+        for tok in argv:
+            if tok == '--force':
+                force = True
+            elif tok.startswith('-'):
+                log(f"Unknown option: {tok}", 'ERROR')
+                log("Usage: close <name/id> [--force]", 'ERROR')
+                return
+            else:
+                positional.append(tok)
+
+        if len(positional) != 1:
+            log("Usage: close <name/id> [--force]", 'ERROR')
             return
+        target = positional[0]
 
         def _log_mount_holders(mp):
             """Best-effort diagnostics: show processes holding a busy mount."""
@@ -3666,19 +3680,90 @@ class DiskMgrShell(cmd.Cmd):
             if not holder_shown:
                 log(f"Could not determine mount holders for {mp}.", 'WARN')
 
+        def _collect_mount_holder_pids(mp):
+            """Return holder PIDs from fuser/lsof for a mountpoint."""
+            pids = []
+
+            fuser_bin = shutil.which('fuser')
+            if fuser_bin:
+                res_f = run_command(['fuser', '-m', mp], sudo=True, check=False)
+                raw_f = "\n".join([
+                    (getattr(res_f, 'stdout', '') or ''),
+                    (getattr(res_f, 'stderr', '') or '')
+                ])
+                for m in re.findall(r'\b\d+\b', raw_f):
+                    try:
+                        pids.append(int(m))
+                    except Exception:
+                        pass
+
+            if not pids:
+                lsof_bin = shutil.which('lsof')
+                if lsof_bin:
+                    res_l = run_command(['lsof', '+D', mp], sudo=True, check=False)
+                    out_l = (getattr(res_l, 'stdout', '') or '').splitlines()
+                    for line in out_l[1:]:
+                        cols = line.split()
+                        if len(cols) >= 2 and cols[1].isdigit():
+                            try:
+                                pids.append(int(cols[1]))
+                            except Exception:
+                                pass
+
+            uniq = []
+            seen = set()
+            for pid in pids:
+                if pid <= 1:
+                    continue
+                if pid == os.getpid():
+                    continue
+                if pid in seen:
+                    continue
+                seen.add(pid)
+                uniq.append(pid)
+            return uniq
+
+        def _force_kill_mount_holders(mp):
+            """Kill mount holders with SIGKILL in force mode."""
+            pids = _collect_mount_holder_pids(mp)
+            if not pids:
+                log(f"--force enabled, but no killable holder PIDs found for {mp}.", 'WARN')
+                return
+            log(f"--force enabled: sending SIGKILL to holder PIDs: {', '.join(str(p) for p in pids)}", 'WARN')
+            chunk_size = 64
+            for i in range(0, len(pids), chunk_size):
+                chunk = pids[i:i+chunk_size]
+                run_command(['kill', '-9'] + [str(p) for p in chunk], sudo=True, check=False)
+
         def _try_unmount(mp):
-            """Best-effort unmount; shows holders when unmount fails."""
+            """Best-effort unmount; in --force mode kill holders and retry once."""
             log(f"Unmounting {mp}...")
             res_um = run_command(['umount', mp], sudo=True, check=False)
             if getattr(res_um, 'returncode', 1) == 0:
                 return True
 
             err = (getattr(res_um, 'stderr', '') or '').strip()
+            rc = int(getattr(res_um, 'returncode', 1) or 1)
             if err:
                 log(f"Unmount failed for {mp}: {err}", 'ERROR')
             else:
                 log(f"Unmount failed for {mp}.", 'ERROR')
             _log_mount_holders(mp)
+
+            busy = ('busy' in err.lower()) or (rc == 32)
+            if force and busy:
+                _force_kill_mount_holders(mp)
+                time.sleep(0.2)
+                log(f"Retrying unmount for {mp} after --force kill...")
+                res_retry = run_command(['umount', mp], sudo=True, check=False)
+                if getattr(res_retry, 'returncode', 1) == 0:
+                    return True
+                err2 = (getattr(res_retry, 'stderr', '') or '').strip()
+                if err2:
+                    log(f"Unmount retry failed for {mp}: {err2}", 'ERROR')
+                else:
+                    log(f"Unmount retry failed for {mp}.", 'ERROR')
+                _log_mount_holders(mp)
             return False
 
         # Support discovery IDs (#N) from the latest `list` output.
