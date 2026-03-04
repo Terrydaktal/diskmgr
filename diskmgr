@@ -25,7 +25,7 @@ except ImportError:
 # Configuration
 MAP_FILENAME = 'diskmap.tsv'
 PASSGEN_BIN = 'passgen'
-VERSION = '3.4.2'
+VERSION = '3.4.3'
 HISTORY_FILE_ENV = 'DISKMGR_HISTORY'
 DEFAULT_HISTORY_FILE = Path.home() / '.local' / 'state' / 'diskmgr' / 'history'
 MAX_HISTORY_ENTRIES = 5000
@@ -1110,6 +1110,11 @@ class DiskMgrShell(cmd.Cmd):
         print("      Syncs two mounted filesystems (rsync pri -> sec).")
         print("      Primary/source is copied FROM. Secondary/destination is replaced to match source.")
         print("      Runs a dry-run pre-scan first and shows real progress from planned-bytes completed.")
+        print("      Endpoints may be mapped names or absolute directory paths.")
+        print("      For LUKS: resolves to payload filesystem when open; errors if locked/not mounted.")
+        print(f"  {Colors.OKGREEN}copy <src_name> <dst_name>{Colors.ENDC}")
+        print("      Copies source into destination (rsync, no deletes).")
+        print("      Shows a pre-copy preview of additions in destination (green), then asks y/N confirmation.")
         print("      Endpoints may be mapped names or absolute directory paths.")
         print("      For LUKS: resolves to payload filesystem when open; errors if locked/not mounted.")
         print(f"  {Colors.OKGREEN}diff <pri_name> <sec_name> [--depth N] [-d] [--fast] [--checksum]{Colors.ENDC}")
@@ -5897,6 +5902,324 @@ class DiskMgrShell(cmd.Cmd):
                 log(f"Sync failed: rsync exited with status {rc_sync}.", 'ERROR')
         except Exception as e:
             log(f"Sync failed: {e}", 'ERROR')
+        finally:
+            print(f"Duration: {_fmt_hms(time.time() - start_ts)}")
+
+    def do_copy(self, arg):
+        '''Copy one directory tree into another (no deletion): copy <source> <destination>
+
+        UNDER THE HOOD:
+        1.  Validation: Verifies both endpoints resolve to directories.
+            - Mapped names must already be mounted.
+            - Absolute paths must exist and be directories.
+        2.  Pre-scan: Runs rsync dry-run (no --delete) to compute planned transfer bytes.
+        3.  Preview: Prints additions that destination will gain, highlighted in green.
+        4.  Confirmation: Asks simple y/N confirmation (no math challenge).
+        5.  Execution: Runs rsync and reports real progress as bytes_done / planned_bytes.
+        '''
+        parser = CmdArgumentParser(prog='copy', add_help=False)
+        parser.add_argument('source')
+        parser.add_argument('destination')
+        try:
+            split_args = shlex.split(arg)
+            args = parser.parse_args(split_args)
+        except argparse.ArgumentError as e:
+            log(str(e), 'ERROR')
+            return
+        except SystemExit:
+            return
+
+        source = args.source
+        destination = args.destination
+
+        def _resolve_copy_endpoint(value, role_label):
+            if os.path.isabs(value):
+                p = os.path.realpath(value)
+                if not os.path.exists(p):
+                    log(f"{role_label} path does not exist: {value}", 'ERROR')
+                    return None, None
+                if not os.path.isdir(p):
+                    log(f"{role_label} path must be a directory: {value}", 'ERROR')
+                    return None, None
+                return p, 'path'
+
+            mp = self.get_mountpoint(value)
+            if not mp:
+                log(f"{role_label} disk '{value}' is not mounted.", 'ERROR')
+                return None, None
+            return mp, 'mapping'
+
+        src_mnt, src_kind = _resolve_copy_endpoint(source, "Source")
+        dst_mnt, dst_kind = _resolve_copy_endpoint(destination, "Destination")
+        if not src_mnt or not dst_mnt:
+            return
+
+        # Block copying TO the system root drive (destination only).
+        try:
+            if dst_kind == 'mapping':
+                res_s = run_command(['findmnt', '-rn', '-M', dst_mnt, '-o', 'SOURCE'], check=False)
+            else:
+                res_s = run_command(['findmnt', '-rn', '-T', dst_mnt, '-o', 'SOURCE'], check=False)
+            dst_src = (getattr(res_s, 'stdout', '') or '').strip()
+            if dst_src and self._block_if_root_drive(os.path.realpath(dst_src), f"copy {source} {destination}"):
+                return
+        except Exception:
+            pass
+
+        src_user_had_trailing = source.endswith('/')
+        if src_kind == 'path':
+            if src_user_had_trailing:
+                src_path = src_mnt.rstrip('/') + '/'
+                src_mode = 'contents'
+            else:
+                src_path = src_mnt.rstrip('/')
+                src_mode = 'folder'
+        else:
+            # Mapping sources represent mounted filesystem roots; default to contents copy.
+            src_path = src_mnt.rstrip('/') + '/'
+            src_mode = 'contents-mapping'
+        dst_path = dst_mnt.rstrip('/') + '/'
+
+        print(f"Copying: {Colors.BOLD}{src_path}{Colors.ENDC} -> {Colors.WARNING}{dst_path}{Colors.ENDC}")
+        print("Mode: additive copy (no deletions).")
+        run_command(['sudo', '-v'])
+
+        log("Running pre-scan (dry-run) to compute planned copy and preview additions...")
+        pre_cmd = [
+            'rsync', '-anH',
+            '--itemize-changes',
+            '--out-format=%i\t%l\t%n',
+            '--stats',
+            src_path, dst_path
+        ]
+        pre_res = run_command(pre_cmd, sudo=True, check=False)
+        pre_rc = getattr(pre_res, 'returncode', 0)
+        pre_out = (getattr(pre_res, 'stdout', '') or '') + "\n" + (getattr(pre_res, 'stderr', '') or '')
+        if pre_rc not in (0, 24):
+            log(f"Pre-scan failed: rsync exited with status {pre_rc}.", 'ERROR')
+            if pre_out.strip():
+                print(pre_out.rstrip())
+            return
+
+        def _parse_stat_int(label):
+            m = re.search(rf"^\s*{re.escape(label)}:\s*([0-9,]+)\b", pre_out, re.MULTILINE)
+            if not m:
+                return 0
+            try:
+                return int(m.group(1).replace(',', ''))
+            except Exception:
+                return 0
+
+        planned_bytes = _parse_stat_int("Total transferred file size")
+        planned_files = _parse_stat_int("Number of regular files transferred")
+        if planned_files <= 0:
+            planned_files = _parse_stat_int("Number of files transferred")
+
+        add_files = 0
+        add_dirs = 0
+        add_links = 0
+        add_preview = []
+        for raw in pre_out.splitlines():
+            if '\t' not in raw:
+                continue
+            parts = raw.split('\t', 2)
+            if len(parts) < 3:
+                continue
+            item = (parts[0] or '').strip()
+            name = (parts[2] or '').strip()
+            if not item or not name:
+                continue
+            if item.startswith('>f+'):
+                add_files += 1
+                add_preview.append(name)
+            elif item.startswith('cd+'):
+                add_dirs += 1
+                add_preview.append(name.rstrip('/') + '/')
+            elif item.startswith('cL+'):
+                add_links += 1
+                add_preview.append(name)
+
+        print("Pre-copy summary (dry-run):")
+        print(f"  Planned file transfers: {planned_files:,}")
+        print(f"  Planned transfer bytes: {planned_bytes:,} ({self._format_bytes_binary(str(planned_bytes), decimals=2)})")
+        print(f"  New destination additions: files={add_files:,} dirs={add_dirs:,} symlinks={add_links:,}")
+        print("")
+        print("Copy path semantics:")
+        print(f"  Source used by rsync: {src_path}")
+        if src_mode == 'folder':
+            print("  Source has no trailing '/': copy SOURCE FOLDER itself into destination.")
+        elif src_mode == 'contents':
+            print("  Source has trailing '/': copy SOURCE CONTENTS into destination (not the source folder itself).")
+        else:
+            print("  Mapping source: copy mount-root CONTENTS into destination (contents mode).")
+        print("")
+        print(f"{Colors.BOLD}Destination additions preview (green):{Colors.ENDC}")
+        dst_preview_root = dst_path.rstrip('/') or dst_path
+        print(f"{Colors.WARNING}{dst_preview_root}{Colors.ENDC}")
+        if add_preview:
+            def _print_additions_tree(preview_paths):
+                tree = {'dirs': {}, 'files': set()}
+                for raw in preview_paths:
+                    p = (raw or '').strip()
+                    if not p:
+                        continue
+                    is_dir = p.endswith('/')
+                    p = p.rstrip('/')
+                    if not p:
+                        continue
+                    parts = p.split('/')
+                    node = tree
+                    for d in parts[:-1]:
+                        node = node['dirs'].setdefault(d, {'dirs': {}, 'files': set()})
+                    leaf = parts[-1]
+                    if is_dir:
+                        node['dirs'].setdefault(leaf, {'dirs': {}, 'files': set()})
+                    else:
+                        node['files'].add(leaf)
+
+                def _walk(node, indent):
+                    for dname in sorted(node['dirs'].keys()):
+                        print(f"{indent}{Colors.OKGREEN}+ {dname}/{Colors.ENDC}")
+                        _walk(node['dirs'][dname], indent + "   ")
+                    for fname in sorted(node['files']):
+                        print(f"{indent}{Colors.OKGREEN}+ {fname}{Colors.ENDC}")
+
+                _walk(tree, "    ")
+
+            max_preview = 10
+            _print_additions_tree(add_preview[:max_preview])
+            if len(add_preview) > max_preview:
+                print(f"    ... and {len(add_preview) - max_preview:,} more additions")
+        else:
+            print("    (no new additions; copy may still update existing files)")
+
+        ans = (self._input_no_history("Proceed with copy? [y/N]: ") or '').strip().lower()
+        if ans not in ('y', 'yes'):
+            log("Copy cancelled.")
+            return
+
+        run_command(['sudo', '-v'])
+        log(f"Starting rsync copy: {source} -> {destination}...")
+        start_ts = time.time()
+
+        try:
+            cmd = [
+                'sudo', 'rsync', '-aH',
+                '--info=progress2,stats2,name0',
+                src_path, dst_path
+            ]
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1
+            )
+
+            done_bytes = 0
+            progress_stop = threading.Event()
+            progress_lock = threading.Lock()
+
+            def _fmt_speed_bps(bps):
+                try:
+                    b = max(0, int(float(bps)))
+                except Exception:
+                    b = 0
+                return self._format_bytes_binary(str(b), decimals=2)
+
+            def _parse_progress2_bytes(line):
+                m = re.match(r'^\s*([0-9][0-9,]*(?:\.[0-9]+)?)([kKmMgGtTpPeE]?)\s+[0-9]{1,3}%', line or '')
+                if not m:
+                    return None
+                num_txt = (m.group(1) or '').replace(',', '')
+                unit = (m.group(2) or '').upper()
+                try:
+                    val = float(num_txt)
+                except Exception:
+                    return None
+                mult = 1
+                if unit == 'K':
+                    mult = 1024
+                elif unit == 'M':
+                    mult = 1024 ** 2
+                elif unit == 'G':
+                    mult = 1024 ** 3
+                elif unit == 'T':
+                    mult = 1024 ** 4
+                elif unit == 'P':
+                    mult = 1024 ** 5
+                elif unit == 'E':
+                    mult = 1024 ** 6
+                try:
+                    return int(val * mult)
+                except Exception:
+                    return None
+
+            def _progress_reporter():
+                last_report_bytes = 0
+                last_report_ts = time.time()
+                while not progress_stop.wait(0.5):
+                    with progress_lock:
+                        cur_bytes = int(done_bytes)
+                    if cur_bytes <= last_report_bytes:
+                        continue
+                    now = time.time()
+                    dt = max(now - last_report_ts, 1e-6)
+                    speed = (cur_bytes - last_report_bytes) / dt
+                    if planned_bytes > 0:
+                        pct = min(100.0, (cur_bytes * 100.0) / planned_bytes)
+                        cur_disp = self._format_bytes_binary(str(cur_bytes), decimals=2)
+                        total_disp = self._format_bytes_binary(str(planned_bytes), decimals=2)
+                        print(f"Progress: {pct:6.2f}% ({cur_disp} / {total_disp}) | Speed: {_fmt_speed_bps(speed)}/s", flush=True)
+                    else:
+                        cur_disp = self._format_bytes_binary(str(cur_bytes), decimals=2)
+                        print(f"Progress: ---% ({cur_disp}) | Speed: {_fmt_speed_bps(speed)}/s", flush=True)
+                    last_report_bytes = cur_bytes
+                    last_report_ts = now
+
+            progress_thread = threading.Thread(target=_progress_reporter, daemon=True)
+            progress_thread.start()
+
+            if proc.stdout is not None:
+                for raw in proc.stdout:
+                    line = raw.rstrip('\n')
+                    p2_bytes = _parse_progress2_bytes(line)
+                    if p2_bytes is not None:
+                        try:
+                            with progress_lock:
+                                if p2_bytes > done_bytes:
+                                    done_bytes = p2_bytes
+                        except Exception:
+                            pass
+                    elif line.strip():
+                        print(line)
+
+            rc_copy = proc.wait()
+            progress_stop.set()
+            progress_thread.join(timeout=1.0)
+
+            with progress_lock:
+                final_done = int(done_bytes)
+            if planned_bytes > 0 and rc_copy in (0, 24):
+                final_done = max(final_done, planned_bytes)
+            if planned_bytes > 0:
+                pct = min(100.0, (final_done * 100.0) / planned_bytes)
+                cur_disp = self._format_bytes_binary(str(final_done), decimals=2)
+                total_disp = self._format_bytes_binary(str(planned_bytes), decimals=2)
+                print(f"Progress: {pct:6.2f}% ({cur_disp} / {total_disp}) | Speed: 0 B/s", flush=True)
+            else:
+                cur_disp = self._format_bytes_binary(str(final_done), decimals=2)
+                print(f"Progress: ---% ({cur_disp}) | Speed: 0 B/s", flush=True)
+
+            if rc_copy == 0:
+                log("Copy complete.")
+            elif rc_copy == 24:
+                log("Copy completed with warnings: some source files vanished during transfer (rsync exit 24).", 'WARN')
+                log("This is expected on active trees (e.g., browser cache, temp files). Re-run copy to converge.", 'WARN')
+            else:
+                log(f"Copy failed: rsync exited with status {rc_copy}.", 'ERROR')
+        except Exception as e:
+            log(f"Copy failed: {e}", 'ERROR')
         finally:
             print(f"Duration: {_fmt_hms(time.time() - start_ts)}")
 
