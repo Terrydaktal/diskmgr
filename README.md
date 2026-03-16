@@ -35,9 +35,9 @@ A utility to manage mapped disks/partitions, encrypted containers, and filesyste
 Mappings point to persistent device paths so names remain stable across reboots/ports.
 
 all:
-  list [verbose]
+  list [concise|verbose]
       Displays disk layout (table by default).
-      Use verbose for key/value entries (alias: list list).
+      Modes: list (standard table), list concise (compact table), list verbose/list list (key/value).
   boot
       Displays boot entries/submenus from GRUB and /etc/fstab detection per partition.
 
@@ -53,6 +53,9 @@ disk:
       (USB uses -d sat). Use: selftest <name/id> --watch to poll progress until complete.
   health <name/id> [alias: smart]
       Shows SMART health (smartctl -x) for the underlying disk (USB uses -d sat).
+  entropy <name/id> <start_gib> <end_gib> [--step-mib N] [--window-mib N]
+      Samples Shannon entropy over a raw device range and plots it (ent + gnuplot).
+      Saves data/plot in /tmp and attempts to display the plot on screen.
 
 disk/part (applied to mapped disk/partition targets):
   map <name/id> <name>
@@ -64,7 +67,8 @@ disk/part (applied to mapped disk/partition targets):
       Whole disk target: creates a superfloppy-style volume and mounts it.
       Partition target: formats inside that partition boundary (not a superfloppy), then mounts it.
       Default is plain format. Use --luks to run cryptsetup luksFormat, open a mapper,
-      then mkfs the decrypted payload filesystem inside the LUKS container.
+      and mkfs the decrypted payload filesystem (PBKDF defaults: memory=4GiB, parallelism=4, time=8).
+      Example: format data --luks
       Whole disks must be unpartitioned. format never creates, deletes, resizes, or moves partitions;
       it only writes a filesystem/LUKS+filesystem inside the selected disk or partition target.
       Newly created filesystem roots are chowned to the invoking user.
@@ -75,6 +79,8 @@ disk/part (applied to mapped disk/partition targets):
       and rewrites an empty MBR table in MBR mode.
   nuke <name/id>
       Secure erase (multi-step hardware-aware wipe) on disk/part.
+  entropise <name/id>
+      Single-pass high-entropy overwrite from /dev/urandom on disk/part.
   remove <name/id>
       Removes a partition from its parent disk (partition targets only).
   clone <src_name/id> <dst_name/id>
@@ -85,15 +91,22 @@ file system (applied to disk/part entries with mountable FSTYPE):
   open <name/id>
       Opens and mounts a plain or encrypted partition or superfloppy.
       For encrypted targets, unlocks LUKS then mounts payload filesystem.
+      LUKS open tries on-disk header first, then ~/.local/share/diskmgr/<name> as detached header backup.
       Btrfs mounts are enforced with compression (compress=zstd:3).
       Uses /etc/fstab mountpoint/options when an entry exists; otherwise /media/$USER/<label>.
-  close <name/id>
+  close <name/id> [--force]
       close <name>: unmounts filesystem(s) and closes /dev/mapper/<name> when present (locks LUKS).
       close #id (example: close #6): unmount-only for that discovered row; does NOT run cryptsetup close.
+      With --force, kills mount-holder processes (SIGKILL) if unmount is busy, then retries unmount.
       Use #id if you want to close only the payload filesystem and keep the LUKS container open.
-  luks <passwd|backup|restore|header>
+  luks <passwd|params|backup|restore|header|wipe> [options]
       LUKS management for mapped containers (grouped under filesystem workflows):
-      password change, header backup/print, and header restore.
+      password change, PBKDF-memory tuning, header backup/print, and header restore.
+      wipe overwrites the LUKS header/keyslot area with random data (destructive test helper).
+      passwd/params auto-fallback to detached header ~/.local/share/diskmgr/<name> when on-disk header is missing.
+      passwd uses passgen for current passphrase and double-prompts new passphrase for confirmation.
+      params uses passgen for current passphrase and updates PBKDF params (defaults: time=8, parallelism=4).
+      backup default path: /home/lewis/.local/share/diskmgr/<name>
   label <name> [new_label] [--fstab]
       Get or set the filesystem label of an OPEN disk.
       On relabel: removes old LABEL-based fstab entry. With --fstab, adds UUID entry at /mnt/<label>.
@@ -153,6 +166,7 @@ shell:
 Display the physical partition layout and free space for all plugged-in disks.
         Usage:
           list            -> standard table (default)
+          list concise    -> concise table
           list verbose    -> verbose key/value entries (alias: list list)
 
         UNDER THE HOOD:
@@ -170,43 +184,43 @@ Display the physical partition layout and free space for all plugged-in disks.
 ### Example Output
 
 ```text
-Disk: /dev/sda (ST1000LM024 HN-M101MBB) [none] [Sector: L512/P4096] [Total Sectors: 1953525168]
-[ sda crypto_LUKS 1953525168s (953869.71MiB ~ 931.5GiB) ]
+Disk: /dev/sda (ST1000LM048-2E7172) [none] [Sector: L512/P4096] [Total Sectors: 1953525168]
 
- #   NAME  DEVICE       TYPE     STATE    FSTYPE       FSLABEL  FSUUID                                SIZE        FSAVAIL     FSMOUNTPOINTS    PERSISTENT PATH (IEEE)
- 1   2a    sda          disk     OPEN     crypto_LUKS           d3d6abb8-223b-4d02-b72f-e1ccda3aad00  931.51 GiB                               /dev/disk/by-id/wwn-0x50004cf20836ca17
- 2   -     `--dm-0 (2a)  crypt    MOUNTED  btrfs        2a       852e8d1e-211b-4571-9179-a9f3def8219d  931.50 GiB  356.43 GiB  /media/lewis/2a  -
---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ #   NAME  DEVICE       TYPE     STATE    FSTYPE  FSLABEL  FSUUID                                SIZE        FSAVAIL     FSMOUNTPOINTS  PERSISTENT PATH (IEEE)
+ 1   7a    sda          disk     -                                                               931.51 GiB                             /dev/disk/by-id/wwn-0x5000c500c082605a
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
-Disk: /dev/sdb (ST2000DM008-2FR102) [none] [Sector: L512/P4096] [Total Sectors: 3907029168]
-[ sdb crypto_LUKS 3907029168s (1907729.09MiB ~ 1863.0GiB (1.819 TiB)) ]
+Disk: /dev/zram0 (None) [loop] [Sector: L4096/P4096] [Total Sectors: 24608328]
+[ zram01 linux-swap(v1) 24608328s (96126.28MiB ~ 93.9GiB) ]
 
- #   NAME  DEVICE       TYPE     STATE    FSTYPE       FSLABEL  FSUUID                                SIZE        FSAVAIL     FSMOUNTPOINTS    PERSISTENT PATH (IEEE)
- 3   1b    sdb          disk     OPEN     crypto_LUKS           885a66c1-6d5f-4d24-adfd-e7c7975dfe65  1.82 TiB                                 /dev/disk/by-id/wwn-0x5000c500e31e6cb2
- 4   -     `--dm-1 (1b)  crypt    MOUNTED  btrfs        1b       08aad883-1143-4d5d-84b9-d715665e332a  1.82 TiB    879.47 GiB  /media/lewis/1b  -
---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ #   NAME  DEVICE       TYPE     STATE    FSTYPE  FSLABEL  FSUUID                                SIZE        FSAVAIL     FSMOUNTPOINTS  PERSISTENT PATH (IEEE)
+ 2   -     zram0        disk     -                                                               93.87 GiB               [SWAP]         -
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
-Disk: /dev/nvme0n1 (WD_BLACK SN8100 2000GB) [msdos] [Sector: L512/P512] [Total Sectors: 3907029168]
-[ MBR 2s (1024.00B) ] [ free 2046s (1023.00KiB) ] [ nvme0n1p1 ext4 3907026944s (1907728.00MiB ~ 1863.0GiB (1.819 TiB)) (boot) ] [ free 176s (88.00KiB) ]
+Disk: /dev/nvme1n1 (WD_BLACK SN8100 2000GB) [msdos] [Sector: L512/P512] [Total Sectors: 3907029168]
+[ MBR 2s (1024.00B) ] [ free 2046s (1023.00KiB) ] [ nvme1n1p1 ext4 3907026944s (1907728.00MiB ~ 1863.0GiB (1.819 TiB)) (boot) ] [ free 176s (88.00KiB) ]
 
- #   NAME  DEVICE       TYPE     STATE    FSTYPE       FSLABEL  FSUUID                                SIZE        FSAVAIL     FSMOUNTPOINTS    PERSISTENT PATH (IEEE)
- 5   -     nvme0n1      disk     -                                                                    1.82 TiB                                 /dev/disk/by-id/nvme-eui.e8238fa6bf530001001b448b42d60852
- 6   os    `--nvme0n1p1  part     MOUNTED  ext4                  88f1dad3-95c6-418e-bea8-f5f3e072ea29  1.82 TiB    970.19 GiB  /                /dev/disk/by-id/nvme-eui.e8238fa6bf530001001b448b42d60852-part1
---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ #   NAME  DEVICE       TYPE     STATE    FSTYPE  FSLABEL  FSUUID                                SIZE        FSAVAIL     FSMOUNTPOINTS  PERSISTENT PATH (IEEE)
+ 3   -     nvme1n1      disk     -                                                               1.82 TiB                               /dev/disk/by-id/nvme-eui.e8238fa6bf530001001b448b42d60852
+ 4   os    `--nvme1n1p1  part     MOUNTED  ext4             88f1dad3-95c6-418e-bea8-f5f3e072ea29  1.82 TiB    881.35 GiB  /              /dev/disk/by-id/nvme-eui.e8238fa6bf530001001b448b42d60852-part1
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
-Disk: /dev/nvme1n1 (WD Blue SN570 1TB) [msdos] [Sector: L512/P512] [Total Sectors: 1953525168]
-[ MBR 2s (1024.00B) ] [ free 2046s (1023.00KiB) ] [ nvme1n1p1 ext4 1953523120s (953868.71MiB ~ 931.5GiB) ]
+Disk: /dev/nvme0n1 (WD Blue SN570 1TB) [msdos] [Sector: L512/P512] [Total Sectors: 1953525168]
+[ MBR 2s (1024.00B) ] [ free 2046s (1023.00KiB) ] [ nvme0n1p1 ext4 1953523120s (953868.71MiB ~ 931.5GiB) ]
 
- #   NAME  DEVICE       TYPE     STATE    FSTYPE       FSLABEL  FSUUID                                SIZE        FSAVAIL     FSMOUNTPOINTS    PERSISTENT PATH (IEEE)
- 7   -     nvme1n1      disk     -                                                                    931.51 GiB                               /dev/disk/by-id/nvme-eui.e8238fa6bf530001001b444a49598af9
- 8   data  `--nvme1n1p1  part     MOUNTED  ext4         data     72c22012-b161-4e2a-a762-94ff7fda47f9  931.51 GiB  353.06 GiB  /mnt/data        /dev/disk/by-id/nvme-eui.e8238fa6bf530001001b444a49598af9-part1
---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ #   NAME  DEVICE       TYPE     STATE    FSTYPE  FSLABEL  FSUUID                                SIZE        FSAVAIL     FSMOUNTPOINTS  PERSISTENT PATH (IEEE)
+ 5   -     nvme0n1      disk     -                                                               931.51 GiB                             /dev/disk/by-id/nvme-eui.e8238fa6bf530001001b444a49598af9
+ 6   data  `--nvme0n1p1  part     MOUNTED  ext4    data     72c22012-b161-4e2a-a762-94ff7fda47f9  931.51 GiB  288.55 GiB  /mnt/data      /dev/disk/by-id/nvme-eui.e8238fa6bf530001001b444a49598af9-part1
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 Non-present mappings (/home/lewis/Dev/diskmgr/diskmap.tsv)
- #   NAME  DEVICE       TYPE     STATE    FSTYPE       FSLABEL  FSUUID                                SIZE        FSAVAIL     FSMOUNTPOINTS    PERSISTENT PATH (IEEE)
- 9   1a    -            missing  MISSING  -            -        -                                     -           -           -                /dev/disk/by-id/wwn-0x5000c500a89d6e44-part2
- 10  2b    -            missing  MISSING  -            -        -                                     -           -           -                /dev/disk/by-id/wwn-0x5000cca8c0d68e12
- 11  3a    -            missing  MISSING  -            -        -                                     -           -           -                /dev/disk/by-id/wwn-0x5000c500ab9fa51b
---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ #   NAME  DEVICE       TYPE     STATE    FSTYPE  FSLABEL  FSUUID                                SIZE        FSAVAIL     FSMOUNTPOINTS  PERSISTENT PATH (IEEE)
+ 7   1b    -            missing  MISSING  -       -        -                                     -           -           -              /dev/disk/by-id/wwn-0x5000c500e31e6cb2
+ 8   1a    -            missing  MISSING  -       -        -                                     -           -           -              /dev/disk/by-id/wwn-0x5000c500a89d6e44-part2
+ 9   2a    -            missing  MISSING  -       -        -                                     -           -           -              /dev/disk/by-id/wwn-0x50004cf20836ca17
+ 10  2b    -            missing  MISSING  -       -        -                                     -           -           -              /dev/disk/by-id/wwn-0x5000cca8c0d68e12
+ 11  3a    -            missing  MISSING  -       -        -                                     -           -           -              /dev/disk/by-id/wwn-0x5000c500ab9fa51b
+ 12  4a    -            missing  MISSING  -       -        -                                     -           -           -              /dev/disk/by-id/wwn-0x5000c500c08a4cea
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 ```
 
 ## Command Reference: `boot`
@@ -302,7 +316,8 @@ Format a superfloppy disk/partition volume: format <name/id> [options]
         Options:
           --fs <ext4|xfs|btrfs>   Filesystem type (default: ext4)
           --label <label>   Set a different internal filesystem label (other than <name>)
-          --luks            Encrypt target first with LUKS2, then format payload filesystem
+          --luks            Encrypt target first with LUKS2, then format payload filesystem.
+                            PBKDF defaults: argon2id, memory=4GiB, threads=4, time=8.
 
         UNDER THE HOOD:
         1.  Safety: Refuses to run if anything is mounted on the target device tree.
@@ -370,6 +385,33 @@ Securely erase a disk: nuke <name/id>
         Note: This is a DESTRUCTIVE operation. Solving two math problems is MANDATORY to proceed.
 
         WARNING: This operation is IRREVERSIBLE.
+```
+
+## Command Reference: `entropy`
+
+```text
+Plot entropy profile over a device byte range (GiB): entropy <name/id> <start_gib> <end_gib> [--step-mib N] [--window-mib N]
+
+        Example:
+          entropy 7a 0 1
+
+        Behavior:
+          - Reads raw device chunks via dd and computes Shannon entropy via ent.
+          - Saves samples and plot under /tmp:
+              /tmp/diskmgr_entropy_<pid>_<ts>.txt
+              /tmp/diskmgr_entropy_<pid>_<ts>.png
+          - Attempts to display the plot on screen via gnuplot/xdg-open.
+```
+
+## Command Reference: `entropise`
+
+```text
+High-entropy random overwrite on a disk or partition: entropise <name/id>
+
+        Performs a full-device single pass using /dev/urandom via dd:
+          dd if=/dev/urandom of=<device> bs=16M status=progress oflag=direct conv=fsync
+
+        This destroys all existing data on the target.
 ```
 
 ## Command Reference: `remove`
@@ -482,7 +524,8 @@ Unlock (if encrypted) and mount a disk: open <name/id>
               * Proceeds to label detection and mounting.
         4.  Decryption (LUKS only):
             - Executes 'passgen' to retrieve the passphrase.
-            - Pipes the passphrase into 'cryptsetup open' to create a cleartext device in /dev/mapper/.
+            - Tries 'cryptsetup open' with on-disk LUKS header first.
+            - If that fails, retries with detached header at ~/.local/share/diskmgr/<mapping_name> when present.
         5.  Mounting:
             - Uses /etc/fstab mountpoint/options when an entry exists for the device.
             - Otherwise identifies preferred mountpoint: /media/$USER/<label>.
@@ -502,7 +545,7 @@ Unlock (if encrypted) and mount a disk: open <name/id>
 ## Command Reference: `close`
 
 ```text
-Unmount and lock (if encrypted) a disk: close <name/id>
+Unmount and lock (if encrypted) a disk: close <name/id> [--force]
 
         UNDER THE HOOD:
         1.  Unmounting (Encrypted & Plain):
@@ -518,13 +561,19 @@ Unmount and lock (if encrypted) a disk: close <name/id>
 ## Command Reference: `luks`
 
 ```text
-LUKS encryption management: luks <passwd|backup|restore|header> [options]
+LUKS encryption management: luks <passwd|params|backup|restore|header|wipe> [options]
 
         Subcommands:
-          passwd <name>           Change the LUKS passphrase.
+          passwd <name>
+                                 Change the LUKS passphrase (old from passgen, new passphrase confirmed via passgen twice).
+          params <name> time=<N> memory=<VALUE> parallelism=<N>
+                                 Change PBKDF parameters without changing passphrase.
+                                 Example: luks params 7a time=8 memory=4GiB parallelism=4
           backup <name> [file]    Save the LUKS header to a file.
+                                 Default file when omitted: ~/.local/share/diskmgr/<name>
           restore <name> <file>   Restore the LUKS header from a file (Destructive).
           header <name>           Print the current LUKS header (cryptsetup luksDump).
+          wipe <name>             Overwrite LUKS header/keyslots with random data (Destructive; test helper).
 ```
 
 ## Command Reference: `label`
