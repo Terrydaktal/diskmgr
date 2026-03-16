@@ -26,7 +26,7 @@ except ImportError:
 # Configuration
 MAP_FILENAME = 'diskmap.tsv'
 PASSGEN_BIN = 'passgen'
-VERSION = '3.4.5'
+VERSION = '3.4.6'
 HISTORY_FILE_ENV = 'DISKMGR_HISTORY'
 DEFAULT_HISTORY_FILE = Path.home() / '.local' / 'state' / 'diskmgr' / 'history'
 MAX_HISTORY_ENTRIES = 5000
@@ -1061,6 +1061,9 @@ class DiskMgrShell(cmd.Cmd):
         print("      (USB uses -d sat). Use: selftest <name/id> --watch to poll progress until complete.")
         print(f"  {Colors.OKGREEN}health <name/id> [alias: smart]{Colors.ENDC}")
         print("      Shows SMART health (smartctl -x) for the underlying disk (USB uses -d sat).")
+        print(f"  {Colors.OKGREEN}entropy <name/id> <start_gib> <end_gib> [--step-mib N] [--window-mib N]{Colors.ENDC}")
+        print("      Samples Shannon entropy over a raw device range and plots it (ent + gnuplot).")
+        print("      Saves data/plot in /tmp and attempts to display the plot on screen.")
 
         print(f"\n{Colors.BOLD}disk/part (applied to mapped disk/partition targets):{Colors.ENDC}")
         print(f"  {Colors.OKGREEN}map <name/id> <name>{Colors.ENDC}")
@@ -1084,6 +1087,8 @@ class DiskMgrShell(cmd.Cmd):
         print("      and rewrites an empty MBR table in MBR mode.")
         print(f"  {Colors.OKGREEN}nuke <name/id>{Colors.ENDC}")
         print("      Secure erase (multi-step hardware-aware wipe) on disk/part.")
+        print(f"  {Colors.OKGREEN}entropise <name/id>{Colors.ENDC}")
+        print("      Single-pass high-entropy overwrite from /dev/urandom on disk/part.")
         print(f"  {Colors.OKGREEN}remove <name/id>{Colors.ENDC}")
         print("      Removes a partition from its parent disk (partition targets only).")
         print(f"  {Colors.OKGREEN}clone <src_name/id> <dst_name/id>{Colors.ENDC}")
@@ -5053,6 +5058,250 @@ class DiskMgrShell(cmd.Cmd):
                 log("Secure erase completed successfully.")
             else:
                 log("Secure erase failed.", 'ERROR')
+        finally:
+            print(f"Duration: {_fmt_hms(time.time() - start_ts)}")
+            _cmd_log_close()
+
+    def do_entropy(self, arg):
+        '''Plot entropy profile over a device byte range (GiB): entropy <name/id> <start_gib> <end_gib> [--step-mib N] [--window-mib N]
+
+        Example:
+          entropy 7a 0 1
+
+        Behavior:
+          - Reads raw device chunks via dd and computes Shannon entropy via ent.
+          - Saves samples and plot under /tmp:
+              /tmp/diskmgr_entropy_<pid>_<ts>.txt
+              /tmp/diskmgr_entropy_<pid>_<ts>.png
+          - Attempts to display the plot on screen via gnuplot/xdg-open.
+        '''
+        parser = CmdArgumentParser(prog='entropy', add_help=False)
+        parser.add_argument('target', help='Mapped target name or discovery ID (#N)')
+        parser.add_argument('start_gib', type=float, help='Range start in GiB')
+        parser.add_argument('end_gib', type=float, help='Range end in GiB (must be > start)')
+        parser.add_argument('--step-mib', type=int, default=10, help='Sampling step in MiB (default: 10)')
+        parser.add_argument('--window-mib', type=int, default=10, help='Read window size in MiB per sample (default: 10)')
+        try:
+            split_args = shlex.split(arg)
+            args = parser.parse_args(split_args)
+        except argparse.ArgumentError as e:
+            log(str(e), 'ERROR')
+            return
+        except SystemExit:
+            return
+
+        if args.start_gib < 0 or args.end_gib < 0:
+            log("start_gib and end_gib must be non-negative.", 'ERROR')
+            return
+        if args.end_gib <= args.start_gib:
+            log("end_gib must be greater than start_gib.", 'ERROR')
+            return
+        if args.step_mib <= 0:
+            log("--step-mib must be a positive integer.", 'ERROR')
+            return
+        if args.window_mib <= 0:
+            log("--window-mib must be a positive integer.", 'ERROR')
+            return
+
+        target = args.target
+        resolved = self.resolve_target(target, allow_id=True)
+        if not resolved:
+            log(f"Unknown target: '{target}'. Use a mapping name or discovery ID (#N).", 'ERROR')
+            log("Tip: run 'list' first to refresh discovery IDs.", 'ERROR')
+            return
+        devnode = os.path.realpath(resolved)
+        if not os.path.exists(devnode):
+            log(f"Target not found: {devnode}", 'ERROR')
+            return
+
+        ent_bin = _find_tool_or_common_paths('ent', [
+            '/usr/bin/ent',
+            '/bin/ent',
+            '/usr/local/bin/ent',
+        ])
+        if ent_bin is None:
+            log("Dependency missing: 'ent' not found. Install package 'ent'.", 'ERROR')
+            return
+        gnuplot_bin = _find_tool_or_common_paths('gnuplot', [
+            '/usr/bin/gnuplot',
+            '/bin/gnuplot',
+            '/usr/local/bin/gnuplot',
+        ])
+        if gnuplot_bin is None:
+            log("Dependency missing: 'gnuplot' not found.", 'ERROR')
+            return
+
+        # Size guard so requested range cannot run past device end.
+        size_bytes = None
+        try:
+            res_sz = run_command(['lsblk', '-bno', 'SIZE', devnode], check=False)
+            size_bytes = _first_int_from_text(getattr(res_sz, 'stdout', '') or '')
+        except Exception:
+            size_bytes = None
+
+        start_mib = int(args.start_gib * 1024.0)
+        end_mib = int(args.end_gib * 1024.0)
+        if end_mib <= start_mib:
+            log("Effective range is empty after GiB->MiB conversion. Increase end_gib.", 'ERROR')
+            return
+        if size_bytes is not None:
+            size_mib = int(size_bytes // (1024 * 1024))
+            if end_mib > size_mib:
+                max_gib = size_mib / 1024.0
+                log(f"Requested end_gib {args.end_gib:g} exceeds device size (~{max_gib:.3f} GiB).", 'ERROR')
+                return
+
+        log(f"Target resolved: {devnode}")
+        log(
+            f"Entropy range: {args.start_gib:g}..{args.end_gib:g} GiB "
+            f"(step={args.step_mib} MiB, window={args.window_mib} MiB)"
+        )
+        run_command(['sudo', '-v'])
+
+        stamp = f"{os.getpid()}_{int(time.time())}"
+        data_file = f"/tmp/diskmgr_entropy_{stamp}.txt"
+        plot_file = f"/tmp/diskmgr_entropy_{stamp}.png"
+
+        total_points = (end_mib - start_mib + args.step_mib - 1) // args.step_mib
+        points_written = 0
+
+        with open(data_file, 'w', encoding='utf-8') as f_data:
+            f_data.write("# offset_gib entropy_bits_per_byte\n")
+            for idx, skip_mib in enumerate(range(start_mib, end_mib, args.step_mib), start=1):
+                count_mib = min(args.window_mib, end_mib - skip_mib)
+                if count_mib <= 0:
+                    break
+                cmd = (
+                    f"dd if={shlex.quote(devnode)} bs=1M count={count_mib} skip={skip_mib} "
+                    f"iflag=fullblock status=none 2>/dev/null | {shlex.quote(ent_bin)} "
+                    f"| awk '/Entropy =/ {{print $3}}'"
+                )
+                res = run_command(['bash', '-lc', cmd], sudo=True, check=False)
+                out = (getattr(res, 'stdout', '') or '').strip()
+                first = out.split()[0] if out else ''
+                try:
+                    ent_val = float(first)
+                except Exception:
+                    log(f"Failed to parse entropy sample at offset {skip_mib} MiB.", 'WARN')
+                    print(f"\rSampling entropy: {idx}/{total_points} (parse warning)        ", end="", flush=True)
+                    continue
+
+                x_gib = skip_mib / 1024.0
+                f_data.write(f"{x_gib:.6f} {ent_val:.6f}\n")
+                points_written += 1
+                print(f"\rSampling entropy: {idx}/{total_points} at {x_gib:.3f} GiB", end="", flush=True)
+        print("")
+
+        if points_written == 0:
+            log(f"No entropy samples were written. Data file: {data_file}", 'ERROR')
+            return
+
+        def _gp_escape(s):
+            return str(s).replace("\\", "\\\\").replace("'", "\\'")
+
+        gp_data = _gp_escape(data_file)
+        gp_plot = _gp_escape(plot_file)
+        gp_title = _gp_escape(f"Entropy Profile: {devnode} [{args.start_gib:g}..{args.end_gib:g} GiB]")
+
+        gp_png_script = (
+            "set terminal pngcairo size 1600,900;"
+            f"set output '{gp_plot}';"
+            f"set title '{gp_title}';"
+            "set xlabel 'Offset (GiB)';"
+            "set ylabel 'Entropy (bits/byte)';"
+            "set grid;"
+            "set yrange [0:8];"
+            f"plot '{gp_data}' using 1:2 with lines linewidth 2 title 'Entropy';"
+        )
+        run_command([gnuplot_bin, '-e', gp_png_script], check=True)
+        log(f"Entropy data saved: {data_file}")
+        log(f"Entropy plot saved: {plot_file}")
+
+        displayed = False
+        if os.environ.get('DISPLAY') or os.environ.get('WAYLAND_DISPLAY'):
+            gp_live_script = (
+                f"set title '{gp_title}';"
+                "set xlabel 'Offset (GiB)';"
+                "set ylabel 'Entropy (bits/byte)';"
+                "set grid;"
+                "set yrange [0:8];"
+                f"plot '{gp_data}' using 1:2 with lines linewidth 2 title 'Entropy';"
+            )
+            res_live = run_command([gnuplot_bin, '-p', '-e', gp_live_script], check=False, capture_output=False)
+            displayed = getattr(res_live, 'returncode', 1) == 0
+
+        if not displayed:
+            res_open = run_command(['xdg-open', plot_file], check=False, capture_output=False)
+            displayed = getattr(res_open, 'returncode', 1) == 0
+        if not displayed:
+            log(f"Could not auto-display plot. Open manually: {plot_file}", 'WARN')
+
+    def do_entropise(self, arg):
+        '''High-entropy random overwrite on a disk or partition: entropise <name/id>
+
+        Performs a full-device single pass using /dev/urandom via dd:
+          dd if=/dev/urandom of=<device> bs=16M status=progress oflag=direct conv=fsync
+
+        This destroys all existing data on the target.
+        '''
+        parser = CmdArgumentParser(prog='entropise', add_help=False)
+        parser.add_argument('target', help='Target name or device')
+
+        try:
+            split_args = shlex.split(arg)
+            args = parser.parse_args(split_args)
+        except argparse.ArgumentError as e:
+            log(str(e), 'ERROR')
+            return
+        except SystemExit:
+            return
+
+        name = args.target
+        real_target = self.resolve_target(name, allow_id=True)
+        if not real_target:
+            log(f"Unknown target: '{name}'. Use a mapping name or discovery ID (#N).", 'ERROR')
+            log("Tip: run 'list' first to refresh discovery IDs.", 'ERROR')
+            return
+        if not os.path.exists(real_target):
+            log(f"Target not found: {real_target}", 'ERROR')
+            return
+
+        real_target = os.path.realpath(real_target)
+        if self._block_if_root_drive(real_target, f"entropise {name}"):
+            return
+        log(f"Target resolved: {real_target}")
+
+        # Refuse to operate on mounted devices.
+        try:
+            res_m = run_command(['lsblk', '-nr', '-o', 'MOUNTPOINT', real_target], check=False)
+            mounts = [ln.strip() for ln in (getattr(res_m, 'stdout', '') or '').splitlines() if ln.strip()]
+            if mounts:
+                log(f"OPERATION BLOCKED: {real_target} has mounted filesystems ({', '.join(mounts)}). Unmount/close it first.", 'ERROR')
+                return
+        except Exception:
+            pass
+
+        log(f"ENTROPISE WARNING: About to overwrite all data on {real_target} with high-entropy random bytes from /dev/urandom.")
+        if not self.extensive_confirm(f"{name} ({real_target})"):
+            return
+
+        run_command(['sudo', '-v'])
+
+        start_ts = time.time()
+        log_path = _cmd_log_open("entropise") if (_CMD_LOG_FH is None) else _CMD_LOG_PATH
+        if log_path:
+            print(f"Log: {log_path}")
+        try:
+            log(f"Starting entropise on {real_target} (single random pass)...")
+            run_command(
+                ['dd', 'if=/dev/urandom', f'of={real_target}', 'bs=16M', 'status=progress', 'oflag=direct', 'conv=fsync'],
+                sudo=True,
+                capture_output=False
+            )
+            run_command(['sync'], sudo=True, check=False, capture_output=False)
+            log("Entropise completed successfully.")
+        except Exception as e:
+            log(f"Entropise failed: {e}", 'ERROR')
         finally:
             print(f"Duration: {_fmt_hms(time.time() - start_ts)}")
             _cmd_log_close()
