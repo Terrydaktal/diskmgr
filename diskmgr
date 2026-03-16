@@ -26,7 +26,7 @@ except ImportError:
 # Configuration
 MAP_FILENAME = 'diskmap.tsv'
 PASSGEN_BIN = 'passgen'
-VERSION = '3.4.4'
+VERSION = '3.4.5'
 HISTORY_FILE_ENV = 'DISKMGR_HISTORY'
 DEFAULT_HISTORY_FILE = Path.home() / '.local' / 'state' / 'diskmgr' / 'history'
 MAX_HISTORY_ENTRIES = 5000
@@ -34,6 +34,7 @@ LUKS_PBKDF_DEFAULT_THREADS = 4
 LUKS_PBKDF_DEFAULT_TIME = 8
 LUKS_PBKDF_DEFAULT_MEMORY_KIB = 4 * 1024 * 1024
 LUKS_PBKDF_DEFAULT_MEMORY_LABEL = '4GiB'
+LUKS_HEADER_BACKUP_DIR = Path.home() / '.local' / 'share' / 'diskmgr'
 
 # ANSI Colors
 class Colors:
@@ -1093,6 +1094,7 @@ class DiskMgrShell(cmd.Cmd):
         print(f"  {Colors.OKGREEN}open <name/id>{Colors.ENDC}")
         print("      Opens and mounts a plain or encrypted partition or superfloppy.")
         print("      For encrypted targets, unlocks LUKS then mounts payload filesystem.")
+        print("      LUKS open tries on-disk header first, then ~/.local/share/diskmgr/<name> as detached header backup.")
         print("      Btrfs mounts are enforced with compression (compress=zstd:3).")
         print("      Uses /etc/fstab mountpoint/options when an entry exists; otherwise /media/$USER/<label>.")
         print(f"  {Colors.OKGREEN}close <name/id> [--force]{Colors.ENDC}")
@@ -1100,11 +1102,14 @@ class DiskMgrShell(cmd.Cmd):
         print("      close #id (example: close #6): unmount-only for that discovered row; does NOT run cryptsetup close.")
         print("      With --force, kills mount-holder processes (SIGKILL) if unmount is busy, then retries unmount.")
         print("      Use #id if you want to close only the payload filesystem and keep the LUKS container open.")
-        print(f"  {Colors.OKGREEN}luks <passwd|params|backup|restore|header> [options]{Colors.ENDC}")
+        print(f"  {Colors.OKGREEN}luks <passwd|params|backup|restore|header|wipe> [options]{Colors.ENDC}")
         print("      LUKS management for mapped containers (grouped under filesystem workflows):")
         print("      password change, PBKDF-memory tuning, header backup/print, and header restore.")
+        print("      wipe overwrites the LUKS header/keyslot area with random data (destructive test helper).")
+        print("      passwd/params auto-fallback to detached header ~/.local/share/diskmgr/<name> when on-disk header is missing.")
         print("      passwd uses passgen for current passphrase and double-prompts new passphrase for confirmation.")
         print(f"      params uses passgen for current passphrase and updates PBKDF params (defaults: time={LUKS_PBKDF_DEFAULT_TIME}, parallelism={LUKS_PBKDF_DEFAULT_THREADS}).")
+        print(f"      backup default path: {LUKS_HEADER_BACKUP_DIR}/<name>")
         print(f"  {Colors.OKGREEN}label <name> [new_label] [--fstab]{Colors.ENDC}")
         print("      Get or set the filesystem label of an OPEN disk.")
         print("      On relabel: removes old LABEL-based fstab entry. With --fstab, adds UUID entry at /mnt/<label>.")
@@ -3358,7 +3363,8 @@ class DiskMgrShell(cmd.Cmd):
               * Proceeds to label detection and mounting.
         4.  Decryption (LUKS only):
             - Executes 'passgen' to retrieve the passphrase.
-            - Pipes the passphrase into 'cryptsetup open' to create a cleartext device in /dev/mapper/.
+            - Tries 'cryptsetup open' with on-disk LUKS header first.
+            - If that fails, retries with detached header at ~/.local/share/diskmgr/<mapping_name> when present.
         5.  Mounting:
             - Uses /etc/fstab mountpoint/options when an entry exists for the device.
             - Otherwise identifies preferred mountpoint: /media/$USER/<label>.
@@ -3423,6 +3429,9 @@ class DiskMgrShell(cmd.Cmd):
         if self._block_if_root_drive(mapped_devnode, f"open {op_ref}"):
             return
         devnode = mapped_devnode
+        detached_header = str(LUKS_HEADER_BACKUP_DIR / mapping_name) if mapping_name else None
+        has_detached_header = bool(detached_header and os.path.isfile(detached_header))
+        force_detached_open = False
 
         # Check LUKS / filesystem, with safe partition auto-detection when mapping points at a disk.
         is_luks = False
@@ -3432,6 +3441,16 @@ class DiskMgrShell(cmd.Cmd):
                 is_luks = True
         except Exception:
             pass
+
+        # If on-disk header was wiped but a detached backup exists for this mapping,
+        # still treat it as a LUKS open path.
+        if not is_luks and has_detached_header:
+            log(
+                f"On-disk LUKS signature not found on {devnode}; "
+                f"detached header backup found at {detached_header}. Will attempt detached-header unlock."
+            )
+            is_luks = True
+            force_detached_open = True
 
         if not is_luks:
             dev_type = _lsblk_type(devnode)
@@ -3542,20 +3561,65 @@ class DiskMgrShell(cmd.Cmd):
 
             if needs_open:
                 log(f"Opening LUKS mapping {mapping_name}...")
-                # Use passgen
+                # Get passphrase from passgen once and reuse for any fallback attempt.
                 pg_cmd = subprocess.Popen([PASSGEN_BIN], stdout=subprocess.PIPE, text=True)
-                # Pipe to cryptsetup
-                try:
-                    run_command(
-                        ['cryptsetup', 'open', '--key-file', '-', src, mapping_name],
-                        input_str=pg_cmd.communicate()[0],
+                passphrase = pg_cmd.communicate()[0]
+
+                if force_detached_open:
+                    if not os.path.isfile(detached_header):
+                        log(f"Detached header backup missing at open-time: {detached_header}", 'ERROR')
+                        return
+                    log(f"Opening with detached header backup: {detached_header}")
+                    res_detached = run_command(
+                        ['cryptsetup', 'open', '--header', detached_header, '--key-file', '-', devnode, mapping_name],
+                        input_str=passphrase,
                         sudo=True,
-                        check=True
+                        check=False
                     )
-                    log("LUKS opened.")
-                except Exception as e:
-                    log(f"Failed to open LUKS: {e}", 'ERROR')
-                    return
+                    if getattr(res_detached, 'returncode', 1) == 0:
+                        log("LUKS opened using detached header backup.")
+                    else:
+                        detached_err = (getattr(res_detached, 'stderr', '') or '').strip()
+                        log("Failed to open LUKS using detached header backup.", 'ERROR')
+                        if detached_err:
+                            log(f"Detached header error: {detached_err}", 'ERROR')
+                        return
+                else:
+                    # Primary attempt: on-disk header.
+                    res_open = run_command(
+                        ['cryptsetup', 'open', '--key-file', '-', devnode, mapping_name],
+                        input_str=passphrase,
+                        sudo=True,
+                        check=False
+                    )
+                    if getattr(res_open, 'returncode', 1) == 0:
+                        log("LUKS opened.")
+                    else:
+                        primary_err = (getattr(res_open, 'stderr', '') or '').strip()
+                        if os.path.isfile(detached_header):
+                            log(f"On-disk LUKS header open failed; retrying with detached header: {detached_header}")
+                            res_detached = run_command(
+                                ['cryptsetup', 'open', '--header', detached_header, '--key-file', '-', devnode, mapping_name],
+                                input_str=passphrase,
+                                sudo=True,
+                                check=False
+                            )
+                            if getattr(res_detached, 'returncode', 1) == 0:
+                                log("LUKS opened using detached header backup.")
+                            else:
+                                detached_err = (getattr(res_detached, 'stderr', '') or '').strip()
+                                log("Failed to open LUKS with on-disk and detached headers.", 'ERROR')
+                                if primary_err:
+                                    log(f"On-disk header error: {primary_err}", 'ERROR')
+                                if detached_err:
+                                    log(f"Detached header error: {detached_err}", 'ERROR')
+                                return
+                        else:
+                            log("Failed to open LUKS with on-disk header.", 'ERROR')
+                            if primary_err:
+                                log(primary_err, 'ERROR')
+                            log(f"No detached header backup found at: {detached_header}", 'ERROR')
+                            return
         else:
             # Plain disk
             target_to_mount = devnode
@@ -4241,7 +4305,7 @@ class DiskMgrShell(cmd.Cmd):
             log(f"Failed to mount at {new_mountpoint}: {e}", 'ERROR')
 
     def do_luks(self, arg):
-        '''LUKS encryption management: luks <passwd|params|backup|restore|header> [options]
+        '''LUKS encryption management: luks <passwd|params|backup|restore|header|wipe> [options]
         
         Subcommands:
           passwd <name>
@@ -4250,8 +4314,10 @@ class DiskMgrShell(cmd.Cmd):
                                  Change PBKDF parameters without changing passphrase.
                                  Example: luks params 7a time=8 memory=4GiB parallelism=4
           backup <name> [file]    Save the LUKS header to a file.
+                                 Default file when omitted: ~/.local/share/diskmgr/<name>
           restore <name> <file>   Restore the LUKS header from a file (Destructive).
           header <name>           Print the current LUKS header (cryptsetup luksDump).
+          wipe <name>             Overwrite LUKS header/keyslots with random data (Destructive; test helper).
         '''
         args = shlex.split(arg) if arg else []
         if not args:
@@ -4342,10 +4408,19 @@ class DiskMgrShell(cmd.Cmd):
             devnode = os.path.realpath(src)
             if self._block_if_root_drive(devnode, f"luks passwd {name}"):
                 return
+            detached_header = str(LUKS_HEADER_BACKUP_DIR / name)
+            use_detached_header = False
             res = run_command(['cryptsetup', 'isLuks', devnode], sudo=True, check=False)
             if res.returncode != 0:
-                log(f"Device {name} ({devnode}) is not a LUKS encrypted device.", 'ERROR')
-                return
+                if os.path.isfile(detached_header):
+                    use_detached_header = True
+                    log(
+                        f"On-disk LUKS signature not found for {name} ({devnode}); "
+                        f"using detached header for passphrase update: {detached_header}"
+                    )
+                else:
+                    log(f"Device {name} ({devnode}) is not a LUKS encrypted device.", 'ERROR')
+                    return
             log(f"Starting passphrase change for {name} ({devnode})...")
             old_key_file = None
             new_key_file = None
@@ -4375,21 +4450,23 @@ class DiskMgrShell(cmd.Cmd):
                 old_key_file = _write_temp_key('diskmgr_luks_old_', old_key)
                 new_key_file = _write_temp_key('diskmgr_luks_new_', new_key)
 
-                cmd_add = [
-                    'cryptsetup',
-                    'luksAddKey',
+                cmd_add = ['cryptsetup', 'luksAddKey']
+                if use_detached_header:
+                    cmd_add.extend(['--header', detached_header])
+                cmd_add.extend([
                     devnode,
                     '--key-file', old_key_file,
                     '--new-keyfile', new_key_file,
-                ]
+                ])
                 run_command(cmd_add, sudo=True, capture_output=False)
 
-                cmd_remove = [
-                    'cryptsetup',
-                    'luksRemoveKey',
+                cmd_remove = ['cryptsetup', 'luksRemoveKey']
+                if use_detached_header:
+                    cmd_remove.extend(['--header', detached_header])
+                cmd_remove.extend([
                     devnode,
                     '--key-file', old_key_file,
-                ]
+                ])
                 run_command(cmd_remove, sudo=True, capture_output=False)
                 log("Passphrase updated successfully (added new key and removed old key).")
             except Exception as e:
@@ -4461,10 +4538,19 @@ class DiskMgrShell(cmd.Cmd):
             if self._block_if_root_drive(devnode, f"luks params {name} time={time_cost} memory={opts['memory']} parallelism={parallelism}"):
                 return
 
+            detached_header = str(LUKS_HEADER_BACKUP_DIR / name)
+            use_detached_header = False
             res = run_command(['cryptsetup', 'isLuks', devnode], sudo=True, check=False)
             if res.returncode != 0:
-                log(f"Device {name} ({devnode}) is not a LUKS encrypted device.", 'ERROR')
-                return
+                if os.path.isfile(detached_header):
+                    use_detached_header = True
+                    log(
+                        f"On-disk LUKS signature not found for {name} ({devnode}); "
+                        f"using detached header for PBKDF parameter update: {detached_header}"
+                    )
+                else:
+                    log(f"Device {name} ({devnode}) is not a LUKS encrypted device.", 'ERROR')
+                    return
 
             log(f"Starting PBKDF parameter update for {name} ({devnode})...")
             key_file = None
@@ -4479,16 +4565,17 @@ class DiskMgrShell(cmd.Cmd):
                     f"Setting PBKDF params: memory={opts['memory']} ({mem_kib:,} KiB), "
                     f"argon2id, parallelism={parallelism}, time={time_cost}"
                 )
-                cmd = [
-                    'cryptsetup',
-                    'luksConvertKey',
+                cmd = ['cryptsetup', 'luksConvertKey']
+                if use_detached_header:
+                    cmd.extend(['--header', detached_header])
+                cmd.extend([
                     devnode,
                     '--key-file', key_file,
                     '--pbkdf', 'argon2id',
                     '--pbkdf-memory', str(mem_kib),
                     '--pbkdf-parallel', str(parallelism),
                     '--pbkdf-force-iterations', str(time_cost),
-                ]
+                ])
                 run_command(cmd, sudo=True, capture_output=False)
                 log("PBKDF parameters updated successfully.")
             except Exception as e:
@@ -4501,7 +4588,15 @@ class DiskMgrShell(cmd.Cmd):
                 log("Usage: luks backup <name> [filename]", 'ERROR')
                 return
             name = sub_args[0]
-            filename = sub_args[1] if len(sub_args) > 1 else f"{name}.header.bak"
+            if len(sub_args) > 1:
+                filename = os.path.expanduser(sub_args[1])
+            else:
+                try:
+                    LUKS_HEADER_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+                except Exception as e:
+                    log(f"Failed to create default backup directory {LUKS_HEADER_BACKUP_DIR}: {e}", 'ERROR')
+                    return
+                filename = str(LUKS_HEADER_BACKUP_DIR / name)
             src = self.resolve_target(name)
             if not src:
                 log(f"Unknown target: '{name}'", 'ERROR')
@@ -4566,6 +4661,94 @@ class DiskMgrShell(cmd.Cmd):
                 print(getattr(dump, 'stdout', '') or "")
             except Exception as e:
                 log(f"Failed to print LUKS header: {e}", 'ERROR')
+        elif subcmd == 'wipe':
+            if len(sub_args) != 1:
+                log("Usage: luks wipe <name>", 'ERROR')
+                return
+            name = sub_args[0]
+            src = self.resolve_target(name)
+            if not src:
+                log(f"Unknown target: '{name}'", 'ERROR')
+                return
+            devnode = os.path.realpath(src)
+            if self._block_if_root_drive(devnode, f"luks wipe {name}"):
+                return
+
+            res = run_command(['cryptsetup', 'isLuks', devnode], sudo=True, check=False)
+            if res.returncode != 0:
+                log(f"Device {devnode} is not a valid LUKS device.", 'ERROR')
+                return
+
+            # Safety: do not wipe while an active dm-crypt mapping holds this source device.
+            src_kname = os.path.basename(devnode)
+            holders_dir = f"/sys/class/block/{src_kname}/holders"
+            active_holders = []
+            try:
+                for h in sorted(os.listdir(holders_dir)) if os.path.isdir(holders_dir) else []:
+                    dm_name_file = f"/sys/class/block/{h}/dm/name"
+                    friendly = h
+                    try:
+                        if os.path.isfile(dm_name_file):
+                            with open(dm_name_file, 'r', encoding='utf-8', errors='replace') as f_dm:
+                                txt = f_dm.read().strip()
+                                if txt:
+                                    friendly = txt
+                    except Exception:
+                        pass
+                    active_holders.append(friendly)
+            except Exception:
+                pass
+
+            if active_holders:
+                log(
+                    f"Refusing to wipe LUKS header while device is in use by active mapper(s): {', '.join(active_holders)}. "
+                    f"Close it first (example: close {name}).",
+                    'ERROR'
+                )
+                return
+
+            # Determine how much of the start of the device to wipe:
+            # use data-segment offset from luksDump when available; fallback to 16 MiB.
+            wipe_bytes = 16 * 1024 * 1024
+            try:
+                dump = run_command(['cryptsetup', 'luksDump', devnode], sudo=True, capture_output=True, check=False)
+                if getattr(dump, 'returncode', 1) == 0:
+                    out = getattr(dump, 'stdout', '') or ''
+                    m = re.search(r'^\s*offset:\s*([0-9]+)\s+\[bytes\]', out, flags=re.MULTILINE)
+                    if m:
+                        wipe_bytes = int(m.group(1))
+                else:
+                    log("Could not parse luksDump offset; using fallback wipe span of 16 MiB.", 'WARN')
+            except Exception:
+                log("Could not inspect luksDump; using fallback wipe span of 16 MiB.", 'WARN')
+
+            if wipe_bytes <= 0:
+                wipe_bytes = 16 * 1024 * 1024
+            bs = 4096
+            blocks = max(1, (wipe_bytes + bs - 1) // bs)
+            wipe_len = blocks * bs
+            wipe_len_pretty = self._format_bytes_binary(str(wipe_len), decimals=2)
+
+            log(
+                f"WIPE WARNING: About to overwrite first {wipe_len_pretty} "
+                f"({wipe_len:,} bytes) of {name} ({devnode}) with random data."
+            )
+            log("This is destructive and intended only for detached-header/restore testing.", 'WARN')
+            if not self.extensive_confirm(f"luks wipe {name} ({devnode})"):
+                return
+
+            run_command(['sudo', '-v'])
+            try:
+                run_command(
+                    ['dd', 'if=/dev/urandom', f'of={devnode}', f'bs={bs}', f'count={blocks}', 'conv=notrunc,fsync', 'status=progress'],
+                    sudo=True,
+                    capture_output=False
+                )
+                run_command(['sync'], sudo=True, check=False, capture_output=False)
+                log(f"LUKS header wipe completed: wrote {wipe_len:,} bytes of random data to {devnode}.")
+                log("Device should now fail on-disk-header unlock until restored or opened with detached header.", 'WARN')
+            except Exception as e:
+                log(f"LUKS header wipe failed: {e}", 'ERROR')
         else:
             log(f"Unknown LUKS subcommand: {subcmd}", 'ERROR')
             self.do_help('luks')
