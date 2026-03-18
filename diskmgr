@@ -26,7 +26,7 @@ except ImportError:
 # Configuration
 MAP_FILENAME = 'diskmap.tsv'
 PASSGEN_BIN = 'passgen'
-VERSION = '3.4.6'
+VERSION = '3.4.9'
 HISTORY_FILE_ENV = 'DISKMGR_HISTORY'
 DEFAULT_HISTORY_FILE = Path.home() / '.local' / 'state' / 'diskmgr' / 'history'
 MAX_HISTORY_ENTRIES = 5000
@@ -1041,6 +1041,86 @@ class DiskMgrShell(cmd.Cmd):
 
         return "-"
 
+    def find_serial_wwid_path(self, dev_node, type_='disk'):
+        """
+        Return a serial-style /dev/disk/by-id path for a disk/partition when available.
+        Prefers model/serial style IDs (e.g. nvme-..., ata-...) over IEEE/EUI links.
+        """
+        if type_ not in ('disk', 'part'):
+            return "-"
+        by_id_dir = Path('/dev/disk/by-id')
+        if not by_id_dir.exists():
+            return "-"
+        try:
+            target = Path(f"/dev/{dev_node}").resolve()
+        except Exception:
+            return "-"
+
+        matches = []
+        for link in by_id_dir.iterdir():
+            try:
+                name = link.name
+                if type_ == 'disk' and re.search(r'-part[0-9]+$', name):
+                    continue
+                if type_ == 'part' and not re.search(r'-part[0-9]+$', name):
+                    continue
+                if link.resolve() == target:
+                    matches.append(str(link))
+            except Exception:
+                continue
+        if not matches:
+            return "-"
+
+        def _score(p):
+            b = os.path.basename(p)
+            if type_ == 'part' and re.search(r'-part[0-9]+$', b):
+                return -1
+            if b.startswith('nvme-') and not b.startswith('nvme-eui.'):
+                return 0
+            if b.startswith('ata-'):
+                return 1
+            if b.startswith('scsi-'):
+                return 2
+            if b.startswith('usb-'):
+                return 3
+            if b.startswith('wwn-') or b.startswith('nvme-eui.'):
+                return 9
+            return 5
+
+        matches.sort(key=lambda p: (_score(p), p))
+        return matches[0]
+
+    def find_pci_path(self, dev_node, type_='disk'):
+        """Return a /dev/disk/by-path PCI link for a disk/partition when available."""
+        if type_ not in ('disk', 'part'):
+            return "-"
+        by_path_dir = Path('/dev/disk/by-path')
+        if not by_path_dir.exists():
+            return "-"
+        try:
+            target = Path(f"/dev/{dev_node}").resolve()
+        except Exception:
+            return "-"
+
+        matches = []
+        for link in by_path_dir.iterdir():
+            try:
+                name = link.name
+                if 'pci-' not in name:
+                    continue
+                if type_ == 'disk' and re.search(r'-part[0-9]+$', name):
+                    continue
+                if type_ == 'part' and not re.search(r'-part[0-9]+$', name):
+                    continue
+                if link.resolve() == target:
+                    matches.append(str(link))
+            except Exception:
+                continue
+        if not matches:
+            return "-"
+        matches.sort()
+        return matches[0]
+
     def do_help(self, arg):
         'List available commands with "help" or detailed help with "help cmd".'
         if arg:
@@ -1332,7 +1412,9 @@ class DiskMgrShell(cmd.Cmd):
                 "PKNAME": "",
                 "NAME": friendly_name,
                 "DEVICE": "-",
-                "PERSISTENT PATH (IEEE)": target_path,
+                "PERSISTENT PATH (IEEE EUI WWID)": target_path,
+                "Model_Serial WWID": "-",
+                "PCI": "-",
                 "TYPE": "missing",
                 "STATE": "MISSING",
                 "OWNER": "-",
@@ -1351,7 +1433,7 @@ class DiskMgrShell(cmd.Cmd):
                 "FSMETA": "-",
                 "FSUSED-BYTES": "",
                 "FSMOUNTPOINTS": "-",
-                "SOURCE": "-",
+                "MOUNTSOURCE": "-",
                 "FS-OPTIONS": "-",
                 "VFS-OPTIONS": "-",
                 "FS-USED": "-",
@@ -1402,7 +1484,7 @@ class DiskMgrShell(cmd.Cmd):
                     continue
                 if (r.get('NAME') or '') != '-':
                     continue
-                pdp = str(r.get('PERSISTENT PATH (IEEE)') or '').strip()
+                pdp = str(r.get('PERSISTENT PATH (IEEE EUI WWID)') or '').strip()
                 if not rid or rid == '-' or not pdp or pdp == '-':
                     continue
                 self.unmapped_cache.append({'id': rid, 'pdp': pdp})
@@ -1662,12 +1744,12 @@ class DiskMgrShell(cmd.Cmd):
             "FSRESERVED",
             "FSMETA",
             "FSMOUNTPOINTS",
-            "SOURCE",
+            "MOUNTSOURCE",
             "FS-OPTIONS",
             "VFS-OPTIONS",
             "FSTAB",
             "FSTAB ENTRY",
-            "PERSISTENT PATH (IEEE)",
+            "PERSISTENT PATH (IEEE EUI WWID)",
         ]
 
     def _lsblk_standard_cols(self):
@@ -1683,7 +1765,7 @@ class DiskMgrShell(cmd.Cmd):
             "SIZE",
             "FSAVAIL",
             "FSMOUNTPOINTS",
-            "PERSISTENT PATH (IEEE)",
+            "PERSISTENT PATH (IEEE EUI WWID)",
         ]
 
     def _lsblk_concise_cols(self):
@@ -1693,7 +1775,7 @@ class DiskMgrShell(cmd.Cmd):
             "DEVICE",
             "TYPE",
             "MOUNTPOINT",
-            "PERSISTENT PATH (IEEE)",
+            "PERSISTENT PATH (IEEE EUI WWID)",
         ]
 
     def _resolve_fstab_spec_to_realdev(self, spec):
@@ -2452,6 +2534,16 @@ class DiskMgrShell(cmd.Cmd):
                 pdp = self.find_persistent_path(name, wwn=wwn, type_=dtype or 'disk')
             except Exception:
                 pdp = "-"
+            model_serial_wwid = "-"
+            try:
+                model_serial_wwid = self.find_serial_wwid_path(name, type_=dtype or 'disk')
+            except Exception:
+                model_serial_wwid = "-"
+            pci_path = "-"
+            try:
+                pci_path = self.find_pci_path(name, type_=dtype or 'disk')
+            except Exception:
+                pci_path = "-"
 
             # Tree characters
             if is_root:
@@ -2521,7 +2613,9 @@ class DiskMgrShell(cmd.Cmd):
                 "PKNAME": str(dev.get('pkname') or ""),
                 "NAME": friendly,
                 "DEVICE": tree_part,
-                "PERSISTENT PATH (IEEE)": pdp,
+                "PERSISTENT PATH (IEEE EUI WWID)": pdp,
+                "Model_Serial WWID": model_serial_wwid,
+                "PCI": pci_path,
                 "TYPE": dtype,
                 "STATE": state,
                 "OWNER": owner,
@@ -2540,7 +2634,7 @@ class DiskMgrShell(cmd.Cmd):
                 "FSMETA": fs_meta,
                 "FSUSED-BYTES": fsused_bytes_raw,
                 "FSMOUNTPOINTS": mounts,
-                "SOURCE": mount_source,
+                "MOUNTSOURCE": mount_source,
                 "FS-OPTIONS": fs_options,
                 "VFS-OPTIONS": vfs_options,
                 "FS-USED": fs_used_metric,
@@ -2719,8 +2813,24 @@ class DiskMgrShell(cmd.Cmd):
         for i, r in enumerate(rows, start=1):
             print(f"{Colors.BOLD}Entry {start_index + i - 1}{Colors.ENDC}")
 
+            is_luks_row = str(r.get('FSTYPE') or '').strip().lower() == 'crypto_luks'
             for c in cols:
-                print(f"  {c}: {self._lsblk_list_value(r, c)}")
+                value = self._lsblk_list_value(r, c)
+                if str(value or "").strip() in ("", "-"):
+                    continue
+                label = c
+                if is_luks_row and c == "FSVER":
+                    label = "LUKSVER"
+                elif is_luks_row and c == "FSUUID":
+                    label = "LUKSUUID"
+                print(f"  {label}: {value}")
+            if str(r.get('TYPE') or '').strip().lower() in ('disk', 'part'):
+                model_serial = self._lsblk_list_value(r, 'Model_Serial WWID')
+                if str(model_serial or "").strip() not in ("", "-"):
+                    print(f"  Model_Serial WWID: {model_serial}")
+                pci = self._lsblk_list_value(r, 'PCI')
+                if str(pci or "").strip() not in ("", "-"):
+                    print(f"  PCI: {pci}")
             if i != len(rows):
                 print("")
 
@@ -2804,10 +2914,27 @@ class DiskMgrShell(cmd.Cmd):
     def _lsblk_list_value(self, row, col):
         """Return display value for list-mode cells."""
         if col == "DEVICE":
+            kname = str(row.get("KNAME", "") or "").strip()
+            if kname and kname != "-":
+                return f"/dev/{kname}"
             dev = str(row.get("DEVICE", "") or "")
-            # list-list only: remove lsblk tree glyph prefix (table view keeps glyphs).
             dev = re.sub(r"^[\s│]*[├└]─\s*", "", dev)
             return dev
+        if col == "FSUUID":
+            u = str(row.get("FSUUID", "") or "").strip()
+            if u and u != "-":
+                return f"/dev/disk/by-uuid/{u}"
+            return u
+        if col == "PARTUUID":
+            pu = str(row.get("PARTUUID", "") or "").strip()
+            if pu and pu != "-":
+                return f"/dev/disk/by-partuuid/{pu}"
+            return pu
+        if col == "FSLABEL":
+            lbl = str(row.get("FSLABEL", "") or "").strip()
+            if lbl and lbl != "-":
+                return f"/dev/disk/by-label/{lbl}"
+            return lbl
         if col == "SIZE":
             size = str(row.get("SIZE", "") or "")
             size_gb = self._size_bytes_to_gb_label(row.get("SIZE-BYTES", ""))
@@ -3415,7 +3542,10 @@ class DiskMgrShell(cmd.Cmd):
                             m_cur_boot = re.match(r'^\(,([^)]+)\)(.*)$', ln)
                             if m_cur_boot:
                                 part = m_cur_boot.group(1)
-                                print(f"    {ln} (use current boot disk passed from MBR, partition {part})")
+                                print(
+                                    f"    {Colors.OKGREEN}{ln}{Colors.ENDC} "
+                                    f"(use current boot disk passed from MBR, partition {part} as the root to find grub.cfg)"
+                                )
                             else:
                                 print(f"    {ln}")
                     else:
@@ -3506,9 +3636,19 @@ class DiskMgrShell(cmd.Cmd):
                                 if msg2:
                                     print(f"    LZMA2 note: {msg2}")
         
-        # AWK script parses Title <TAB> Entry <TAB> SEARCH <TAB> ROOT
+        # AWK script parses using ASCII Unit Separator (\x1f) to avoid collisions
+        # with tabs/spaces present in grub.cfg command lines:
+        #   Submenu <US> Entry <US> SEARCH_UUID <US> ROOT_UUID <US> SEARCH_LINE <US> LINUX_LINE <US> INITRD_LINE
         awk_script = r"""
+  BEGIN { SEP=sprintf("%c",31) }
   /search[[:space:]].*--fs-uuid/ {g_search=$NF}
+  /search[[:space:]].*--fs-uuid/ {g_search_line=$0}
+
+  function trim(s) {
+    sub(/^[[:space:]]+/, "", s)
+    sub(/[[:space:]]+$/, "", s)
+    return s
+  }
 
   /^[[:space:]]*submenu / {
     submenu_title=$2
@@ -3516,11 +3656,15 @@ class DiskMgrShell(cmd.Cmd):
   }
 
   /^[[:space:]]*menuentry / {
-    e=$2; search_u=""; root_u=""; in_entry=1
+    e=$2; search_u=""; root_u=""; search_line=""; linux_line=""; initrd_line=""; in_entry=1
     next
   }
 
   in_entry && search_u=="" && /search[[:space:]].*--fs-uuid/ {search_u=$NF}
+  in_entry && search_line=="" && /search[[:space:]].*--fs-uuid/ {search_line=trim($0)}
+  in_entry && linux_line=="" && /(linux|linuxefi)[[:space:]]/ {linux_line=trim($0)}
+  in_entry && initrd_line=="" && /(initrd|initrdefi)[[:space:]]/ {initrd_line=trim($0)}
+
   in_entry && root_u=="" && /(linux|linuxefi)[[:space:]].*root=UUID=/ {
     match($0,/root=UUID=[0-9a-fA-F-]+/)
     if (RSTART) root_u=substr($0,RSTART+10,RLENGTH-10)
@@ -3530,9 +3674,12 @@ class DiskMgrShell(cmd.Cmd):
     if (submenu_title=="") submenu_title="Top-level"
     s = (search_u!="" ? search_u : g_search)
     r = (root_u!=""   ? root_u   : "-")
-    if (e ~ /UEFI Firmware Settings/) { s="(firmware)"; r="(firmware)" }
+    sl = (search_line!="" ? search_line : trim(g_search_line))
+    ll = linux_line
+    il = initrd_line
+    if (e ~ /UEFI Firmware Settings/) { s="(firmware)"; r="(firmware)"; sl=""; ll=""; il="" }
     
-    print submenu_title "\t" e "\t" s "\t" r
+    print submenu_title SEP e SEP s SEP r SEP sl SEP ll SEP il
     in_entry=0
   }
 """
@@ -3578,26 +3725,94 @@ class DiskMgrShell(cmd.Cmd):
                         
                         if res.stdout.strip():
                             entries = {}
+                            uuid_re = re.compile(r'\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b')
+                            uuid_dev_cache = {}
+
+                            def _normalize_whitespace(s):
+                                return " ".join((s or "").split()).strip()
+
+                            def _normalize_boot_line(line, kind):
+                                line = _normalize_whitespace(line)
+                                if not line:
+                                    return ""
+                                if kind == 'search':
+                                    if re.match(r'^search\b', line):
+                                        return re.sub(r'^search\b', 'search', line, count=1)
+                                    # Bare UUID fallback.
+                                    if re.match(r'^[0-9a-fA-F-]{36}$', line):
+                                        return f"search --fs-uuid --set=root {line}"
+                                    return f"search {line}"
+                                if kind == 'linux':
+                                    if re.match(r'^(linuxefi|linux)\b', line):
+                                        return re.sub(r'^(linuxefi|linux)\b', 'linux', line, count=1)
+                                    return f"linux {line}"
+                                if kind == 'initrd':
+                                    if re.match(r'^(initrdefi|initrd)\b', line):
+                                        return re.sub(r'^(initrdefi|initrd)\b', 'initrd', line, count=1)
+                                    return f"initrd {line}"
+                                return line
+
+                            def _annotate_uuids(line):
+                                def _repl(m):
+                                    u = m.group(0)
+                                    if u not in uuid_dev_cache:
+                                        uuid_dev_cache[u] = self.resolve_uuid_to_dev(u) or "-"
+                                    dev = uuid_dev_cache[u]
+                                    return f"{Colors.OKBLUE}{u}{Colors.ENDC} [{dev}]"
+                                return uuid_re.sub(_repl, line or "")
+
                             for line in res.stdout.strip().splitlines():
-                                if '\t' in line:
-                                    parts = [x.strip() for x in line.split('\t')]
-                                    if len(parts) == 4:
-                                        sub, title, s_uuid, r_uuid = parts
-                                        if sub not in entries: entries[sub] = []
-                                        entries[sub].append((title, s_uuid, r_uuid))
+                                parts = [x.strip() for x in line.split('\x1f', 6)]
+                                if len(parts) >= 4:
+                                    sub = parts[0]
+                                    title = parts[1]
+                                    s_uuid = parts[2]
+                                    r_uuid = parts[3]
+                                    s_line = parts[4] if len(parts) > 4 else ""
+                                    l_line = parts[5] if len(parts) > 5 else ""
+                                    i_line = parts[6] if len(parts) > 6 else ""
+                                    if sub not in entries: entries[sub] = []
+                                    entries[sub].append((title, s_uuid, r_uuid, s_line, l_line, i_line))
                             
                             for sub, items in entries.items():
                                 print(f"\n{sub}")
-                                for i, (title, s_uuid, r_uuid) in enumerate(items):
+                                for i, (title, s_uuid, r_uuid, s_line, l_line, i_line) in enumerate(items):
                                     connector = "  └─" if i == len(items) - 1 else "  ├─"
-                                    
-                                    s_dev = self.resolve_uuid_to_dev(s_uuid)
-                                    r_dev = self.resolve_uuid_to_dev(r_uuid)
-                                    
-                                    s_info = f"SEARCH={s_uuid:<36} [{s_dev if s_dev else '-'}]"
-                                    r_info = f"ROOT={r_uuid:<36} [{r_dev if r_dev else '-'}]"
-                                    
-                                    print(f"{connector} {title:<72}  {Colors.OKCYAN}{s_info}  {r_info}{Colors.ENDC}")
+                                    child_prefix = "     " if i == len(items) - 1 else "  │  "
+
+                                    print(f"{connector} {title}")
+
+                                    if s_uuid and s_uuid not in ('-', '(firmware)'):
+                                        search_line = f"search --fs-uuid --set=root {s_uuid}"
+                                    else:
+                                        search_line = _normalize_boot_line(s_line, 'search')
+
+                                    linux_line = _normalize_boot_line(l_line, 'linux')
+                                    if not linux_line and r_uuid and r_uuid not in ('-', '(firmware)'):
+                                        linux_line = f"linux /vmlinuz root=UUID={r_uuid} ro quiet"
+
+                                    initrd_line = _normalize_boot_line(i_line, 'initrd') or "initrd /initrd.img"
+
+                                    if search_line:
+                                        annotated_search = _annotate_uuids(search_line)
+                                        if re.search(r'^search\s+--fs-uuid\s+--set=root\s+', search_line):
+                                            annotated_search += " (UUID of the FS to use to resolve /boot and hence which kernel and initramfs to use)"
+                                        print(f"{child_prefix}  {annotated_search}")
+                                    if linux_line:
+                                        linux_head = linux_line
+                                        linux_opts = ""
+                                        if " ro " in linux_line:
+                                            pre, post = linux_line.split(" ro ", 1)
+                                            linux_head = pre.strip()
+                                            linux_opts = f"ro {post.strip()}"
+                                        annotated_linux_head = _annotate_uuids(linux_head)
+                                        if re.search(r'\broot=UUID=[0-9a-fA-F-]{36}\b', linux_head):
+                                            annotated_linux_head += " (UUID of the FS to use as root of the operating system; passed to kernel)"
+                                        print(f"{child_prefix}  {annotated_linux_head}")
+                                        if linux_opts:
+                                            print(f"{child_prefix}  {_annotate_uuids(linux_opts)}")
+                                    if initrd_line:
+                                        print(f"{child_prefix}  {_annotate_uuids(initrd_line)}")
                         else:
                             print("  (No menu entries found in config)")
                     else:
@@ -4164,6 +4379,26 @@ class DiskMgrShell(cmd.Cmd):
 
         # Check if mounted (may have multiple mount targets)
         current_targets = find_mount_targets(target_to_mount)
+        preferred_mount_real = os.path.realpath(mountpoint)
+
+        def _prune_extra_mounts(rounds=6, sleep_s=0.25):
+            """
+            Remove duplicate mount targets for the same source, keeping only the selected mountpoint.
+            This handles late desktop auto-mount races that create suffix mounts (e.g. label1).
+            """
+            for _ in range(rounds):
+                targets_now = find_mount_targets(target_to_mount)
+                extras_now = [t for t in targets_now if os.path.realpath(t) != preferred_mount_real]
+                if not extras_now:
+                    return
+                for mp in extras_now:
+                    log(f"Unmounting extra mountpoint {mp} to keep preferred path {mountpoint}...")
+                    res_um = run_command(['umount', mp], sudo=True, check=False)
+                    if getattr(res_um, 'returncode', 1) != 0:
+                        log(f"Failed to unmount extra mountpoint {mp}; it may be busy.", 'WARN')
+                        continue
+                    cleanup_mountpoint_dir(mp)
+                time.sleep(sleep_s)
 
         if not current_targets:
             # If a prior empty mountpoint dir was left behind, clean it before remount.
@@ -4176,6 +4411,7 @@ class DiskMgrShell(cmd.Cmd):
                     pass
             log(f"Mounting {target_to_mount} to {mountpoint}...")
             self._mount_device(target_to_mount, mountpoint, use_fstab=use_fstab_mount, announce_btrfs=True)
+            _prune_extra_mounts()
             log("Mounted.")
         elif mountpoint in current_targets:
             extra = [t for t in current_targets if t != mountpoint]
@@ -4186,6 +4422,7 @@ class DiskMgrShell(cmd.Cmd):
                         run_command(['umount', mp], sudo=True)
                     except Exception as e:
                         log(f"Failed to unmount {mp}: {e}. It may be in use.", 'WARN')
+            _prune_extra_mounts()
             try:
                 self._ensure_btrfs_compression_on_mount(mountpoint)
             except Exception as e:
@@ -4198,6 +4435,7 @@ class DiskMgrShell(cmd.Cmd):
                 for mp in current_targets:
                     run_command(['umount', mp], sudo=True)
                 self._mount_device(target_to_mount, mountpoint, use_fstab=use_fstab_mount, announce_btrfs=True)
+                _prune_extra_mounts()
                 log(f"Successfully moved mount to {mountpoint}")
             except Exception as e:
                 log(f"Failed to override mount: {e}. It may be in use.", 'WARN')
