@@ -1,3 +1,5 @@
 __pycache__/
 *.py[cod]
 diskmap.tsv
+entropy_data.txt
+my_entropy_graph.png

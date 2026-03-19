@@ -26,7 +26,7 @@ except ImportError:
 # Configuration
 MAP_FILENAME = 'diskmap.tsv'
 PASSGEN_BIN = 'passgen'
-VERSION = '3.4.9'
+VERSION = '3.5.0'
 HISTORY_FILE_ENV = 'DISKMGR_HISTORY'
 DEFAULT_HISTORY_FILE = Path.home() / '.local' / 'state' / 'diskmgr' / 'history'
 MAX_HISTORY_ENTRIES = 5000
@@ -107,7 +107,7 @@ def _fmt_hms(total_seconds):
     sec = s % 60
     return f"{h:02d}:{m:02d}:{sec:02d}"
 
-def run_command(command, check=True, input_str=None, capture_output=True, sudo=False):
+def run_command(command, check=True, input_str=None, capture_output=True, sudo=False, timeout=None):
     if sudo:
         command = ['sudo'] + command
     
@@ -119,6 +119,7 @@ def run_command(command, check=True, input_str=None, capture_output=True, sudo=F
             input=input_str,
             text=True,
             check=check,
+            timeout=timeout,
             stdout=subprocess.PIPE if capture_output else None,
             stderr=subprocess.PIPE if capture_output else None
         )
@@ -140,6 +141,63 @@ def run_command(command, check=True, input_str=None, capture_output=True, sudo=F
                 log(e.stderr.strip(), 'ERROR')
             raise
         return e
+    except subprocess.TimeoutExpired as e:
+        out = e.stdout if isinstance(e.stdout, str) else (e.stdout.decode('utf-8', errors='replace') if e.stdout else '')
+        err = e.stderr if isinstance(e.stderr, str) else (e.stderr.decode('utf-8', errors='replace') if e.stderr else '')
+        msg = f"Command timed out after {timeout}s: {' '.join(command)}"
+        if check:
+            log(msg, 'ERROR')
+            raise
+        _cmd_log_write(f"TIMEOUT: {msg}")
+        if out.strip():
+            _cmd_log_write("--- STDOUT (partial) ---")
+            _cmd_log_write(out.rstrip())
+        if err.strip():
+            _cmd_log_write("--- STDERR (partial) ---")
+            _cmd_log_write(err.rstrip())
+        return subprocess.CompletedProcess(command, 124, out, err)
+
+def run_command_hard_timeout(command, seconds, check=True, input_str=None, capture_output=True, sudo=False):
+    """
+    Run a command with a hard timeout using coreutils `timeout` when available.
+
+    This is used for device-probe commands that may enter uninterruptible I/O wait
+    on stale block devices; wrapping with `timeout` avoids blocking the shell.
+    """
+    try:
+        sec = float(seconds)
+    except Exception:
+        sec = 0.0
+    if sec <= 0:
+        return run_command(
+            command,
+            check=check,
+            input_str=input_str,
+            capture_output=capture_output,
+            sudo=sudo,
+        )
+
+    timeout_bin = shutil.which('timeout')
+    if timeout_bin:
+        sec_s = f"{sec:g}s"
+        wrapped = ['timeout', '-k', '1s', sec_s] + list(command)
+        return run_command(
+            wrapped,
+            check=check,
+            input_str=input_str,
+            capture_output=capture_output,
+            sudo=sudo,
+        )
+
+    # Fallback to Python-level timeout when coreutils timeout is unavailable.
+    return run_command(
+        command,
+        check=check,
+        input_str=input_str,
+        capture_output=capture_output,
+        sudo=sudo,
+        timeout=sec,
+    )
 
 def _split_nonempty_lines(s):
     if not s:
@@ -233,6 +291,44 @@ def _sysfs_to_parent_disk_name(block_name, max_hops=16):
         break
 
     return cur
+
+def _sysfs_is_whole_disk(dev_path):
+    """Best-effort whole-disk check via sysfs without probing the device."""
+    k = _sysfs_block_name(dev_path)
+    if not k:
+        return False
+    sys_path = f"/sys/class/block/{k}"
+    if not os.path.exists(sys_path):
+        return False
+    return not os.path.exists(os.path.join(sys_path, "partition"))
+
+def _sysfs_child_partition_devs(dev_path):
+    """Return /dev paths for child partitions of a whole disk via sysfs."""
+    out = []
+    seen = set()
+    k = _sysfs_block_name(dev_path)
+    if not k:
+        return out
+    base = f"/sys/class/block/{k}"
+    if not os.path.isdir(base):
+        return out
+    try:
+        entries = sorted(os.listdir(base))
+    except Exception:
+        return out
+    for ent in entries:
+        part_flag = os.path.join(base, ent, "partition")
+        if not os.path.exists(part_flag):
+            continue
+        devp = f"/dev/{ent}"
+        if not os.path.exists(devp):
+            continue
+        realp = os.path.realpath(devp)
+        if realp in seen:
+            continue
+        seen.add(realp)
+        out.append(realp)
+    return out
 
 #
 # NOTE: refresh-related helpers were removed along with the refresh command.
@@ -561,11 +657,11 @@ def _parse_ddrescue_failed_ranges(map_path, sector_size=512):
     return out
 
 def _lsblk_type(dev_path):
-    res = run_command(['lsblk', '-no', 'TYPE', dev_path], check=False)
+    res = run_command_hard_timeout(['lsblk', '-no', 'TYPE', dev_path], 3, check=False)
     return (getattr(res, 'stdout', '') or '').strip()
 
 def _lsblk_fstype(dev_path):
-    res = run_command(['lsblk', '-no', 'FSTYPE', dev_path], check=False)
+    res = run_command_hard_timeout(['lsblk', '-no', 'FSTYPE', dev_path], 3, check=False)
     out = (getattr(res, 'stdout', '') or '')
     # lsblk may return multiple rows (device + children); use only the target's first row.
     for line in out.splitlines():
@@ -575,7 +671,7 @@ def _lsblk_fstype(dev_path):
     return ""
 
 def _lsblk_pttype(dev_path):
-    res = run_command(['lsblk', '-no', 'PTTYPE', dev_path], check=False)
+    res = run_command_hard_timeout(['lsblk', '-no', 'PTTYPE', dev_path], 3, check=False)
     out = (getattr(res, 'stdout', '') or '')
     for line in out.splitlines():
         line = line.strip()
@@ -587,7 +683,7 @@ def _lsblk_partitions(dev_path):
     """
     Return a list of partitions under a disk device (NAME, FSTYPE).
     """
-    res = run_command(['lsblk', '-nr', '-o', 'NAME,TYPE,FSTYPE', dev_path], check=False)
+    res = run_command_hard_timeout(['lsblk', '-nr', '-o', 'NAME,TYPE,FSTYPE', dev_path], 3, check=False)
     rows = []
     for raw in (getattr(res, 'stdout', '') or '').splitlines():
         line = raw.strip()
@@ -972,7 +1068,7 @@ class DiskMgrShell(cmd.Cmd):
         # Use lsblk -J for JSON output
         cmd = ['lsblk', '-J', '-e', '7', '-o', 'NAME,KNAME,TYPE,RM,SIZE,FSTYPE,LABEL,MOUNTPOINT,MODEL,WWN,PKNAME,TRAN,DISC-MAX']
         try:
-            res = run_command(cmd, capture_output=True)
+            res = run_command_hard_timeout(cmd, 8, capture_output=True)
             data = json.loads(res.stdout)
             return data.get('blockdevices', [])
         except Exception as e:
@@ -1193,6 +1289,7 @@ class DiskMgrShell(cmd.Cmd):
         print("      Uses /etc/fstab mountpoint/options when an entry exists; otherwise /media/$USER/<label>.")
         print(f"  {Colors.OKGREEN}close <name/id> [--force]{Colors.ENDC}")
         print("      close <name>: unmounts filesystem(s) and closes /dev/mapper/<name> when present (locks LUKS).")
+        print("      If a whole-disk target is supplied, closes all mounted child partitions on that disk too.")
         print("      close #id (example: close #6): unmount-only for that discovered row; does NOT run cryptsetup close.")
         print("      With --force, kills mount-holder processes (SIGKILL) if unmount is busy, then retries unmount.")
         print("      Use #id if you want to close only the payload filesystem and keep the LUKS container open.")
@@ -1361,9 +1458,14 @@ class DiskMgrShell(cmd.Cmd):
                 continue
             dev_path = f"/dev/{d_name}"
             try:
-                ls_res = run_command(['lsblk', '-J', '-b', '-f', '-o',
-                                      'NAME,KNAME,TYPE,SIZE,FSTYPE,FSVER,LABEL,UUID,PARTUUID,FSAVAIL,FSUSE%,FSUSED,MOUNTPOINTS,WWN',
-                                      dev_path], sudo=True, check=False)
+                ls_res = run_command_hard_timeout(
+                    ['lsblk', '-J', '-b', '-f', '-o',
+                     'NAME,KNAME,TYPE,SIZE,FSTYPE,FSVER,LABEL,UUID,PARTUUID,FSAVAIL,FSUSE%,FSUSED,MOUNTPOINTS,WWN',
+                     dev_path],
+                    6,
+                    sudo=True,
+                    check=False
+                )
                 rows = []
                 if (getattr(ls_res, 'stdout', '') or '').strip():
                     data = json.loads(ls_res.stdout)
@@ -1509,7 +1611,12 @@ class DiskMgrShell(cmd.Cmd):
             
             try:
                 # 1. Get Geometry from parted
-                res = run_command(['parted', '-m', '-s', dev_path, 'unit', 's', 'print', 'free'], sudo=True, check=False)
+                res = run_command_hard_timeout(
+                    ['parted', '-m', '-s', dev_path, 'unit', 's', 'print', 'free'],
+                    6,
+                    sudo=True,
+                    check=False
+                )
                 if getattr(res, 'returncode', 1) != 0:
                     # Common case: blank disk or missing/corrupt partition table.
                     # Avoid noisy "Command failed" logs and present a human-readable reason.
@@ -1518,12 +1625,12 @@ class DiskMgrShell(cmd.Cmd):
                     has_whole_disk_fs = bool(disk_fstype)
 
                     # Fall back to blockdev sector sizes for a useful header.
-                    ls = run_command(['blockdev', '--getss', dev_path], sudo=True, check=False).stdout.strip()
-                    ps = run_command(['blockdev', '--getpbsz', dev_path], sudo=True, check=False).stdout.strip()
+                    ls = run_command_hard_timeout(['blockdev', '--getss', dev_path], 3, sudo=True, check=False).stdout.strip()
+                    ps = run_command_hard_timeout(['blockdev', '--getpbsz', dev_path], 3, sudo=True, check=False).stdout.strip()
                     logical_sector = int(ls) if ls.isdigit() else 512
                     physical_sector = int(ps) if ps.isdigit() else logical_sector
 
-                    res_sz = run_command(['blockdev', '--getsz', dev_path], sudo=True, check=False)
+                    res_sz = run_command_hard_timeout(['blockdev', '--getsz', dev_path], 3, sudo=True, check=False)
                     total_512_sectors = int(res_sz.stdout.strip()) if (res_sz.stdout or "").strip().isdigit() else 0
                     total_logical_sectors = (total_512_sectors * 512) // logical_sector if logical_sector else 0
 
@@ -1572,7 +1679,7 @@ class DiskMgrShell(cmd.Cmd):
                 ptable = header_parts[5]
                 
                 # 2. Get Total Size from blockdev (always in 512b units)
-                res_sz = run_command(['blockdev', '--getsz', dev_path], sudo=True)
+                res_sz = run_command_hard_timeout(['blockdev', '--getsz', dev_path], 3, sudo=True)
                 total_512_sectors = int(res_sz.stdout.strip())
                 total_logical_sectors = (total_512_sectors * 512) // logical_sector
 
@@ -1749,7 +1856,7 @@ class DiskMgrShell(cmd.Cmd):
             "VFS-OPTIONS",
             "FSTAB",
             "FSTAB ENTRY",
-            "PERSISTENT PATH (IEEE EUI WWID)",
+            "PERSISTENT PATH",
         ]
 
     def _lsblk_standard_cols(self):
@@ -1765,7 +1872,7 @@ class DiskMgrShell(cmd.Cmd):
             "SIZE",
             "FSAVAIL",
             "FSMOUNTPOINTS",
-            "PERSISTENT PATH (IEEE EUI WWID)",
+            "PERSISTENT PATH",
         ]
 
     def _lsblk_concise_cols(self):
@@ -1775,8 +1882,14 @@ class DiskMgrShell(cmd.Cmd):
             "DEVICE",
             "TYPE",
             "MOUNTPOINT",
-            "PERSISTENT PATH (IEEE EUI WWID)",
+            "PERSISTENT PATH",
         ]
+
+    def _lsblk_row_get(self, row, col):
+        """Resolve display column names to backing row keys."""
+        if col == "PERSISTENT PATH":
+            return row.get("PERSISTENT PATH (IEEE EUI WWID)", "")
+        return row.get(col, "")
 
     def _resolve_fstab_spec_to_realdev(self, spec):
         """
@@ -1800,7 +1913,7 @@ class DiskMgrShell(cmd.Cmd):
                 by_uuid = f"/dev/disk/by-uuid/{uuid}"
                 if os.path.exists(by_uuid):
                     return os.path.realpath(by_uuid)
-                res = run_command(['blkid', '-U', uuid], capture_output=True, check=False)
+                res = run_command(['blkid', '-U', uuid], capture_output=True, check=False, timeout=3)
                 p = (getattr(res, 'stdout', '') or '').strip()
                 return os.path.realpath(p) if p and os.path.exists(p) else None
 
@@ -1809,7 +1922,7 @@ class DiskMgrShell(cmd.Cmd):
                 by_partuuid = f"/dev/disk/by-partuuid/{pu}"
                 if os.path.exists(by_partuuid):
                     return os.path.realpath(by_partuuid)
-                res = run_command(['blkid', '-t', f'PARTUUID={pu}', '-o', 'device'], capture_output=True, check=False)
+                res = run_command(['blkid', '-t', f'PARTUUID={pu}', '-o', 'device'], capture_output=True, check=False, timeout=3)
                 lines = [ln.strip() for ln in (getattr(res, 'stdout', '') or '').splitlines() if ln.strip()]
                 if lines and os.path.exists(lines[0]):
                     return os.path.realpath(lines[0])
@@ -1820,7 +1933,7 @@ class DiskMgrShell(cmd.Cmd):
                 by_label = f"/dev/disk/by-label/{lbl}"
                 if os.path.exists(by_label):
                     return os.path.realpath(by_label)
-                res = run_command(['blkid', '-L', lbl], capture_output=True, check=False)
+                res = run_command(['blkid', '-L', lbl], capture_output=True, check=False, timeout=3)
                 p = (getattr(res, 'stdout', '') or '').strip()
                 return os.path.realpath(p) if p and os.path.exists(p) else None
 
@@ -1829,7 +1942,7 @@ class DiskMgrShell(cmd.Cmd):
                 by_partlabel = f"/dev/disk/by-partlabel/{pl}"
                 if os.path.exists(by_partlabel):
                     return os.path.realpath(by_partlabel)
-                res = run_command(['blkid', '-t', f'PARTLABEL={pl}', '-o', 'device'], capture_output=True, check=False)
+                res = run_command(['blkid', '-t', f'PARTLABEL={pl}', '-o', 'device'], capture_output=True, check=False, timeout=3)
                 lines = [ln.strip() for ln in (getattr(res, 'stdout', '') or '').splitlines() if ln.strip()]
                 if lines and os.path.exists(lines[0]):
                     return os.path.realpath(lines[0])
@@ -2247,7 +2360,7 @@ class DiskMgrShell(cmd.Cmd):
         """
         lookup = {}
         try:
-            res = run_command(['findmnt', '-A', '--output-all', '--json'], check=False)
+            res = run_command(['findmnt', '-A', '--output-all', '--json'], check=False, timeout=5)
             if getattr(res, 'returncode', 1) != 0:
                 return {}
             raw = (getattr(res, 'stdout', '') or '').strip()
@@ -2322,7 +2435,7 @@ class DiskMgrShell(cmd.Cmd):
             widths[c] = len(c)
         for r in rows:
             for c in cols:
-                v = str(r.get(c, "") or "")
+                v = str(self._lsblk_row_get(r, c) or "")
                 if len(v) > widths[c]:
                     widths[c] = len(v)
         # Add 1 space padding on each side.
@@ -2344,7 +2457,11 @@ class DiskMgrShell(cmd.Cmd):
             parts = []
             for c in cols:
                 inner = max(widths[c] - 2, 0)
-                parts.append(f" {str(values.get(c, '') or ''):<{inner}} ")
+                if isinstance(values, dict) and c in values:
+                    v = values.get(c, '')
+                else:
+                    v = self._lsblk_row_get(values, c) if isinstance(values, dict) else ''
+                parts.append(f" {str(v or ''):<{inner}} ")
             return "".join(parts).rstrip()
 
         max_len = len(_line_for({c: c for c in cols}))
@@ -2515,16 +2632,26 @@ class DiskMgrShell(cmd.Cmd):
             owner = "-"
             if owner_probe_mount:
                 try:
-                    st = os.stat(owner_probe_mount)
-                    try:
-                        owner_user = pwd.getpwuid(int(st.st_uid)).pw_name
-                    except Exception:
-                        owner_user = str(int(st.st_uid))
-                    try:
-                        owner_group = grp.getgrgid(int(st.st_gid)).gr_name
-                    except Exception:
-                        owner_group = str(int(st.st_gid))
-                    owner = f"{owner_user} {owner_group}"
+                    # Bound owner probe so stale/unresponsive mountpoints cannot hang list.
+                    st_res = run_command(
+                        ['stat', '-c', '%u %g', owner_probe_mount],
+                        check=False,
+                        timeout=1.5
+                    )
+                    st_out = (getattr(st_res, 'stdout', '') or '').strip()
+                    parts = st_out.split()
+                    if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
+                        uid = int(parts[0])
+                        gid = int(parts[1])
+                        try:
+                            owner_user = pwd.getpwuid(uid).pw_name
+                        except Exception:
+                            owner_user = str(uid)
+                        try:
+                            owner_group = grp.getgrgid(gid).gr_name
+                        except Exception:
+                            owner_group = str(gid)
+                        owner = f"{owner_user} {owner_group}"
                 except Exception:
                     owner = "-"
 
@@ -2690,9 +2817,14 @@ class DiskMgrShell(cmd.Cmd):
                 continue
             dev_path = f"/dev/{d_name}"
             try:
-                ls_res = run_command(['lsblk', '-J', '-b', '-f', '-o',
-                                      'NAME,KNAME,PKNAME,TYPE,SIZE,FSTYPE,FSVER,LABEL,UUID,PARTUUID,FSAVAIL,FSUSE%,FSUSED,MOUNTPOINTS,WWN',
-                                      dev_path], sudo=True, check=False)
+                ls_res = run_command_hard_timeout(
+                    ['lsblk', '-J', '-b', '-f', '-o',
+                     'NAME,KNAME,PKNAME,TYPE,SIZE,FSTYPE,FSVER,LABEL,UUID,PARTUUID,FSAVAIL,FSUSE%,FSUSED,MOUNTPOINTS,WWN',
+                     dev_path],
+                    6,
+                    sudo=True,
+                    check=False
+                )
                 if (getattr(ls_res, 'stdout', '') or '').strip():
                     data = json.loads(ls_res.stdout)
                     blockdevices = data.get('blockdevices', [])
@@ -2803,7 +2935,7 @@ class DiskMgrShell(cmd.Cmd):
         header = "".join([_cell(c, widths[c]) for c in cols]).rstrip()
         print(f"{Colors.BOLD}{header}{Colors.ENDC}")
         for r in rows:
-            line = "".join([_cell(str(r.get(c, '') or ''), widths[c]) for c in cols]).rstrip()
+            line = "".join([_cell(str(self._lsblk_row_get(r, c) or ''), widths[c]) for c in cols]).rstrip()
             print(line)
 
     def _print_lsblk_rows_list(self, rows, cols=None, start_index=1):
@@ -2814,6 +2946,8 @@ class DiskMgrShell(cmd.Cmd):
             print(f"{Colors.BOLD}Entry {start_index + i - 1}{Colors.ENDC}")
 
             is_luks_row = str(r.get('FSTYPE') or '').strip().lower() == 'crypto_luks'
+            pdp_raw = str(self._lsblk_list_value(r, 'PERSISTENT PATH') or '').strip()
+            is_usb_byid = pdp_raw.startswith('/dev/disk/by-id/usb-')
             for c in cols:
                 value = self._lsblk_list_value(r, c)
                 if str(value or "").strip() in ("", "-"):
@@ -2823,11 +2957,20 @@ class DiskMgrShell(cmd.Cmd):
                     label = "LUKSVER"
                 elif is_luks_row and c == "FSUUID":
                     label = "LUKSUUID"
+                elif c == "PERSISTENT PATH":
+                    if is_usb_byid:
+                        # USB by-id links are model/serial based; present a single clear label.
+                        label = "PERSISTENT PATH (Model_Serial WWID)"
+                    else:
+                        # In list-list mode keep explicit IEEE wording for non-USB entries.
+                        label = "PERSISTENT PATH (IEEE EUI WWID)"
                 print(f"  {label}: {value}")
             if str(r.get('TYPE') or '').strip().lower() in ('disk', 'part'):
-                model_serial = self._lsblk_list_value(r, 'Model_Serial WWID')
-                if str(model_serial or "").strip() not in ("", "-"):
-                    print(f"  Model_Serial WWID: {model_serial}")
+                # For USB rows, the persistent by-id path is already the model/serial path.
+                if not is_usb_byid:
+                    model_serial = self._lsblk_list_value(r, 'Model_Serial WWID')
+                    if str(model_serial or "").strip() not in ("", "-"):
+                        print(f"  Model_Serial WWID: {model_serial}")
                 pci = self._lsblk_list_value(r, 'PCI')
                 if str(pci or "").strip() not in ("", "-"):
                     print(f"  PCI: {pci}")
@@ -2857,7 +3000,7 @@ class DiskMgrShell(cmd.Cmd):
         reserved_disp = "-"
         meta_disp = "-"
         try:
-            res = run_command(['tune2fs', '-l', dev_real], sudo=True, capture_output=True, check=False)
+            res = run_command(['tune2fs', '-l', dev_real], sudo=True, capture_output=True, check=False, timeout=4)
             txt = (getattr(res, 'stdout', '') or '') + "\n" + (getattr(res, 'stderr', '') or '')
             if getattr(res, 'returncode', 1) != 0 or not txt.strip():
                 self._ext4_tune2fs_cache[key] = (reserved_disp, meta_disp)
@@ -2913,6 +3056,8 @@ class DiskMgrShell(cmd.Cmd):
 
     def _lsblk_list_value(self, row, col):
         """Return display value for list-mode cells."""
+        if col == "PERSISTENT PATH":
+            return str(row.get("PERSISTENT PATH (IEEE EUI WWID)", "") or "")
         if col == "DEVICE":
             kname = str(row.get("KNAME", "") or "").strip()
             if kname and kname != "-":
@@ -4448,6 +4593,7 @@ class DiskMgrShell(cmd.Cmd):
             - Flushes all pending writes to the disk (data integrity).
             - Terminates active file handles to the device.
             - Attempts unmount by mapper path (LUKS), source path (Plain), or guessed mountpoint.
+            - If target is a whole disk, also unmounts mounted child partitions on that disk.
         2.  Locking (LUKS only):
             - Commands the kernel to wipe encryption keys from RAM.
             - Removes the virtual cleartext device from /dev/mapper/.
@@ -4555,6 +4701,162 @@ class DiskMgrShell(cmd.Cmd):
                 chunk = pids[i:i+chunk_size]
                 run_command(['kill', '-9'] + [str(p) for p in chunk], sudo=True, check=False)
 
+        def _dm_mapper_name_from_kname(kname):
+            k = str(kname or "").strip()
+            if not k:
+                return ""
+            try:
+                p = f"/sys/class/block/{k}/dm/name"
+                if os.path.exists(p):
+                    with open(p, 'r', encoding='utf-8', errors='replace') as f:
+                        v = (f.read() or "").strip()
+                        if v:
+                            return v
+            except Exception:
+                pass
+            return k
+
+        def _collect_child_crypt_mappers_for_disk(devnode):
+            """
+            Return mapper names for open crypt targets in a disk subtree.
+            """
+            dev_real = os.path.realpath(devnode)
+            mappers = []
+            seen = set()
+            res = run_command_hard_timeout(['lsblk', '-nr', '-o', 'KNAME,TYPE', dev_real], 3, check=False)
+            for ln in (getattr(res, 'stdout', '') or '').splitlines():
+                parts = (ln or '').split()
+                if len(parts) < 2:
+                    continue
+                kname, dtype = parts[0].strip(), parts[1].strip().lower()
+                if dtype != 'crypt' or not kname:
+                    continue
+                mname = _dm_mapper_name_from_kname(kname)
+                if not mname or mname in seen:
+                    continue
+                seen.add(mname)
+                mappers.append(mname)
+            return mappers
+
+        def _close_child_crypt_mappers_for_disk(devnode, skip_names=None):
+            """
+            Close open child LUKS mappings under a whole-disk target.
+            """
+            skip = set(str(x).strip() for x in (skip_names or []) if str(x).strip())
+            mappers = _collect_child_crypt_mappers_for_disk(devnode)
+            if skip:
+                mappers = [m for m in mappers if m not in skip]
+            if not mappers:
+                return
+            log(f"Closing child LUKS mappings on disk {devnode}: {', '.join(mappers)}")
+            for mname in mappers:
+                res = run_command(['cryptsetup', 'close', mname], sudo=True, check=False)
+                if getattr(res, 'returncode', 1) != 0:
+                    err = (getattr(res, 'stderr', '') or '').strip()
+                    if err:
+                        log(f"Failed to close child mapping {mname}: {err}", 'WARN')
+                    else:
+                        log(f"Failed to close child mapping {mname}.", 'WARN')
+
+        def _collect_mount_targets_for_device(devnode, include_children=False):
+            """
+            Collect mount targets for a device; optionally include all descendant block devices.
+            This is required when a mapping points to a whole disk but filesystems are mounted
+            on child partitions.
+            """
+            out = []
+            seen = set()
+
+            def _add_targets_for(src_dev):
+                for mp in find_mount_targets(src_dev):
+                    if mp and mp not in seen:
+                        seen.add(mp)
+                        out.append(mp)
+
+            dev_real = os.path.realpath(devnode)
+            _add_targets_for(dev_real)
+            if not include_children:
+                return out
+
+            # Prefer sysfs child partition walk; avoids potentially blocking device probes.
+            child_parts = _sysfs_child_partition_devs(dev_real)
+            for child_dev in child_parts:
+                if child_dev != dev_real:
+                    _add_targets_for(child_dev)
+
+            # Fallback to lsblk subtree only when sysfs did not produce children.
+            if not child_parts:
+                res_k = run_command_hard_timeout(['lsblk', '-nr', '-o', 'KNAME', dev_real], 3, check=False)
+                for ln in (getattr(res_k, 'stdout', '') or '').splitlines():
+                    kname = (ln or '').strip()
+                    if not kname:
+                        continue
+                    child_dev = os.path.realpath(f"/dev/{kname}")
+                    if child_dev == dev_real:
+                        continue
+                    _add_targets_for(child_dev)
+            return out
+
+        def _top_level_disk(devnode):
+            """Resolve any block device to its top-level /dev/<disk>."""
+            try:
+                bname = _sysfs_block_name(devnode)
+                parent = _sysfs_to_parent_disk_name(bname)
+                if not parent:
+                    return None
+                parent_dev = os.path.realpath(f"/dev/{parent}")
+                if _sysfs_is_whole_disk(parent_dev):
+                    return parent_dev
+            except Exception:
+                pass
+            return None
+
+        def _attempt_rescue_for_disk(devnode, reason):
+            """
+            Best-effort rescue for unresponsive whole-disk targets.
+            - Unmount all child mounts
+            - Close child crypt mappings
+            - Ask kernel to drop the device (/sys/block/<disk>/device/delete)
+            """
+            disk_dev = _top_level_disk(devnode)
+            if not disk_dev or (_lsblk_type(disk_dev) or '').strip().lower() != 'disk':
+                return False
+
+            log(f"Close rescue path: {disk_dev} ({reason})", 'WARN')
+
+            # Try unmounting all mounts on the disk subtree.
+            targets = _collect_mount_targets_for_device(disk_dev, include_children=True)
+            for mp in targets:
+                res_um = run_command(['umount', mp], sudo=True, check=False, timeout=4)
+                if getattr(res_um, 'returncode', 1) != 0 and force:
+                    _force_kill_mount_holders(mp)
+                    time.sleep(0.2)
+                    res_um = run_command(['umount', mp], sudo=True, check=False, timeout=4)
+                if getattr(res_um, 'returncode', 1) == 0:
+                    cleanup_mountpoint_dir(mp)
+
+            # Try closing child crypt mappings.
+            _close_child_crypt_mappers_for_disk(disk_dev)
+
+            # Final step: remove dead/stuck block device from kernel view.
+            kname = os.path.basename(disk_dev)
+            delete_path = f"/sys/block/{kname}/device/delete"
+            if not os.path.exists(delete_path):
+                log(f"Rescue could not find device-delete path: {delete_path}", 'WARN')
+                return False
+
+            res_del = run_command(['tee', delete_path], input_str="1\n", sudo=True, check=False, timeout=3)
+            if getattr(res_del, 'returncode', 1) == 0:
+                log(f"Rescue detached {disk_dev} from kernel. Replug to re-discover.", 'WARN')
+                return True
+
+            err = (getattr(res_del, 'stderr', '') or '').strip()
+            if err:
+                log(f"Rescue failed to detach {disk_dev}: {err}", 'WARN')
+            else:
+                log(f"Rescue failed to detach {disk_dev}.", 'WARN')
+            return False
+
         def _try_unmount(mp):
             """Best-effort unmount; in --force mode kill holders and retry once."""
             log(f"Unmounting {mp}...")
@@ -4614,22 +4916,39 @@ class DiskMgrShell(cmd.Cmd):
                 return
 
             run_command(['sudo', '-v'])  # Refresh sudo
-            run_command(['sync'], sudo=True, check=False)
+            res_sync = run_command(['sync'], sudo=True, check=False, timeout=8)
+            dev_from_id_type = (_lsblk_type(dev_from_id) or '').strip().lower()
+            if getattr(res_sync, 'returncode', 0) == 124:
+                log("sync timed out; continuing close attempt.", 'WARN')
+                if dev_from_id_type == 'disk':
+                    _attempt_rescue_for_disk(dev_from_id, "sync timed out")
 
-            targets = find_mount_targets(dev_from_id)
+            if dev_from_id_type != 'disk' and _sysfs_is_whole_disk(dev_from_id):
+                dev_from_id_type = 'disk'
+            targets = _collect_mount_targets_for_device(
+                dev_from_id,
+                include_children=(dev_from_id_type == 'disk')
+            )
             unmounted_targets = []
             for mp in targets:
                 if not _try_unmount(mp):
+                    if dev_from_id_type == 'disk':
+                        if _attempt_rescue_for_disk(dev_from_id, f"failed to unmount {mp}"):
+                            return
                     log("Close aborted: target is still mounted/in use.", 'ERROR')
                     return
                 unmounted_targets.append(mp)
             for mp in unmounted_targets:
                 cleanup_mountpoint_dir(mp)
 
-            # For ID-targeted close, do not implicitly lock LUKS.
+            # For whole-disk ID targets, also close any open child LUKS mappings.
+            if dev_from_id_type == 'disk':
+                _close_child_crypt_mappers_for_disk(dev_from_id)
+
+            # For non-disk ID targets, do not implicitly lock LUKS.
             # This path is used heavily for payload/embedded filesystem rows; keep it as unmount-only.
             d_type = (_lsblk_type(dev_from_id) or '').strip().lower()
-            if d_type == 'crypt':
+            if d_type == 'crypt' and dev_from_id_type != 'disk':
                 if unmounted_targets:
                     log("Unmounted target filesystem. LUKS mapping left open (ID close is unmount-only).")
                 else:
@@ -4642,16 +4961,26 @@ class DiskMgrShell(cmd.Cmd):
 
         # Never attempt unmount/close operations on the system root drive.
         self.mappings = read_luks_map()
+        src_disk_for_rescue = None
         if name in self.mappings:
             real_src = os.path.realpath(self.mappings[name])
             if self._block_if_root_drive(real_src, f"close {name}"):
                 return
+            try:
+                if _sysfs_is_whole_disk(real_src) or (_lsblk_type(real_src) or '').strip().lower() == 'disk':
+                    src_disk_for_rescue = real_src
+            except Exception:
+                src_disk_for_rescue = None
 
         mapper_path = f"/dev/mapper/{name}"
         mount_guess = f"/media/{os.environ.get('USER', 'root')}/{name}"
 
         run_command(['sudo', '-v']) # Refresh sudo
-        run_command(['sync'], sudo=True, check=False)
+        res_sync = run_command(['sync'], sudo=True, check=False, timeout=8)
+        if getattr(res_sync, 'returncode', 0) == 124:
+            log("sync timed out; continuing close attempt.", 'WARN')
+            if src_disk_for_rescue:
+                _attempt_rescue_for_disk(src_disk_for_rescue, "sync timed out")
 
         # Unmount
         unmounted = False
@@ -4661,6 +4990,9 @@ class DiskMgrShell(cmd.Cmd):
         if targets:
             for mp in targets:
                 if not _try_unmount(mp):
+                    if src_disk_for_rescue:
+                        if _attempt_rescue_for_disk(src_disk_for_rescue, f"failed to unmount {mp}"):
+                            return
                     log("Close aborted: mapper target is still mounted/in use.", 'ERROR')
                     return
                 unmounted_targets.append(mp)
@@ -4671,10 +5003,17 @@ class DiskMgrShell(cmd.Cmd):
             self.mappings = read_luks_map()
             if name in self.mappings:
                 src = self.mappings[name]
-                targets = find_mount_targets(src)
+                src_type = 'disk' if _sysfs_is_whole_disk(src) else (_lsblk_type(src) or '').strip().lower()
+                targets = _collect_mount_targets_for_device(
+                    src,
+                    include_children=(src_type == 'disk')
+                )
                 if targets:
                     for mp in targets:
                         if not _try_unmount(mp):
+                            if src_disk_for_rescue:
+                                if _attempt_rescue_for_disk(src_disk_for_rescue, f"failed to unmount {mp}"):
+                                    return
                             log("Close aborted: source target is still mounted/in use.", 'ERROR')
                             return
                         unmounted_targets.append(mp)
@@ -4684,6 +5023,9 @@ class DiskMgrShell(cmd.Cmd):
         if not unmounted:
             if run_command(['findmnt', '-rn', '-M', mount_guess], check=False).returncode == 0:
                  if not _try_unmount(mount_guess):
+                     if src_disk_for_rescue:
+                         if _attempt_rescue_for_disk(src_disk_for_rescue, f"failed to unmount {mount_guess}"):
+                             return
                      log("Close aborted: guessed target is still mounted/in use.", 'ERROR')
                      return
                  unmounted_targets.append(mount_guess)
@@ -4692,6 +5034,20 @@ class DiskMgrShell(cmd.Cmd):
         # Cleanup mountpoint dir(s) (best-effort)
         for mp in unmounted_targets:
             cleanup_mountpoint_dir(mp)
+
+        # If this mapping resolves to a whole disk, close all open child LUKS mappings too.
+        disk_src = None
+        try:
+            self.mappings = read_luks_map()
+            src_for_name = self.mappings.get(name)
+            if src_for_name:
+                src_type = 'disk' if _sysfs_is_whole_disk(src_for_name) else (_lsblk_type(src_for_name) or '').strip().lower()
+                if src_type == 'disk':
+                    disk_src = os.path.realpath(src_for_name)
+        except Exception:
+            disk_src = None
+        if disk_src:
+            _close_child_crypt_mappers_for_disk(disk_src, skip_names={name})
         
         # Close
         if os.path.exists(mapper_path):
@@ -4699,7 +5055,10 @@ class DiskMgrShell(cmd.Cmd):
             run_command(['cryptsetup', 'close', name], sudo=True)
             log("Closed.")
         else:
-            log("Mapping not open or already closed.")
+            if unmounted_targets:
+                log("Unmounted.")
+            else:
+                log("Mapping not open or already closed.")
 
     def do_label(self, arg):
         '''Get or set the filesystem label of an OPEN disk: label <name> [new_label] [--fstab]
@@ -8914,7 +9273,7 @@ class DiskMgrShell(cmd.Cmd):
            - To wipe partition metadata first, use: erase <name>
         
         Options:
-          --fs <ext4|xfs|btrfs>   Filesystem type (default: ext4)
+          --fs <ext4|xfs|btrfs|fat32>   Filesystem type (default: ext4)
           --label <label>   Set a different internal filesystem label (other than <name>)
           --luks            Encrypt target first with LUKS2, then format payload filesystem.
                             PBKDF defaults: argon2id, memory=4GiB, threads=4, time=8.
@@ -8929,8 +9288,8 @@ class DiskMgrShell(cmd.Cmd):
             - Runs 'cryptsetup luksFormat' with LUKS2 encryption.
             - Opens the container as /dev/mapper/<name>.
         4.  Filesystem:
-            - Plain mode (default): formats target directly with ext4, xfs, or btrfs.
-            - --luks mode: formats the opened mapper payload with ext4, xfs, or btrfs.
+            - Plain mode (default): formats target directly with ext4, xfs, btrfs, or fat32.
+            - --luks mode: formats the opened mapper payload with ext4, xfs, btrfs, or fat32.
             - (ext4 only): Reclaims the 5% reserved space for root using 'tune2fs -m 0'.
         5.  Persistence: Adds the new disk's PDP to diskmap.tsv automatically (best-effort).
 
@@ -8938,7 +9297,7 @@ class DiskMgrShell(cmd.Cmd):
         '''
         parser = CmdArgumentParser(prog='format', add_help=False)
         parser.add_argument('args', nargs=1, help='<name>')
-        parser.add_argument('--fs', default='ext4', choices=['ext4', 'xfs', 'btrfs'])
+        parser.add_argument('--fs', default='ext4', choices=['ext4', 'xfs', 'btrfs', 'fat32'])
         parser.add_argument('--label', help='Filesystem label')
         parser.add_argument('--luks', action='store_true', help='Encrypt target with LUKS2 before mkfs')
 
@@ -9065,6 +9424,25 @@ class DiskMgrShell(cmd.Cmd):
             ]) or 'mkfs.btrfs'
             # -f required because we just wipefs'ed; still safer to be explicit.
             run_command([mkfs_btrfs, '-f', '-L', label, fs_target], sudo=True)
+        elif args.fs == 'fat32':
+            mkfs_vfat = (
+                _find_tool_or_common_paths('mkfs.vfat', [
+                    '/usr/sbin/mkfs.vfat',
+                    '/sbin/mkfs.vfat',
+                    '/usr/local/sbin/mkfs.vfat',
+                    '/usr/bin/mkfs.vfat',
+                    '/bin/mkfs.vfat',
+                ]) or
+                _find_tool_or_common_paths('mkfs.fat', [
+                    '/usr/sbin/mkfs.fat',
+                    '/sbin/mkfs.fat',
+                    '/usr/local/sbin/mkfs.fat',
+                    '/usr/bin/mkfs.fat',
+                    '/bin/mkfs.fat',
+                ]) or
+                'mkfs.vfat'
+            )
+            run_command([mkfs_vfat, '-F', '32', '-n', label, fs_target], sudo=True)
 
         # Mount (prefer /etc/fstab mountpoint when an entry exists for this filesystem).
         fallback_mountpoint = f"/media/{os.environ.get('USER', 'root')}/{label}"
