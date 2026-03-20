@@ -26,7 +26,7 @@ except ImportError:
 # Configuration
 MAP_FILENAME = 'diskmap.tsv'
 PASSGEN_BIN = 'passgen'
-VERSION = '3.5.0'
+VERSION = '3.5.1'
 HISTORY_FILE_ENV = 'DISKMGR_HISTORY'
 DEFAULT_HISTORY_FILE = Path.home() / '.local' / 'state' / 'diskmgr' / 'history'
 MAX_HISTORY_ENTRIES = 5000
@@ -3230,11 +3230,15 @@ class DiskMgrShell(cmd.Cmd):
             dump = parts[4] if len(parts) > 4 else "-"
             passno = parts[5] if len(parts) > 5 else "-"
 
-            src_display = spec
+            uuid_re = re.compile(r'\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b')
+            def _colorize_uuids(s):
+                return uuid_re.sub(lambda m: f"{Colors.OKBLUE}{m.group(0)}{Colors.ENDC}", s or "")
+
+            src_display = _colorize_uuids(spec)
             if spec.startswith("UUID="):
                 uuid = spec[len("UUID="):]
                 dev = self.resolve_uuid_to_dev(uuid)
-                src_display = f"{spec} [{dev if dev else '-'}]"
+                src_display = f"{_colorize_uuids(spec)} {Colors.OKCYAN}[{dev if dev else '-'}]{Colors.ENDC}"
 
             rows.append({
                 "#": str(len(rows) + 1),
@@ -3903,7 +3907,7 @@ class DiskMgrShell(cmd.Cmd):
                                     if u not in uuid_dev_cache:
                                         uuid_dev_cache[u] = self.resolve_uuid_to_dev(u) or "-"
                                     dev = uuid_dev_cache[u]
-                                    return f"{Colors.OKBLUE}{u}{Colors.ENDC} [{dev}]"
+                                    return f"{Colors.OKBLUE}{u}{Colors.ENDC} {Colors.OKCYAN}[{dev}]{Colors.ENDC}"
                                 return uuid_re.sub(_repl, line or "")
 
                             for line in res.stdout.strip().splitlines():
