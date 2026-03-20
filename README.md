@@ -96,6 +96,7 @@ file system (applied to disk/part entries with mountable FSTYPE):
       Uses /etc/fstab mountpoint/options when an entry exists; otherwise /media/$USER/<label>.
   close <name/id> [--force]
       close <name>: unmounts filesystem(s) and closes /dev/mapper/<name> when present (locks LUKS).
+      If a whole-disk target is supplied, closes all mounted child partitions on that disk too.
       close #id (example: close #6): unmount-only for that discovered row; does NOT run cryptsetup close.
       With --force, kills mount-holder processes (SIGKILL) if unmount is busy, then retries unmount.
       Use #id if you want to close only the payload filesystem and keep the LUKS container open.
@@ -186,41 +187,56 @@ Display the physical partition layout and free space for all plugged-in disks.
 ```text
 Disk: /dev/sda (ST1000LM048-2E7172) [none] [Sector: L512/P4096] [Total Sectors: 1953525168]
 
- #   NAME  DEVICE       TYPE     STATE    FSTYPE  FSLABEL  FSUUID                                SIZE        FSAVAIL     FSMOUNTPOINTS  PERSISTENT PATH (IEEE)
- 1   7a    sda          disk     -                                                               931.51 GiB                             /dev/disk/by-id/wwn-0x5000c500c082605a
--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ #   NAME  DEVICE       TYPE     STATE      FSTYPE       FSLABEL    FSUUID                                SIZE        FSAVAIL     FSMOUNTPOINTS                      PERSISTENT PATH
+ 1   7a    sda          disk     -                                                                        931.51 GiB                                                 /dev/disk/by-id/wwn-0x5000c500c082605a
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+Disk: /dev/sdb (ST2000DM008-2FR102) [none] [Sector: L512/P4096] [Total Sectors: 3907029168]
+[ sdb crypto_LUKS 3907029168s (1907729.09MiB ~ 1863.0GiB (1.819 TiB)) ]
+
+ #   NAME  DEVICE       TYPE     STATE      FSTYPE       FSLABEL    FSUUID                                SIZE        FSAVAIL     FSMOUNTPOINTS                      PERSISTENT PATH
+ 2   1b    sdb          disk     OPEN       crypto_LUKS             885a66c1-6d5f-4d24-adfd-e7c7975dfe65  1.82 TiB                                                   /dev/disk/by-id/wwn-0x5000c500e31e6cb2
+ 3   -     `--dm-0 (1b)  crypt    MOUNTED    btrfs        1b         08aad883-1143-4d5d-84b9-d715665e332a  1.82 TiB    735.88 GiB  /media/lewis/1b1, /media/lewis/1b  -
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+Disk: /dev/sdc (TransMemory) [gpt] [Sector: L512/P512] [Total Sectors: 30274560]
+[ GPT Primary 34s (17408.00B) ] [ free 2014s (1007.00KiB) ] [ sdc1 fat32 30271488s (14781.00MiB ~ 14.4GiB) (boot, esp) ] [ free 991s (495.50KiB) ] [ GPT Backup 33s (16896.00B) ]
+
+ #   NAME  DEVICE       TYPE     STATE      FSTYPE       FSLABEL    FSUUID                                SIZE        FSAVAIL     FSMOUNTPOINTS                      PERSISTENT PATH
+ 4   boot  sdc          disk     -                                                                        14.44 GiB                                                  /dev/disk/by-id/usb-TOSHIBA_TransMemory_0022CFF6B89AC1419CD1477B-0:0
+ 5   -     `--sdc1       part     UNMOUNTED  vfat         BOOT_STUB  6E9F-3FF3                             14.43 GiB                                                  /dev/disk/by-id/usb-TOSHIBA_TransMemory_0022CFF6B89AC1419CD1477B-0:0-part1
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 Disk: /dev/zram0 (None) [loop] [Sector: L4096/P4096] [Total Sectors: 24608328]
 [ zram01 linux-swap(v1) 24608328s (96126.28MiB ~ 93.9GiB) ]
 
- #   NAME  DEVICE       TYPE     STATE    FSTYPE  FSLABEL  FSUUID                                SIZE        FSAVAIL     FSMOUNTPOINTS  PERSISTENT PATH (IEEE)
- 2   -     zram0        disk     -                                                               93.87 GiB               [SWAP]         -
--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ #   NAME  DEVICE       TYPE     STATE      FSTYPE       FSLABEL    FSUUID                                SIZE        FSAVAIL     FSMOUNTPOINTS                      PERSISTENT PATH
+ 6   -     zram0        disk     -                                                                        93.87 GiB               [SWAP]                             -
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 Disk: /dev/nvme1n1 (WD_BLACK SN8100 2000GB) [msdos] [Sector: L512/P512] [Total Sectors: 3907029168]
 [ MBR 2s (1024.00B) ] [ free 2046s (1023.00KiB) ] [ nvme1n1p1 ext4 3907026944s (1907728.00MiB ~ 1863.0GiB (1.819 TiB)) (boot) ] [ free 176s (88.00KiB) ]
 
- #   NAME  DEVICE       TYPE     STATE    FSTYPE  FSLABEL  FSUUID                                SIZE        FSAVAIL     FSMOUNTPOINTS  PERSISTENT PATH (IEEE)
- 3   -     nvme1n1      disk     -                                                               1.82 TiB                               /dev/disk/by-id/nvme-eui.e8238fa6bf530001001b448b42d60852
- 4   os    `--nvme1n1p1  part     MOUNTED  ext4             88f1dad3-95c6-418e-bea8-f5f3e072ea29  1.82 TiB    881.35 GiB  /              /dev/disk/by-id/nvme-eui.e8238fa6bf530001001b448b42d60852-part1
--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ #   NAME  DEVICE       TYPE     STATE      FSTYPE       FSLABEL    FSUUID                                SIZE        FSAVAIL     FSMOUNTPOINTS                      PERSISTENT PATH
+ 7   -     nvme1n1      disk     -                                                                        1.82 TiB                                                   /dev/disk/by-id/nvme-eui.e8238fa6bf530001001b448b42d60852
+ 8   os    `--nvme1n1p1  part     MOUNTED    ext4                    88f1dad3-95c6-418e-bea8-f5f3e072ea29  1.82 TiB    1.39 TiB    /                                  /dev/disk/by-id/nvme-eui.e8238fa6bf530001001b448b42d60852-part1
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 Disk: /dev/nvme0n1 (WD Blue SN570 1TB) [msdos] [Sector: L512/P512] [Total Sectors: 1953525168]
 [ MBR 2s (1024.00B) ] [ free 2046s (1023.00KiB) ] [ nvme0n1p1 ext4 1953523120s (953868.71MiB ~ 931.5GiB) ]
 
- #   NAME  DEVICE       TYPE     STATE    FSTYPE  FSLABEL  FSUUID                                SIZE        FSAVAIL     FSMOUNTPOINTS  PERSISTENT PATH (IEEE)
- 5   -     nvme0n1      disk     -                                                               931.51 GiB                             /dev/disk/by-id/nvme-eui.e8238fa6bf530001001b444a49598af9
- 6   data  `--nvme0n1p1  part     MOUNTED  ext4    data     72c22012-b161-4e2a-a762-94ff7fda47f9  931.51 GiB  288.55 GiB  /mnt/data      /dev/disk/by-id/nvme-eui.e8238fa6bf530001001b444a49598af9-part1
--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ #   NAME  DEVICE       TYPE     STATE      FSTYPE       FSLABEL    FSUUID                                SIZE        FSAVAIL     FSMOUNTPOINTS                      PERSISTENT PATH
+ 9   -     nvme0n1      disk     -                                                                        931.51 GiB                                                 /dev/disk/by-id/nvme-eui.e8238fa6bf530001001b444a49598af9
+ 10  data  `--nvme0n1p1  part     MOUNTED    ext4         data       72c22012-b161-4e2a-a762-94ff7fda47f9  931.51 GiB  303.91 GiB  /mnt/data                          /dev/disk/by-id/nvme-eui.e8238fa6bf530001001b444a49598af9-part1
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 Non-present mappings (/home/lewis/Dev/diskmgr/diskmap.tsv)
- #   NAME  DEVICE       TYPE     STATE    FSTYPE  FSLABEL  FSUUID                                SIZE        FSAVAIL     FSMOUNTPOINTS  PERSISTENT PATH (IEEE)
- 7   1b    -            missing  MISSING  -       -        -                                     -           -           -              /dev/disk/by-id/wwn-0x5000c500e31e6cb2
- 8   1a    -            missing  MISSING  -       -        -                                     -           -           -              /dev/disk/by-id/wwn-0x5000c500a89d6e44-part2
- 9   2a    -            missing  MISSING  -       -        -                                     -           -           -              /dev/disk/by-id/wwn-0x50004cf20836ca17
- 10  2b    -            missing  MISSING  -       -        -                                     -           -           -              /dev/disk/by-id/wwn-0x5000cca8c0d68e12
- 11  3a    -            missing  MISSING  -       -        -                                     -           -           -              /dev/disk/by-id/wwn-0x5000c500ab9fa51b
- 12  4a    -            missing  MISSING  -       -        -                                     -           -           -              /dev/disk/by-id/wwn-0x5000c500c08a4cea
--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ #   NAME  DEVICE       TYPE     STATE      FSTYPE       FSLABEL    FSUUID                                SIZE        FSAVAIL     FSMOUNTPOINTS                      PERSISTENT PATH
+ 11  1a    -            missing  MISSING    -            -          -                                     -           -           -                                  /dev/disk/by-id/wwn-0x5000c500a89d6e44-part2
+ 12  2a    -            missing  MISSING    -            -          -                                     -           -           -                                  /dev/disk/by-id/wwn-0x50004cf20836ca17
+ 13  2b    -            missing  MISSING    -            -          -                                     -           -           -                                  /dev/disk/by-id/wwn-0x5000cca8c0d68e12
+ 14  3a    -            missing  MISSING    -            -          -                                     -           -           -                                  /dev/disk/by-id/wwn-0x5000c500ab9fa51b
+ 15  4a    -            missing  MISSING    -            -          -                                     -           -           -                                  /dev/disk/by-id/wwn-0x5000c500c08a4cea
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 ```
 
 ## Command Reference: `boot`
@@ -314,7 +330,7 @@ Format a superfloppy disk/partition volume: format <name/id> [options]
            - To wipe partition metadata first, use: erase <name>
 
         Options:
-          --fs <ext4|xfs|btrfs>   Filesystem type (default: ext4)
+          --fs <ext4|xfs|btrfs|fat32>   Filesystem type (default: ext4)
           --label <label>   Set a different internal filesystem label (other than <name>)
           --luks            Encrypt target first with LUKS2, then format payload filesystem.
                             PBKDF defaults: argon2id, memory=4GiB, threads=4, time=8.
@@ -329,8 +345,8 @@ Format a superfloppy disk/partition volume: format <name/id> [options]
             - Runs 'cryptsetup luksFormat' with LUKS2 encryption.
             - Opens the container as /dev/mapper/<name>.
         4.  Filesystem:
-            - Plain mode (default): formats target directly with ext4, xfs, or btrfs.
-            - --luks mode: formats the opened mapper payload with ext4, xfs, or btrfs.
+            - Plain mode (default): formats target directly with ext4, xfs, btrfs, or fat32.
+            - --luks mode: formats the opened mapper payload with ext4, xfs, btrfs, or fat32.
             - (ext4 only): Reclaims the 5% reserved space for root using 'tune2fs -m 0'.
         5.  Persistence: Adds the new disk's PDP to diskmap.tsv automatically (best-effort).
 
@@ -552,6 +568,7 @@ Unmount and lock (if encrypted) a disk: close <name/id> [--force]
             - Flushes all pending writes to the disk (data integrity).
             - Terminates active file handles to the device.
             - Attempts unmount by mapper path (LUKS), source path (Plain), or guessed mountpoint.
+            - If target is a whole disk, also unmounts mounted child partitions on that disk.
         2.  Locking (LUKS only):
             - Commands the kernel to wipe encryption keys from RAM.
             - Removes the virtual cleartext device from /dev/mapper/.
