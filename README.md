@@ -196,7 +196,7 @@ Disk: /dev/sdb (ST2000DM008-2FR102) [none] [Sector: L512/P4096] [Total Sectors: 
 
  #   NAME  DEVICE       TYPE     STATE      FSTYPE       FSLABEL    FSUUID                                SIZE        FSAVAIL     FSMOUNTPOINTS                      PERSISTENT PATH
  2   1b    sdb          disk     OPEN       crypto_LUKS             885a66c1-6d5f-4d24-adfd-e7c7975dfe65  1.82 TiB                                                   /dev/disk/by-id/wwn-0x5000c500e31e6cb2
- 3   -     `--dm-0 (1b)  crypt    MOUNTED    btrfs        1b         08aad883-1143-4d5d-84b9-d715665e332a  1.82 TiB    735.88 GiB  /media/lewis/1b1, /media/lewis/1b  -
+ 3   -     `--dm-0 (1b)  crypt    MOUNTED    btrfs        1b         08aad883-1143-4d5d-84b9-d715665e332a  1.82 TiB    730.51 GiB  /media/lewis/1b1, /media/lewis/1b  -
 -----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 Disk: /dev/sdc (TransMemory) [gpt] [Sector: L512/P512] [Total Sectors: 30274560]
@@ -207,35 +207,41 @@ Disk: /dev/sdc (TransMemory) [gpt] [Sector: L512/P512] [Total Sectors: 30274560]
  5   -     `--sdc1       part     UNMOUNTED  vfat         BOOT_STUB  6E9F-3FF3                             14.43 GiB                                                  /dev/disk/by-id/usb-TOSHIBA_TransMemory_0022CFF6B89AC1419CD1477B-0:0-part1
 -----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
+Disk: /dev/sdd (USB Flash Disk) [none] [Sector: L512/P512] [Total Sectors: 0]
+
+ #   NAME  DEVICE       TYPE     STATE      FSTYPE       FSLABEL    FSUUID                                SIZE        FSAVAIL     FSMOUNTPOINTS                      PERSISTENT PATH
+ 6   -     sdd          disk     -                                                                                                                                   /dev/disk/by-id/usb-Generic_USB_Flash_Disk-0:0
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
 Disk: /dev/zram0 (None) [loop] [Sector: L4096/P4096] [Total Sectors: 24608328]
 [ zram01 linux-swap(v1) 24608328s (96126.28MiB ~ 93.9GiB) ]
 
  #   NAME  DEVICE       TYPE     STATE      FSTYPE       FSLABEL    FSUUID                                SIZE        FSAVAIL     FSMOUNTPOINTS                      PERSISTENT PATH
- 6   -     zram0        disk     -                                                                        93.87 GiB               [SWAP]                             -
+ 7   -     zram0        disk     -                                                                        93.87 GiB               [SWAP]                             -
 -----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 Disk: /dev/nvme1n1 (WD_BLACK SN8100 2000GB) [msdos] [Sector: L512/P512] [Total Sectors: 3907029168]
 [ MBR 2s (1024.00B) ] [ free 2046s (1023.00KiB) ] [ nvme1n1p1 ext4 3907026944s (1907728.00MiB ~ 1863.0GiB (1.819 TiB)) (boot) ] [ free 176s (88.00KiB) ]
 
  #   NAME  DEVICE       TYPE     STATE      FSTYPE       FSLABEL    FSUUID                                SIZE        FSAVAIL     FSMOUNTPOINTS                      PERSISTENT PATH
- 7   -     nvme1n1      disk     -                                                                        1.82 TiB                                                   /dev/disk/by-id/nvme-eui.e8238fa6bf530001001b448b42d60852
- 8   os    `--nvme1n1p1  part     MOUNTED    ext4                    88f1dad3-95c6-418e-bea8-f5f3e072ea29  1.82 TiB    1.39 TiB    /                                  /dev/disk/by-id/nvme-eui.e8238fa6bf530001001b448b42d60852-part1
+ 8   -     nvme1n1      disk     -                                                                        1.82 TiB                                                   /dev/disk/by-id/nvme-eui.e8238fa6bf530001001b448b42d60852
+ 9   os    `--nvme1n1p1  part     MOUNTED    ext4                    88f1dad3-95c6-418e-bea8-f5f3e072ea29  1.82 TiB    1.40 TiB    /                                  /dev/disk/by-id/nvme-eui.e8238fa6bf530001001b448b42d60852-part1
 -----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 Disk: /dev/nvme0n1 (WD Blue SN570 1TB) [msdos] [Sector: L512/P512] [Total Sectors: 1953525168]
 [ MBR 2s (1024.00B) ] [ free 2046s (1023.00KiB) ] [ nvme0n1p1 ext4 1953523120s (953868.71MiB ~ 931.5GiB) ]
 
  #   NAME  DEVICE       TYPE     STATE      FSTYPE       FSLABEL    FSUUID                                SIZE        FSAVAIL     FSMOUNTPOINTS                      PERSISTENT PATH
- 9   -     nvme0n1      disk     -                                                                        931.51 GiB                                                 /dev/disk/by-id/nvme-eui.e8238fa6bf530001001b444a49598af9
- 10  data  `--nvme0n1p1  part     MOUNTED    ext4         data       72c22012-b161-4e2a-a762-94ff7fda47f9  931.51 GiB  303.91 GiB  /mnt/data                          /dev/disk/by-id/nvme-eui.e8238fa6bf530001001b444a49598af9-part1
+ 10  -     nvme0n1      disk     -                                                                        931.51 GiB                                                 /dev/disk/by-id/nvme-eui.e8238fa6bf530001001b444a49598af9
+ 11  data  `--nvme0n1p1  part     MOUNTED    ext4         data       72c22012-b161-4e2a-a762-94ff7fda47f9  931.51 GiB  657.29 GiB  /mnt/data                          /dev/disk/by-id/nvme-eui.e8238fa6bf530001001b444a49598af9-part1
 -----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 Non-present mappings (/home/lewis/Dev/diskmgr/diskmap.tsv)
  #   NAME  DEVICE       TYPE     STATE      FSTYPE       FSLABEL    FSUUID                                SIZE        FSAVAIL     FSMOUNTPOINTS                      PERSISTENT PATH
- 11  1a    -            missing  MISSING    -            -          -                                     -           -           -                                  /dev/disk/by-id/wwn-0x5000c500a89d6e44-part2
- 12  2a    -            missing  MISSING    -            -          -                                     -           -           -                                  /dev/disk/by-id/wwn-0x50004cf20836ca17
- 13  2b    -            missing  MISSING    -            -          -                                     -           -           -                                  /dev/disk/by-id/wwn-0x5000cca8c0d68e12
- 14  3a    -            missing  MISSING    -            -          -                                     -           -           -                                  /dev/disk/by-id/wwn-0x5000c500ab9fa51b
- 15  4a    -            missing  MISSING    -            -          -                                     -           -           -                                  /dev/disk/by-id/wwn-0x5000c500c08a4cea
+ 12  1a    -            missing  MISSING    -            -          -                                     -           -           -                                  /dev/disk/by-id/wwn-0x5000c500a89d6e44-part2
+ 13  2a    -            missing  MISSING    -            -          -                                     -           -           -                                  /dev/disk/by-id/wwn-0x50004cf20836ca17
+ 14  2b    -            missing  MISSING    -            -          -                                     -           -           -                                  /dev/disk/by-id/wwn-0x5000cca8c0d68e12
+ 15  3a    -            missing  MISSING    -            -          -                                     -           -           -                                  /dev/disk/by-id/wwn-0x5000c500ab9fa51b
+ 16  4a    -            missing  MISSING    -            -          -                                     -           -           -                                  /dev/disk/by-id/wwn-0x5000c500c08a4cea
 -----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 ```
 

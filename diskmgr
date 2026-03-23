@@ -26,7 +26,7 @@ except ImportError:
 # Configuration
 MAP_FILENAME = 'diskmap.tsv'
 PASSGEN_BIN = 'passgen'
-VERSION = '3.5.1'
+VERSION = '3.5.2'
 HISTORY_FILE_ENV = 'DISKMGR_HISTORY'
 DEFAULT_HISTORY_FILE = Path.home() / '.local' / 'state' / 'diskmgr' / 'history'
 MAX_HISTORY_ENTRIES = 5000
@@ -1636,12 +1636,17 @@ class DiskMgrShell(cmd.Cmd):
 
                     print(f"\n{Colors.BOLD}Disk: {dev_path} ({model}) [none] [Sector: L{logical_sector}/P{physical_sector}] [Total Sectors: {total_logical_sectors}]{Colors.ENDC}")
                     if stderr:
-                        if has_whole_disk_fs and "unrecognised disk label" in stderr.lower():
+                        stderr_lower = stderr.lower()
+                        if has_whole_disk_fs and "unrecognised disk label" in stderr_lower:
                             # Superfloppy / whole-disk filesystem (including crypto_LUKS) is expected
                             # to have no partition table; don't show this as a warning.
                             pass
-                        elif "unrecognised disk label" in stderr.lower():
-                            log(f"{dev_path}: no partition table (unrecognized disk label).", 'WARN')
+                        elif "no medium found" in stderr_lower:
+                            log(f"{dev_path}: HARDWARE FAILURE - Device exists but has no storage medium (No medium found).", 'ERROR')
+                            log("      Possible causes: Dead flash memory, broken controller, or loose internal connection.", 'ERROR')
+                        elif "unrecognised disk label" in stderr_lower:
+                            log(f"{dev_path}: BLANK DISK - No partition table found (unrecognised disk label).", 'WARN')
+                            log("      Use 'create' to initialize a new partition table.", 'WARN')
                         else:
                             log(f"{dev_path}: could not read partition layout: {stderr}", 'WARN')
 
