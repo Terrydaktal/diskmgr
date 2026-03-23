@@ -26,7 +26,7 @@ except ImportError:
 # Configuration
 MAP_FILENAME = 'diskmap.tsv'
 PASSGEN_BIN = 'passgen'
-VERSION = '3.5.2'
+VERSION = '3.5.3'
 HISTORY_FILE_ENV = 'DISKMGR_HISTORY'
 DEFAULT_HISTORY_FILE = Path.home() / '.local' / 'state' / 'diskmgr' / 'history'
 MAX_HISTORY_ENTRIES = 5000
@@ -1642,11 +1642,9 @@ class DiskMgrShell(cmd.Cmd):
                             # to have no partition table; don't show this as a warning.
                             pass
                         elif "no medium found" in stderr_lower:
-                            log(f"{dev_path}: HARDWARE FAILURE - Device exists but has no storage medium (No medium found).", 'ERROR')
-                            log("      Possible causes: Dead flash memory, broken controller, or loose internal connection.", 'ERROR')
+                            log(f"{dev_path}: HARDWARE FAILURE - Device exists but has no storage medium (No medium found). Possible causes: Dead flash memory, broken controller, or loose internal connection.", 'ERROR')
                         elif "unrecognised disk label" in stderr_lower:
-                            log(f"{dev_path}: BLANK DISK - No partition table found (unrecognised disk label).", 'WARN')
-                            log("      Use 'create' to initialize a new partition table.", 'WARN')
+                            log(f"{dev_path}: BLANK DISK - No partition table found (unrecognised disk label). Use 'create' to initialize a new partition table.", 'WARN')
                         else:
                             log(f"{dev_path}: could not read partition layout: {stderr}", 'WARN')
 
