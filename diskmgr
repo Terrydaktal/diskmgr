@@ -7489,13 +7489,32 @@ class DiskMgrShell(cmd.Cmd):
         # Ensure trailing slashes so rsync copies directory CONTENTS.
         src_path = pri_mnt.rstrip('/') + '/'
         dst_path = sec_mnt.rstrip('/') + '/'
+        root_source_excludes = []
+        root_source_flags = []
+        if os.path.realpath(pri_mnt) == '/':
+            # Root-sync safety defaults: skip pseudo-filesystems and mount roots.
+            # Also stay on the root filesystem only to avoid crossing into mounted
+            # filesystems (snap/overlay/fuse/etc) which can massively skew counts.
+            root_source_flags = ['--one-file-system']
+            root_source_excludes = [
+                '--exclude=/proc/***',
+                '--exclude=/sys/***',
+                '--exclude=/run/***',
+                '--exclude=/dev/***',
+                '--exclude=/tmp/***',
+                '--exclude=/mnt/***',
+                '--exclude=/media/***',
+            ]
 
         print(f"Syncing: {Colors.BOLD}{src_path}{Colors.ENDC} -> {Colors.WARNING}{dst_path}{Colors.ENDC}")
+        if root_source_excludes:
+            print("Root source detected: auto-excluding /proc, /sys, /run, /dev, /tmp, /mnt, /media")
+            print("Root source detected: using --one-file-system to avoid crossing mountpoints")
         run_command(['sudo', '-v'])
 
         # Pre-scan before confirmation to compute planned bytes for stable progress.
         log("Running pre-scan (dry-run) to compute planned transfer...")
-        pre_cmd = ['rsync', '-anH', '--delete', '--stats', src_path, dst_path]
+        pre_cmd = ['rsync', '-anHS'] + root_source_flags + ['--delete', '--stats'] + root_source_excludes + [src_path, dst_path]
         pre_res = run_command(pre_cmd, sudo=True, check=False)
         pre_rc = getattr(pre_res, 'returncode', 0)
         pre_out = (getattr(pre_res, 'stdout', '') or '') + "\n" + (getattr(pre_res, 'stderr', '') or '')
@@ -7534,10 +7553,9 @@ class DiskMgrShell(cmd.Cmd):
 
         try:
             cmd = [
-                'sudo', 'rsync', '-aH', '--delete',
+                'sudo', 'rsync', '-aH',
                 '--info=progress2,stats2,name0',
-                src_path, dst_path
-            ]
+            ] + root_source_flags + ['--sparse', '--delete'] + root_source_excludes + [src_path, dst_path]
             proc = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
@@ -7727,12 +7745,30 @@ class DiskMgrShell(cmd.Cmd):
 
         src_path = pri_mnt.rstrip('/') + '/'
         dst_path = sec_mnt.rstrip('/') + '/'
+        root_source_excludes = []
+        root_source_flags = []
+        if os.path.realpath(pri_mnt) == '/':
+            # Keep root diff focused on real data, not pseudo-filesystems/mount roots.
+            # Avoid crossing into other mounted filesystems.
+            root_source_flags = ['--one-file-system']
+            root_source_excludes = [
+                '--exclude=/proc/***',
+                '--exclude=/sys/***',
+                '--exclude=/run/***',
+                '--exclude=/dev/***',
+                '--exclude=/tmp/***',
+                '--exclude=/mnt/***',
+                '--exclude=/media/***',
+            ]
         if fast_mode:
             print(f"Diff (fast dry-run, source->destination): {Colors.BOLD}{src_path}{Colors.ENDC} -> {Colors.WARNING}{dst_path}{Colors.ENDC}")
             print("  Source is copied FROM; destination is what would be replaced to match source.")
         else:
             print(f"Diff (dry-run, source->destination): {Colors.BOLD}{src_path}{Colors.ENDC} -> {Colors.WARNING}{dst_path}{Colors.ENDC}")
             print("  Source is copied FROM; destination is what would be replaced to match source.")
+        if root_source_excludes:
+            print("  Root source detected: auto-excluding /proc, /sys, /run, /dev, /tmp, /mnt, /media")
+            print("  Root source detected: using --one-file-system to avoid crossing mountpoints")
         if checksum_mode:
             print("  Comparison mode: checksum/content-based (rsync -c).")
 
@@ -7744,10 +7780,12 @@ class DiskMgrShell(cmd.Cmd):
             if depth != 2:
                 log("--fast ignores --depth.", 'WARN')
 
-            fast_cmd = ['rsync', '-anH']
+            fast_cmd = ['rsync', '-anHS'] + root_source_flags
             if checksum_mode:
                 fast_cmd.append('-c')
-            fast_cmd.extend(['--delete', '--stats', src_path, dst_path])
+            fast_cmd.extend(['--delete', '--stats'])
+            fast_cmd.extend(root_source_excludes)
+            fast_cmd.extend([src_path, dst_path])
             res_fast = run_command(
                 fast_cmd,
                 sudo=True,
@@ -7785,6 +7823,12 @@ class DiskMgrShell(cmd.Cmd):
             while p.startswith('./'):
                 p = p[2:]
             return p
+
+        def _top_relpath(p):
+            p = _norm_relpath(p)
+            if not p:
+                return "."
+            return p.split('/', 1)[0]
 
         def _add_subtree(kind, relpath, seen, counts):
             relpath = _norm_relpath(relpath)
@@ -7833,6 +7877,10 @@ class DiskMgrShell(cmd.Cmd):
             file_counts[(relpath, kind)] = file_counts.get((relpath, kind), 0) + 1
             file_bytes[(relpath, kind)] = file_bytes.get((relpath, kind), 0) + int(amount)
 
+        def _add_top_bytes(acc, relpath, amount):
+            top = _top_relpath(relpath)
+            acc[top] = acc.get(top, 0) + int(amount)
+
         def _fmt_size_human(num_bytes, signed=False):
             n = int(num_bytes or 0)
             neg = n < 0
@@ -7850,7 +7898,7 @@ class DiskMgrShell(cmd.Cmd):
                 return ("-" if neg else "+") + txt
             return ("-" if neg else "") + txt
 
-        def _build_tree_entries(root_dir, max_depth, dirs_only_mode, extra_dirs=None, extra_files=None):
+        def _build_tree_entries(root_dir, max_depth, dirs_only_mode, extra_dirs=None, extra_files=None, excluded_rel_roots=None):
             """
             Build entries in tree order (directories first) up to max_depth.
             Includes unchanged files/dirs from the primary path so output mirrors:
@@ -7859,6 +7907,7 @@ class DiskMgrShell(cmd.Cmd):
             entries = [('dir', '.')]
             extra_dirs = set(extra_dirs or [])
             extra_files = set(extra_files or [])
+            excluded_rel_roots = set(excluded_rel_roots or [])
 
             def _split_parent_name(relp):
                 if not relp or relp == ".":
@@ -7870,6 +7919,10 @@ class DiskMgrShell(cmd.Cmd):
 
             extra_dirs_by_parent = {}
             for relp in extra_dirs:
+                if relp:
+                    top = relp.split('/', 1)[0]
+                    if top in excluded_rel_roots:
+                        continue
                 parent, name = _split_parent_name(relp)
                 if not name:
                     continue
@@ -7877,6 +7930,10 @@ class DiskMgrShell(cmd.Cmd):
 
             extra_files_by_parent = {}
             for relp in extra_files:
+                if relp:
+                    top = relp.split('/', 1)[0]
+                    if top in excluded_rel_roots:
+                        continue
                 parent, name = _split_parent_name(relp)
                 if not name:
                     continue
@@ -7888,11 +7945,15 @@ class DiskMgrShell(cmd.Cmd):
                 vdirs = sorted(extra_dirs_by_parent.get(rel_dir, set()))
                 vfiles = sorted(extra_files_by_parent.get(rel_dir, set())) if not dirs_only_mode else []
                 for dname in vdirs:
+                    if not rel_dir and dname in excluded_rel_roots:
+                        continue
                     relp = dname if not rel_dir else f"{rel_dir}/{dname}"
                     entries.append(('dir', relp))
                     _walk_virtual(relp, level + 1)
                 if not dirs_only_mode:
                     for fname in vfiles:
+                        if not rel_dir and fname in excluded_rel_roots:
+                            continue
                         relp = fname if not rel_dir else f"{rel_dir}/{fname}"
                         entries.append(('file', relp))
 
@@ -7920,6 +7981,8 @@ class DiskMgrShell(cmd.Cmd):
                 files = sorted(source_file_names | extra_files_by_parent.get(rel_dir, set())) if not dirs_only_mode else []
 
                 for dname in dirs:
+                    if not rel_dir and dname in excluded_rel_roots:
+                        continue
                     relp = dname if not rel_dir else f"{rel_dir}/{dname}"
                     entries.append(('dir', relp))
                     if dname in source_dir_names:
@@ -7929,6 +7992,8 @@ class DiskMgrShell(cmd.Cmd):
 
                 if not dirs_only_mode:
                     for fname in files:
+                        if not rel_dir and fname in excluded_rel_roots:
+                            continue
                         relp = fname if not rel_dir else f"{rel_dir}/{fname}"
                         entries.append(('file', relp))
 
@@ -7995,6 +8060,10 @@ class DiskMgrShell(cmd.Cmd):
         del_bytes = 0
         pending_delete_paths = []
         modified_entries = []
+        # Logical byte totals by top-level path for sparse/compression-aware estimate.
+        top_src_new = {}
+        top_src_upd = {}
+        top_dst_del = {}
 
         # Summary 2 counters (folder view)
         seen = {}
@@ -8006,14 +8075,15 @@ class DiskMgrShell(cmd.Cmd):
         total_upd = 0
         total_del = 0
 
-        cmd = ['sudo', 'rsync', '-anH']
+        cmd = ['sudo', 'rsync', '-anHS'] + root_source_flags
         if checksum_mode:
             cmd.append('-c')
         cmd.extend([
             '--delete', '--itemize-changes',
-            '--out-format=%i\t%l\t%n',
-            src_path, dst_path
+            '--out-format=%i\t%l\t%n'
         ])
+        cmd.extend(root_source_excludes)
+        cmd.extend([src_path, dst_path])
         stderr_lines = []
 
         def _drain_stderr(stream, sink):
@@ -8062,6 +8132,7 @@ class DiskMgrShell(cmd.Cmd):
                         del_bytes += del_size
                         _add_subtree_bytes('del', p, seen, cb, del_size)
                         _add_file_change('del', p, fc, fb, del_size)
+                        _add_top_bytes(top_dst_del, p, del_size)
                     else:
                         # rsync delete lines often report 0 size; resolve after parse in batches.
                         pending_delete_paths.append(p)
@@ -8078,19 +8149,28 @@ class DiskMgrShell(cmd.Cmd):
             if len(item) < 2:
                 continue
             item_type = item[1]
+            is_hardlink_create = (item.startswith('h') and '+' in item[2:])
             is_new_nondir = (
                 item.startswith('>f+') or item.startswith('cf+') or
-                item.startswith('>L+') or item.startswith('cL+')
+                item.startswith('>L+') or item.startswith('cL+') or
+                # Hard-link creation entries from rsync -H itemize output
+                # (e.g. "hf+++++++++"). These are creates, not modifications.
+                is_hardlink_create
             )
 
             # New files/symlinks.
             if is_new_nondir:
                 new_files += 1
                 total_new += 1
-                new_bytes += size_b
+                # For hard-link creates, rsync typically transfers payload once and
+                # then creates extra directory entries; counting full size for each
+                # hard-link path inflates folder totals. Keep count, zero byte delta.
+                effective_size_b = 0 if is_hardlink_create else size_b
+                new_bytes += effective_size_b
                 _add_subtree('new', relp, seen, c)
-                _add_subtree_bytes('new', relp, seen, cb, size_b)
-                _add_file_change('new', relp, fc, fb, size_b)
+                _add_subtree_bytes('new', relp, seen, cb, effective_size_b)
+                _add_file_change('new', relp, fc, fb, effective_size_b)
+                _add_top_bytes(top_src_new, relp, effective_size_b)
                 continue
 
             # Modified regular files (delta estimated as src_size - dst_size).
@@ -8109,6 +8189,7 @@ class DiskMgrShell(cmd.Cmd):
                 _add_subtree('upd', relp, seen, c)
                 _add_subtree_bytes('upd', relp, seen, cb, size_b)
                 _add_file_change('upd', relp, fc, fb, size_b)
+                _add_top_bytes(top_src_upd, relp, size_b)
                 continue
 
         if proc.stdout:
@@ -8130,6 +8211,7 @@ class DiskMgrShell(cmd.Cmd):
                 del_bytes += sz
                 _add_subtree_bytes('del', rel, seen, cb, sz)
                 _add_file_change('del', rel, fc, fb, sz)
+                _add_top_bytes(top_dst_del, rel, sz)
 
         if modified_entries:
             mod_dst_sizes = _batch_stat_sizes(dst_path, [rel for rel, _ in modified_entries])
@@ -8138,6 +8220,55 @@ class DiskMgrShell(cmd.Cmd):
                 mod_bytes += delta
                 _add_subtree_bytes('upd', rel, seen, cb, delta)
                 _add_file_change('upd', rel, fc, fb, delta)
+                _add_top_bytes(top_src_upd, rel, delta)
+
+        src_tree_root = os.path.realpath(pri_mnt) or "/"
+        dst_tree_root = os.path.realpath(sec_mnt) or "/"
+
+        def _du_bytes(base_root, top_rel, apparent=False):
+            p = base_root if top_rel in (".", "", None) else os.path.join(base_root, top_rel)
+            if not os.path.exists(p):
+                return None
+            cmd = ['du', '-sx', '-B1']
+            if apparent:
+                cmd.append('--apparent-size')
+            cmd.append(p)
+            res_du = run_command(cmd, sudo=True, check=False, capture_output=True)
+            if getattr(res_du, 'returncode', 1) != 0:
+                return None
+            out = (getattr(res_du, 'stdout', '') or '').strip()
+            if not out:
+                return None
+            tok = out.split()[0]
+            try:
+                return int(tok)
+            except Exception:
+                return None
+
+        def _ratio_for_top(base_root, top_rel, cache):
+            key = (base_root, top_rel)
+            if key in cache:
+                return cache[key]
+            phys = _du_bytes(base_root, top_rel, apparent=False)
+            app = _du_bytes(base_root, top_rel, apparent=True)
+            if phys is None or app is None or app <= 0:
+                ratio = 1.0
+            else:
+                ratio = max(0.0, min(1.0, float(phys) / float(app)))
+            cache[key] = ratio
+            return ratio
+
+        src_ratio_cache = {}
+        dst_ratio_cache = {}
+        est_new_bytes = 0
+        for top, logical_b in top_src_new.items():
+            est_new_bytes += int(round(logical_b * _ratio_for_top(src_tree_root, top, src_ratio_cache)))
+        est_upd_bytes = 0
+        for top, logical_b in top_src_upd.items():
+            est_upd_bytes += int(round(logical_b * _ratio_for_top(src_tree_root, top, src_ratio_cache)))
+        est_del_bytes = 0
+        for top, logical_b in top_dst_del.items():
+            est_del_bytes += int(round(logical_b * _ratio_for_top(dst_tree_root, top, dst_ratio_cache)))
 
         print(f"Created files:  {new_files}")
         print(f"Modified files: {mod_files}")
@@ -8147,8 +8278,12 @@ class DiskMgrShell(cmd.Cmd):
         print(f"New Data:       {new_bytes:,} bytes")
         print(f"Updated Data:   {mod_bytes:,} bytes")
         print(f"Deleted Data:   {del_bytes:,} bytes")
+        print(f"Est. New Data:  {est_new_bytes:,} bytes (physical est.)")
+        print(f"Est. Upd Data:  {est_upd_bytes:,} bytes (physical est.)")
+        print(f"Est. Del Data:  {est_del_bytes:,} bytes (physical est.)")
         print("-----------------------")
         print(f"Net Change:     {new_bytes + mod_bytes - del_bytes:,} bytes")
+        print(f"Est. Net Chg:   {est_new_bytes + est_upd_bytes - est_del_bytes:,} bytes")
         print("")
 
         print("Rsync dry-run change summary by hierarchy")
@@ -8175,7 +8310,7 @@ class DiskMgrShell(cmd.Cmd):
             if kind == 'del'
         }
         entries = _build_tree_entries(
-            src_path.rstrip('/'),
+            src_tree_root,
             depth,
             dirs_only,
             extra_dirs=deleted_dirs,
