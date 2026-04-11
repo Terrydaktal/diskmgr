@@ -26,7 +26,7 @@ except ImportError:
 # Configuration
 MAP_FILENAME = 'diskmap.tsv'
 PASSGEN_BIN = 'passgen'
-VERSION = '3.5.3'
+VERSION = '3.5.6'
 HISTORY_FILE_ENV = 'DISKMGR_HISTORY'
 DEFAULT_HISTORY_FILE = Path.home() / '.local' / 'state' / 'diskmgr' / 'history'
 MAX_HISTORY_ENTRIES = 5000
@@ -39,7 +39,7 @@ LUKS_HEADER_BACKUP_DIR = Path.home() / '.local' / 'share' / 'diskmgr'
 # ANSI Colors
 class Colors:
     HEADER = '\033[95m'
-    OKBLUE = '\033[94m'
+    OKBLUE = '\033[38;5;117m'
     OKCYAN = '\033[96m'
     OKGREEN = '\033[92m'
     WARNING = '\033[93m'
@@ -658,7 +658,13 @@ def _parse_ddrescue_failed_ranges(map_path, sector_size=512):
 
 def _lsblk_type(dev_path):
     res = run_command_hard_timeout(['lsblk', '-no', 'TYPE', dev_path], 3, check=False)
-    return (getattr(res, 'stdout', '') or '').strip()
+    out = (getattr(res, 'stdout', '') or '')
+    # lsblk may return multiple rows (device + children); use only the target's first row.
+    for line in out.splitlines():
+        line = line.strip()
+        if line:
+            return line
+    return ""
 
 def _lsblk_fstype(dev_path):
     res = run_command_hard_timeout(['lsblk', '-no', 'FSTYPE', dev_path], 3, check=False)
@@ -1285,8 +1291,13 @@ class DiskMgrShell(cmd.Cmd):
         print("      Opens and mounts a plain or encrypted partition or superfloppy.")
         print("      For encrypted targets, unlocks LUKS then mounts payload filesystem.")
         print("      LUKS open tries on-disk header first, then ~/.local/share/diskmgr/<name> as detached header backup.")
-        print("      Btrfs mounts are enforced with compression (compress=zstd:3).")
-        print("      Uses /etc/fstab mountpoint/options when an entry exists; otherwise /media/$USER/<label>.")
+        print("      Btrfs mounts are enforced with compression (compress=zstd:12).")
+        print("      Mountpoint selection: /etc/fstab entry wins when present (uses fstab mountpoint/options).")
+        print("      Without fstab: /media/$USER/<mapped-name> when opened by mapping name;")
+        print("      else /media/$USER/<FSLABEL>; else /media/$USER/<device>.")
+        print("      If the same source is mounted multiple times (e.g. <label> and <label>1),")
+        print("      open keeps the preferred path and unmounts extra mountpoints.")
+        print("      If the preferred path is occupied by a different device, open is blocked.")
         print(f"  {Colors.OKGREEN}close <name/id> [--force]{Colors.ENDC}")
         print("      close <name>: unmounts filesystem(s) and closes /dev/mapper/<name> when present (locks LUKS).")
         print("      If a whole-disk target is supplied, closes all mounted child partitions on that disk too.")
@@ -2161,8 +2172,8 @@ class DiskMgrShell(cmd.Cmd):
         if ('compress=' in opts) or ('compress-force=' in opts):
             return
 
-        log(f"Enabling btrfs compression on {mountpoint} (compress=zstd:3).")
-        run_command(['mount', '-o', 'remount,compress=zstd:3', mountpoint], sudo=True)
+        log(f"Enabling btrfs compression on {mountpoint} (compress=zstd:12).")
+        run_command(['mount', '-o', 'remount,compress=zstd:12', mountpoint], sudo=True)
 
         verify = run_command(['findmnt', '-rn', '-M', mountpoint, '-o', 'OPTIONS'], check=False)
         vopts = (getattr(verify, 'stdout', '') or '').strip().lower()
@@ -2172,14 +2183,14 @@ class DiskMgrShell(cmd.Cmd):
     def _mount_device(self, devnode, mountpoint, use_fstab=False, announce_btrfs=False):
         dev_fstype = self._detect_fstype(devnode)
         if announce_btrfs and dev_fstype == 'btrfs':
-            log(f"Enabling btrfs compression on {mountpoint} (compress=zstd:3).")
+            log(f"Enabling btrfs compression on {mountpoint} (compress=zstd:12).")
         run_command(['mkdir', '-p', mountpoint], sudo=True)
         if use_fstab:
             # Use /etc/fstab mount options and source selection.
             run_command(['mount', mountpoint], sudo=True)
         else:
             if dev_fstype == 'btrfs':
-                run_command(['mount', '-o', 'compress=zstd:3', devnode, mountpoint], sudo=True)
+                run_command(['mount', '-o', 'compress=zstd:12', devnode, mountpoint], sudo=True)
             else:
                 run_command(['mount', devnode, mountpoint], sudo=True)
 
@@ -2228,7 +2239,7 @@ class DiskMgrShell(cmd.Cmd):
         gvfs_name = self._fstab_escape(gvfs_name)
         opts = ["defaults", "nofail"]
         if (str(fstype or "").strip().lower() == "btrfs"):
-            opts.append("compress=zstd:3")
+            opts.append("compress=zstd:12")
         opts.extend(["x-gvfs-show", f"x-gvfs-name={gvfs_name}"])
         return ",".join(opts)
 
@@ -2855,7 +2866,7 @@ class DiskMgrShell(cmd.Cmd):
 
     def _show_target_entries_for_confirmation(self, target_name):
         """
-        Print current list-list entry/entries for the target before math confirmation.
+        Print current list-list entry/entries for the target before confirmation.
         Also includes an open crypt child when target is a LUKS container parent.
         """
         try:
@@ -2920,6 +2931,117 @@ class DiskMgrShell(cmd.Cmd):
         except Exception:
             # Confirmation should continue even if snapshot rendering fails.
             pass
+
+    def _resolve_confirmation_identity(self, target_name):
+        """
+        Resolve confirmation identity as (device_real, persistent_path).
+        Returns (None, None) when identity cannot be determined reliably.
+        """
+        text = str(target_name or "").strip()
+        if not text:
+            return (None, None)
+
+        candidates = []
+
+        def _add_candidate(p):
+            v = str(p or "").strip().rstrip("),]")
+            if not v:
+                return
+            if v not in candidates:
+                candidates.append(v)
+
+        # Explicit /dev paths first.
+        for p in re.findall(r"/dev/[A-Za-z0-9._/\-+:#]+", text):
+            _add_candidate(p)
+
+        # Any explicit absolute paths (mountpoints, etc.) that might map to /dev via findmnt.
+        for p in re.findall(r"/[A-Za-z0-9._/\-+:#]+", text):
+            _add_candidate(p)
+
+        # First token can be mapping name or discovery ID.
+        token = text.split()[0].strip("[](),")
+        if token:
+            _add_candidate(token)
+
+        def _candidate_to_device(c):
+            c = str(c or "").strip()
+            if not c:
+                return None
+
+            # Mapping name or #N.
+            try:
+                resolved = self.resolve_target(c, allow_id=True)
+            except Exception:
+                resolved = None
+            if resolved and os.path.exists(resolved):
+                return os.path.realpath(resolved)
+
+            # Existing path.
+            if os.path.exists(c):
+                rc = os.path.realpath(c)
+                if rc.startswith('/dev/'):
+                    return rc
+                # Mountpoint path -> mounted source device.
+                res_src = run_command(['findmnt', '-rn', '-T', rc, '-o', 'SOURCE'], check=False)
+                src = (getattr(res_src, 'stdout', '') or '').strip().splitlines()
+                src = src[0].strip() if src else ""
+                if src.startswith('/dev/'):
+                    return os.path.realpath(src)
+
+            # Raw /dev path token that might exist even if os.path.exists() raced.
+            if c.startswith('/dev/'):
+                return os.path.realpath(c)
+
+            return None
+
+        device_real = None
+        for c in candidates:
+            dev = _candidate_to_device(c)
+            if dev and dev.startswith('/dev/') and os.path.exists(dev):
+                device_real = dev
+                break
+
+        if not device_real:
+            return (None, None)
+
+        # Map virtual devices (e.g. /dev/mapper/*) to a stable underlying block
+        # node before resolving persistent by-id identity.
+        id_dev = device_real
+        try:
+            t = (_lsblk_type(id_dev) or '').strip().lower()
+            hops = 0
+            while t == 'crypt' and hops < 8:
+                res_pk = run_command(['lsblk', '-no', 'PKNAME', id_dev], check=False)
+                pk = (getattr(res_pk, 'stdout', '') or '').strip().splitlines()
+                pk = pk[0].strip() if pk else ""
+                if not pk:
+                    break
+                nxt = os.path.realpath(f"/dev/{pk}")
+                if not os.path.exists(nxt) or nxt == id_dev:
+                    break
+                id_dev = nxt
+                t = (_lsblk_type(id_dev) or '').strip().lower()
+                hops += 1
+        except Exception:
+            pass
+
+        try:
+            kname = os.path.basename(id_dev)
+            dtype = (_lsblk_type(id_dev) or '').strip().lower()
+            if dtype not in ('disk', 'part'):
+                if _sysfs_is_whole_disk(id_dev):
+                    dtype = 'disk'
+                else:
+                    dtype = 'part'
+            res_wwn = run_command(['lsblk', '-no', 'WWN', id_dev], check=False)
+            wwn = (getattr(res_wwn, 'stdout', '') or '').strip()
+            pdp = self.find_persistent_path(kname, wwn=wwn, type_=dtype)
+        except Exception:
+            pdp = "-"
+
+        if not pdp or pdp == "-":
+            return (device_real, None)
+        return (device_real, pdp)
 
     def _print_lsblk_rows(self, rows, widths=None, cols=None):
         """
@@ -3987,25 +4109,29 @@ class DiskMgrShell(cmd.Cmd):
         
         # 1. Check Discovery ID
         if allow_id:
-            idx = None
             if clean.startswith('#') and clean[1:].isdigit():
                 wanted = clean[1:]
-                # Primary lookup: exact display ID from the last `list` run (e.g. "#7").
+                # Strict lookup: exact display ID from the last `list` run.
+                # Use id_cache so #N always refers to the printed row ID and
+                # never falls back to positional cache ordering.
+                resolved = (self.id_cache or {}).get(wanted)
+                if resolved:
+                    return resolved
+                # Back-compat for legacy map-only flows where only unmapped cache
+                # had IDs populated. Keep exact-ID match only (no positional fallback).
                 for entry in (self.unmapped_cache or []):
                     try:
                         if str(entry.get('id', '')).strip() == wanted:
                             return entry.get('pdp')
                     except Exception:
                         continue
-                # Backward-compatible fallback: positional index in cache.
-                idx = int(wanted) - 1
+                return None
             elif clean.startswith('U') and clean[1:].isdigit():
-                # Backward-compatible legacy ID format.
-                idx = int(clean[1:]) - 1
-
-            if idx is not None:
-                if 0 <= idx < len(self.unmapped_cache):
-                    return self.unmapped_cache[idx]['pdp']
+                # Legacy ID format, now strict/exact against current ID cache.
+                wanted = clean[1:]
+                resolved = (self.id_cache or {}).get(wanted)
+                if resolved:
+                    return resolved
                 return None
             
         # 2. Check Mapping Name
@@ -4022,24 +4148,33 @@ class DiskMgrShell(cmd.Cmd):
         else:
             print(f"You are about to perform a HIGH-IMPACT operation on: {Colors.WARNING}{target_name}{Colors.ENDC}")
         self._show_target_entries_for_confirmation(target_name)
-        print("To proceed, you must answer two math questions correctly.")
-        
-        for i in range(2):
-            a = random.randint(11, 99)
-            b = random.randint(11, 99)
-            op = random.choice(['+', '-'])
-            if op == '+':
-                ans = a + b
-            else:
-                ans = a - b
-            
-            try:
-                user_ans = self._input_no_history(f"Question {i+1}/2: What is {a} {op} {b}? ")
-                if not user_ans or int(user_ans) != ans:
-                    log("Incorrect answer. Aborting operation.", 'ERROR')
-                    return False
-            except ValueError:
-                log("Invalid input. Aborting operation.", 'ERROR')
+        if destructive:
+            dev_real, pdp = self._resolve_confirmation_identity(target_name)
+            if not dev_real:
+                log("Could not resolve confirmation device. Aborting operation.", 'ERROR')
+                return False
+            if not pdp:
+                log("Could not resolve persistent path for confirmation. Aborting operation.", 'ERROR')
+                return False
+
+            print("To proceed, type BOTH values exactly as shown:")
+            print(f"  DEVICE: {Colors.OKCYAN}{dev_real}{Colors.ENDC}")
+            print(f"  PERSISTENT PATH: {Colors.OKCYAN}{pdp}{Colors.ENDC}")
+
+            user_dev = self._input_no_history("Confirm DEVICE: ")
+            if (user_dev or "").strip() != dev_real:
+                log("Device confirmation mismatch. Aborting operation.", 'ERROR')
+                return False
+
+            user_pdp = self._input_no_history("Confirm PERSISTENT PATH: ")
+            if (user_pdp or "").strip() != pdp:
+                log("Persistent path confirmation mismatch. Aborting operation.", 'ERROR')
+                return False
+        else:
+            print("To proceed, type YES.")
+            user_yes = self._input_no_history("Type YES to continue: ")
+            if (user_yes or "").strip() != "YES":
+                log("Confirmation failed. Aborting operation.", 'ERROR')
                 return False
         
         print(f"{Colors.OKGREEN}Verification successful. Proceeding...{Colors.ENDC}")
@@ -4242,7 +4377,7 @@ class DiskMgrShell(cmd.Cmd):
             - Otherwise identifies preferred mountpoint: /media/$USER/<label>.
             - If no hardware label is present, falls back to /media/$USER/<mapping_name>.
             - Ensures the directory exists and attaches the device.
-            - For btrfs, enforces compression (compress=zstd:3) on the mounted filesystem.
+            - For btrfs, enforces compression (compress=zstd:12) on the mounted filesystem.
         6.  Policy Enforcement: If the disk is already mounted at a non-standard path, 
             it unmounts and remounts it to the preferred path.
 
@@ -4538,16 +4673,28 @@ class DiskMgrShell(cmd.Cmd):
             Remove duplicate mount targets for the same source, keeping only the selected mountpoint.
             This handles late desktop auto-mount races that create suffix mounts (e.g. label1).
             """
-            for _ in range(rounds):
+            for attempt in range(rounds):
                 targets_now = find_mount_targets(target_to_mount)
                 extras_now = [t for t in targets_now if os.path.realpath(t) != preferred_mount_real]
                 if not extras_now:
                     return
                 for mp in extras_now:
-                    log(f"Unmounting extra mountpoint {mp} to keep preferred path {mountpoint}...")
+                    log(
+                        f"Unmounting extra mountpoint {mp} to keep preferred path {mountpoint} "
+                        f"(attempt {attempt + 1}/{rounds})..."
+                    )
                     res_um = run_command(['umount', mp], sudo=True, check=False)
                     if getattr(res_um, 'returncode', 1) != 0:
-                        log(f"Failed to unmount extra mountpoint {mp}; it may be busy.", 'WARN')
+                        if attempt + 1 < rounds:
+                            log(
+                                f"Failed to unmount extra mountpoint {mp}; it may be busy. Retrying...",
+                                'WARN'
+                            )
+                        else:
+                            log(
+                                f"Failed to unmount extra mountpoint {mp} after {rounds} attempts; it may be busy.",
+                                'WARN'
+                            )
                         continue
                     cleanup_mountpoint_dir(mp)
                 time.sleep(sleep_s)
@@ -4754,16 +4901,34 @@ class DiskMgrShell(cmd.Cmd):
             if skip:
                 mappers = [m for m in mappers if m not in skip]
             if not mappers:
-                return
+                return 0
             log(f"Closing child LUKS mappings on disk {devnode}: {', '.join(mappers)}")
+            closed = 0
             for mname in mappers:
+                mapper_dev = f"/dev/mapper/{mname}"
+                # Child mappers can be mounted even when the parent disk itself
+                # has no direct mount; unmount their targets before close.
+                child_targets = find_mount_targets(mapper_dev)
+                child_unmount_failed = False
+                for mp in child_targets:
+                    if not _try_unmount(mp):
+                        child_unmount_failed = True
+                        break
+                    cleanup_mountpoint_dir(mp)
+                if child_unmount_failed:
+                    log(f"Skipping close of child mapping {mname} because one or more mount targets are still busy.", 'WARN')
+                    continue
+
                 res = run_command(['cryptsetup', 'close', mname], sudo=True, check=False)
-                if getattr(res, 'returncode', 1) != 0:
+                if getattr(res, 'returncode', 1) == 0:
+                    closed += 1
+                else:
                     err = (getattr(res, 'stderr', '') or '').strip()
                     if err:
                         log(f"Failed to close child mapping {mname}: {err}", 'WARN')
                     else:
                         log(f"Failed to close child mapping {mname}.", 'WARN')
+            return closed
 
         def _collect_mount_targets_for_device(devnode, include_children=False):
             """
@@ -5044,6 +5209,7 @@ class DiskMgrShell(cmd.Cmd):
 
         # If this mapping resolves to a whole disk, close all open child LUKS mappings too.
         disk_src = None
+        child_closed = 0
         try:
             self.mappings = read_luks_map()
             src_for_name = self.mappings.get(name)
@@ -5054,7 +5220,7 @@ class DiskMgrShell(cmd.Cmd):
         except Exception:
             disk_src = None
         if disk_src:
-            _close_child_crypt_mappers_for_disk(disk_src, skip_names={name})
+            child_closed = _close_child_crypt_mappers_for_disk(disk_src, skip_names={name})
         
         # Close
         if os.path.exists(mapper_path):
@@ -5064,6 +5230,8 @@ class DiskMgrShell(cmd.Cmd):
         else:
             if unmounted_targets:
                 log("Unmounted.")
+            elif child_closed:
+                log(f"Closed {child_closed} child LUKS mapping{'s' if child_closed != 1 else ''}.")
             else:
                 log("Mapping not open or already closed.")
 
@@ -5259,7 +5427,7 @@ class DiskMgrShell(cmd.Cmd):
         4.  Unmount: Unmounts all current mount targets for the device (if any).
         5.  Cleanup: Removes empty old mountpoint directories under /media/$USER (best-effort rmdir).
         6.  Mount: Uses fstab mount when present; otherwise direct mount to LABEL path.
-            For btrfs, compression is enforced (compress=zstd:3).
+            For btrfs, compression is enforced (compress=zstd:12).
         '''
         parser = CmdArgumentParser(prog='remount', add_help=False)
         parser.add_argument('name')
@@ -5920,13 +6088,40 @@ class DiskMgrShell(cmd.Cmd):
                 run_command([sfdisk_bin, '--wipe', 'always', '--wipe-partitions', 'always', real_target],
                             sudo=True, input_str=script, check=False)
 
-            run_command(['udevadm', 'settle'], sudo=True, check=False)
-            run_command(['partprobe', real_target], sudo=True, check=False)
+            self._refresh_kernel_partition_state(real_target, drop_partitions=True)
         else:
             run_command([wipefs_bin, '-a', real_target], sudo=True, check=False)
             run_command(['udevadm', 'settle'], sudo=True, check=False)
 
         log("Soft erase completed.")
+
+    def _refresh_kernel_partition_state(self, disk_dev, drop_partitions=False):
+        """
+        Best-effort refresh of kernel/udev partition state for a whole disk.
+        Helps clear stale child partition nodes after destructive whole-disk ops
+        (erase, superfloppy/luks-on-disk format), especially behind some USB bridges.
+        """
+        real_disk = os.path.realpath(str(disk_dev or ""))
+        if not real_disk or not os.path.exists(real_disk):
+            return
+
+        disk_type = (_lsblk_type(real_disk) or '').strip().lower()
+        if disk_type != 'disk' and not _sysfs_is_whole_disk(real_disk):
+            return
+
+        # Drain prior uevents first.
+        run_command(['udevadm', 'settle'], sudo=True, check=False)
+
+        # For whole-disk superfloppy style layouts, remove stale partition nodes
+        # that may still be cached in kernel state.
+        if drop_partitions:
+            run_command(['partx', '-d', real_disk], sudo=True, check=False)
+
+        # Ask kernel/userspace to re-read and re-emit current topology.
+        run_command(['blockdev', '--rereadpt', real_disk], sudo=True, check=False)
+        run_command(['partprobe', real_disk], sudo=True, check=False)
+        run_command(['udevadm', 'trigger', '--name-match=' + os.path.basename(real_disk)], sudo=True, check=False)
+        run_command(['udevadm', 'settle'], sudo=True, check=False)
 
     def _disk_looks_erased_for_create(self, real_target):
         """Best-effort precheck used by create: disk must look erased."""
@@ -6020,7 +6215,7 @@ class DiskMgrShell(cmd.Cmd):
           - sgdisk --zap-all (GPT) when available
           - sfdisk (MBR)
 
-        Note: This is a DESTRUCTIVE operation. Solving two math problems is MANDATORY to proceed.
+        Note: This is a DESTRUCTIVE operation. You must type both the resolved device path and persistent path to proceed.
         '''
         parser = CmdArgumentParser(prog='erase', add_help=False)
         parser.add_argument('target', help='Target name or device')
@@ -6101,7 +6296,7 @@ class DiskMgrShell(cmd.Cmd):
               (3) ATA Secure Erase (Standard), and (4) Zero Overwrite + Verify.
         3.  Verification: Executes 'udevadm settle' and 'sync' to ensure all operations are committed.
         
-        Note: This is a DESTRUCTIVE operation. Solving two math problems is MANDATORY to proceed.
+        Note: This is a DESTRUCTIVE operation. You must type both the resolved device path and persistent path to proceed.
 
         WARNING: This operation is IRREVERSIBLE.
         '''
@@ -6431,13 +6626,13 @@ class DiskMgrShell(cmd.Cmd):
         1.  Resolution: Maps both friendly names to their physical device nodes (PDP).
         2.  Size Validation: Queries 'blockdev --getsize64' for both. Aborts if dst < src.
         3.  Safety Audit: Verifies that the target is NOT the system root drive.
-        4.  Confirmation: Requires solving two math problems to authorize data destruction.
+        4.  Confirmation: Requires typing resolved device and persistent path to authorize data destruction.
         5.  Cloning: Executes ddrescue in two phases:
             - Pass 1: 'ddrescue --force <src> <dst> <mapfile>'
             - Retry:  'ddrescue --force -r3 <src> <dst> <mapfile>'
         6.  Sync: Flushes kernel buffers to ensure all data is physically committed to disk.
 
-        Note: This is a DESTRUCTIVE operation. Solving two math problems is MANDATORY to proceed.
+        Note: This is a DESTRUCTIVE operation. You must type both the resolved device path and persistent path to proceed.
 
         SCENARIOS:
         - Drive to Drive: 
@@ -7430,7 +7625,7 @@ class DiskMgrShell(cmd.Cmd):
             - Mapped names must already be mounted.
             - Absolute paths must exist and be directories.
         2.  Pre-scan: Runs rsync dry-run stats to compute planned transfer bytes.
-        3.  Confirmation: Requires solving two math problems (DESTRUCTIVE for secondary).
+        3.  Confirmation: Requires typing resolved device and persistent path for the destructive secondary target.
         4.  Execution: Runs rsync and reports real progress as bytes_done / planned_bytes.
         
         Note: The SECONDARY disk will be modified to match the PRIMARY disk.
@@ -8377,7 +8572,7 @@ class DiskMgrShell(cmd.Cmd):
 
         UNDER THE HOOD:
         1.  Validation: Verifies the disk is mapped and currently mounted.
-        2.  Confirmation: Requires solving two math problems.
+        2.  Confirmation: Requires typing YES.
         3.  Execution:
             - ext4:  runs 'sudo e4defrag <mountpoint>'
             - btrfs: runs 'sudo btrfs filesystem defragment -r -v <mountpoint>'
@@ -8948,7 +9143,7 @@ class DiskMgrShell(cmd.Cmd):
 
         UNDER THE HOOD:
         1.  Validation: Verifies the disk is mapped and currently mounted.
-        2.  Confirmation: Requires solving two math problems.
+        2.  Confirmation: Requires typing YES.
         3.  Execution: Runs 'sudo btrfs scrub start -B -R <mountpoint>'.
         4.  Recording: Stores a timestamp on the mountpoint root via:
               sudo setfattr -n user.last_scrub -v "<date>" <mountpoint>
@@ -9435,7 +9630,7 @@ class DiskMgrShell(cmd.Cmd):
             - (ext4 only): Reclaims the 5% reserved space for root using 'tune2fs -m 0'.
         5.  Persistence: Adds the new disk's PDP to diskmap.tsv automatically (best-effort).
 
-        Note: This is a DESTRUCTIVE operation. Solving two math problems is MANDATORY to proceed.
+        Note: This is a DESTRUCTIVE operation. You must type both the resolved device path and persistent path to proceed.
         '''
         parser = CmdArgumentParser(prog='format', add_help=False)
         parser.add_argument('args', nargs=1, help='<name>')
@@ -9453,12 +9648,51 @@ class DiskMgrShell(cmd.Cmd):
             return
 
         name = args.args[0]
+        input_token = name
+        clean_input = input_token.strip('[]')
+        input_is_id = (
+            (clean_input.startswith('#') and clean_input[1:].isdigit()) or
+            (clean_input.startswith('U') and clean_input[1:].isdigit())
+        )
         luks_memory_kib = LUKS_PBKDF_DEFAULT_MEMORY_KIB
         target = self.resolve_target(name, allow_id=True)
         if not target:
             log(f"Unknown target: '{name}'. Use a mapping name or discovery ID (#N).", 'ERROR')
             log("Tip: run 'list' first to refresh discovery IDs.", 'ERROR')
             return
+
+        # Operation name used for mapper name and auto-added mapping key.
+        # Never let discovery ID tokens like '#3' become persistent names.
+        op_name = input_token
+        if input_is_id:
+            self.mappings = read_luks_map()
+            existing_name = None
+            for n, p in (self.mappings or {}).items():
+                try:
+                    if os.path.realpath(p) == os.path.realpath(target):
+                        existing_name = n
+                        break
+                except Exception:
+                    continue
+
+            if existing_name:
+                op_name = existing_name
+            elif args.label:
+                cand = str(args.label).strip()
+                cand_clean = cand.strip('[]')
+                if (
+                    not cand or
+                    (cand_clean.startswith('#') and cand_clean[1:].isdigit()) or
+                    (cand_clean.startswith('U') and cand_clean[1:].isdigit()) or
+                    cand_clean.isdigit()
+                ):
+                    log("Invalid --label for ID-based format. Use a non-ID name (e.g. 1a).", 'ERROR')
+                    return
+                op_name = cand
+            else:
+                log("ID-based format requires a stable name for LUKS mapper/mapping.", 'ERROR')
+                log("Run: map #N <name> first, or pass --label <name>.", 'ERROR')
+                return
 
         # Wait/Verify target existence
         real_target = os.path.realpath(target)
@@ -9471,10 +9705,12 @@ class DiskMgrShell(cmd.Cmd):
             return
 
         log(f"Target: {real_target}")
-        log(f"Name: {name}")
+        log(f"Name: {op_name}")
+        if op_name != input_token:
+            log(f"Input token '{input_token}' resolved to operation name '{op_name}'.")
         
         # Safety checks
-        if not self.extensive_confirm(f"{name} ({real_target})"):
+        if not self.extensive_confirm(f"{input_token} ({real_target})"):
             return
 
         run_command(['sudo', '-v'])
@@ -9507,6 +9743,9 @@ class DiskMgrShell(cmd.Cmd):
                 log(f"OPERATION BLOCKED: {real_target} is partitioned ({pttype}). Refusing to format a whole-disk superfloppy over an existing partition table.", 'ERROR')
                 log("Use erase <name> first to wipe partition metadata, then run format again.", 'ERROR')
                 return
+            # Ensure stale child partitions from prior layouts are dropped before
+            # whole-disk superfloppy/LUKS formatting.
+            self._refresh_kernel_partition_state(real_target, drop_partitions=True)
 
         if args.luks:
             # LUKS Format
@@ -9538,18 +9777,18 @@ class DiskMgrShell(cmd.Cmd):
             log("Opening new LUKS volume...")
             pg_cmd = subprocess.Popen([PASSGEN_BIN], stdout=subprocess.PIPE, text=True)
             run_command(
-                ['cryptsetup', 'open', '--key-file', '-', crypt_target, name],
+                ['cryptsetup', 'open', '--key-file', '-', crypt_target, op_name],
                 input_str=pg_cmd.communicate()[0],
                 sudo=True,
                 check=True
             )
-            fs_target = f"/dev/mapper/{name}"
+            fs_target = f"/dev/mapper/{op_name}"
         else:
             log("Using plain format mode (no LUKS).")
             fs_target = crypt_target
 
         # Mkfs
-        label = args.label if args.label else name
+        label = args.label if args.label else op_name
         log(f"Formatting filesystem {args.fs} (label={label}) on {fs_target}...")
         
         if args.fs == 'ext4':
@@ -9586,6 +9825,11 @@ class DiskMgrShell(cmd.Cmd):
             )
             run_command([mkfs_vfat, '-F', '32', '-n', label, fs_target], sudo=True)
 
+        # Reconcile kernel partition view again after whole-disk formatting so
+        # list output does not retain stale child partition nodes.
+        if dev_type == 'disk':
+            self._refresh_kernel_partition_state(real_target, drop_partitions=True)
+
         # Mount (prefer /etc/fstab mountpoint when an entry exists for this filesystem).
         fallback_mountpoint = f"/media/{os.environ.get('USER', 'root')}/{label}"
         mountpoint, use_fstab_mount, fstab_entry = self._select_mountpoint_for_device(
@@ -9611,16 +9855,16 @@ class DiskMgrShell(cmd.Cmd):
 
         # Update map if needed
         self.mappings = read_luks_map()
-        if name not in self.mappings:
+        if op_name not in self.mappings:
             stable_path = crypt_target
             # Try to find by-id
             pdp = self.find_persistent_path(os.path.basename(crypt_target))
             if pdp != '-':
                 stable_path = pdp
             
-            self.mappings[name] = stable_path
+            self.mappings[op_name] = stable_path
             save_luks_map(self.mappings)
-            log(f"Added mapping: {name} -> {stable_path}")
+            log(f"Added mapping: {op_name} -> {stable_path}")
 
         log("Disk initialization complete.")
 
