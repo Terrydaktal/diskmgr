@@ -26,7 +26,7 @@ except ImportError:
 # Configuration
 MAP_FILENAME = 'diskmap.tsv'
 PASSGEN_BIN = 'passgen'
-VERSION = '3.5.7'
+VERSION = '3.5.8'
 HISTORY_FILE_ENV = 'DISKMGR_HISTORY'
 DEFAULT_HISTORY_FILE = Path.home() / '.local' / 'state' / 'diskmgr' / 'history'
 MAX_HISTORY_ENTRIES = 5000
@@ -758,13 +758,24 @@ def disk_is_nvme(dev_path):
     return False
 
 def disk_is_rotational(dev_path):
+    """Best-effort rotational check that works for disks, partitions, and dm-crypt mappers."""
     try:
-        base = disk_base_name(dev_path)
-        p = Path(f"/sys/block/{base}/queue/rotational")
+        kname = _sysfs_block_name(dev_path)
+        parent = _sysfs_to_parent_disk_name(kname)
+        p = Path(f"/sys/class/block/{parent}/queue/rotational")
         if p.exists():
             return p.read_text().strip() == "1"
     except:
         pass
+
+    try:
+        res = run_command(['lsblk', '-dno', 'ROTA', dev_path], check=False)
+        v = (getattr(res, 'stdout', '') or '').strip()
+        if v in ('0', '1'):
+            return v == '1'
+    except:
+        pass
+
     return False
 
 def disk_discard_supported(dev_path):
@@ -1252,8 +1263,10 @@ class DiskMgrShell(cmd.Cmd):
         print("      (USB uses -d sat). Use: selftest <name/id> --watch to poll progress until complete.")
         print(f"  {Colors.OKGREEN}health <name/id> [alias: smart]{Colors.ENDC}")
         print("      Shows SMART health (smartctl -x) for the underlying disk (USB uses -d sat).")
-        print(f"  {Colors.OKGREEN}entropy <name/id> <start_gib> <end_gib> [--step-mib N] [--window-mib N]{Colors.ENDC}")
-        print("      Samples Shannon entropy over a raw device range and plots it (ent + gnuplot).")
+        print(f"  {Colors.OKGREEN}entropy <name/id> --begin <START> --end <END> [--step SIZE] [--window SIZE]{Colors.ENDC}")
+        print(f"  {Colors.OKGREEN}entropy <name/id> <SPAN> --samples <N>{Colors.ENDC}")
+        print("      Samples Shannon entropy and plots it (built-in sampler + gnuplot).")
+        print("      Random mode stitches N random windows across the disk into one contiguous graph span.")
         print("      Saves data/plot in /tmp and attempts to display the plot on screen.")
 
         print(f"\n{Colors.BOLD}disk/part (applied to mapped disk/partition targets):{Colors.ENDC}")
@@ -1287,11 +1300,12 @@ class DiskMgrShell(cmd.Cmd):
         print("      Includes a multi-pass rescue phase to recover data from failing sectors.")
 
         print(f"\n{Colors.BOLD}file system (applied to disk/part entries with mountable FSTYPE):{Colors.ENDC}")
-        print(f"  {Colors.OKGREEN}open <name/id>{Colors.ENDC}")
+        print(f"  {Colors.OKGREEN}open <name/id> [--compress MODE | --compress-force MODE]{Colors.ENDC}")
         print("      Opens and mounts a plain or encrypted partition or superfloppy.")
         print("      For encrypted targets, unlocks LUKS then mounts payload filesystem.")
         print("      LUKS open tries on-disk header first, then ~/.local/share/diskmgr/<name> as detached header backup.")
-        print("      Btrfs mounts are enforced with compression (compress-force=zstd:12).")
+        print("      Btrfs default mount policy: HDD => compress-force=zstd:12, non-HDD => no compression option.")
+        print("      Override per open/remount with --compress=<mode> or --compress-force=<mode>.")
         print("      Mountpoint selection: /etc/fstab entry wins when present (uses fstab mountpoint/options).")
         print("      Without fstab: /media/$USER/<mapped-name> when opened by mapping name;")
         print("      else /media/$USER/<FSLABEL>; else /media/$USER/<device>.")
@@ -1303,6 +1317,7 @@ class DiskMgrShell(cmd.Cmd):
         print("      If a whole-disk target is supplied, closes all mounted child partitions on that disk too.")
         print("      close #id (example: close #6): unmount-only for that discovered row; does NOT run cryptsetup close.")
         print("      With --force, kills mount-holder processes (SIGKILL) if unmount is busy, then retries unmount.")
+        print("      Rescue kernel-detach is last-resort and only allowed with --force.")
         print("      Use #id if you want to close only the payload filesystem and keep the LUKS container open.")
         print(f"  {Colors.OKGREEN}luks <passwd|params|backup|restore|header|wipe> [options]{Colors.ENDC}")
         print("      LUKS management for mapped containers (grouped under filesystem workflows):")
@@ -1316,8 +1331,9 @@ class DiskMgrShell(cmd.Cmd):
         print("      Get or set the filesystem label of an OPEN disk.")
         print("      On relabel: removes old LABEL-based fstab entry. With --fstab, adds UUID entry at /mnt/<label>.")
         print("      Generated fstab options: defaults,nofail,x-gvfs-show,x-gvfs-name=<label>.")
+        print("      For btrfs on HDD targets, generated fstab options also include compress-force=zstd:12.")
         print("      For LUKS: acts on payload filesystem when open; errors if locked.")
-        print(f"  {Colors.OKGREEN}remount <name>{Colors.ENDC}")
+        print(f"  {Colors.OKGREEN}remount <name> [--compress MODE | --compress-force MODE]{Colors.ENDC}")
         print("      Move an OPEN disk's mount to /mnt/<label> when /etc/fstab entry exists;")
         print("      otherwise /media/$USER/<label>, and clean old empty mountpoint dirs.")
         print("      For LUKS: acts on payload filesystem when open; errors if locked.")
@@ -2156,7 +2172,37 @@ class DiskMgrShell(cmd.Cmd):
         except Exception:
             return ""
 
-    def _ensure_btrfs_compression_on_mount(self, mountpoint):
+    def _normalize_btrfs_compression_override(self, compress=None, compress_force=None):
+        """Return a validated mount option like 'compress=zstd:12' or 'compress-force=zstd:12'."""
+        comp = str(compress or '').strip()
+        compf = str(compress_force or '').strip()
+        if comp and compf:
+            raise ValueError("Use only one of --compress or --compress-force.")
+
+        mode = comp or compf
+        if not mode:
+            return None
+        if any(ch.isspace() for ch in mode):
+            raise ValueError("Compression mode must not contain whitespace.")
+        if ',' in mode or '=' in mode:
+            raise ValueError("Compression mode must be a single value like zstd:12.")
+        if mode.startswith('-'):
+            raise ValueError("Compression mode value is invalid.")
+
+        return f"compress-force={mode}" if compf else f"compress={mode}"
+
+    def _default_btrfs_mount_option(self, devnode):
+        """Default btrfs mount policy: HDD => compress-force=zstd:12, otherwise no compression option."""
+        if disk_is_rotational(devnode):
+            return 'compress-force=zstd:12'
+        return None
+
+    def _effective_btrfs_mount_option(self, devnode, btrfs_compression_opt=None):
+        if btrfs_compression_opt:
+            return btrfs_compression_opt
+        return self._default_btrfs_mount_option(devnode)
+
+    def _ensure_btrfs_compression_on_mount(self, mountpoint, desired_opt=None):
         res = run_command(['findmnt', '-rn', '-M', mountpoint, '-o', 'FSTYPE,OPTIONS'], check=False)
         if getattr(res, 'returncode', 1) != 0:
             return
@@ -2169,33 +2215,40 @@ class DiskMgrShell(cmd.Cmd):
         opts = (parts[1] if len(parts) > 1 else '').strip().lower()
         if fstype != 'btrfs':
             return
-        if 'compress-force=' in opts:
+        if not desired_opt:
             return
 
-        log(f"Enabling btrfs compression on {mountpoint} (compress-force=zstd:12).")
-        run_command(['mount', '-o', 'remount,compress-force=zstd:12', mountpoint], sudo=True)
+        desired_opt_l = str(desired_opt).strip().lower()
+        if desired_opt_l in opts:
+            return
+
+        log(f"Enabling btrfs compression on {mountpoint} ({desired_opt}).")
+        run_command(['mount', '-o', f'remount,{desired_opt}', mountpoint], sudo=True)
 
         verify = run_command(['findmnt', '-rn', '-M', mountpoint, '-o', 'OPTIONS'], check=False)
         vopts = (getattr(verify, 'stdout', '') or '').strip().lower()
-        if 'compress-force=' not in vopts:
-            raise RuntimeError(f"Btrfs mount at {mountpoint} is missing compress-force option after remount.")
+        if desired_opt_l not in vopts:
+            raise RuntimeError(f"Btrfs mount at {mountpoint} is missing required option after remount: {desired_opt}")
 
-    def _mount_device(self, devnode, mountpoint, use_fstab=False, announce_btrfs=False):
+    def _mount_device(self, devnode, mountpoint, use_fstab=False, announce_btrfs=False, btrfs_compression_opt=None):
         dev_fstype = self._detect_fstype(devnode)
-        if announce_btrfs and dev_fstype == 'btrfs':
-            log(f"Enabling btrfs compression on {mountpoint} (compress-force=zstd:12).")
+        desired_btrfs_opt = self._effective_btrfs_mount_option(devnode, btrfs_compression_opt)
+
+        if announce_btrfs and dev_fstype == 'btrfs' and desired_btrfs_opt:
+            log(f"Enabling btrfs compression on {mountpoint} ({desired_btrfs_opt}).")
+
         run_command(['mkdir', '-p', mountpoint], sudo=True)
         if use_fstab:
             # Use /etc/fstab mount options and source selection.
             run_command(['mount', mountpoint], sudo=True)
         else:
-            if dev_fstype == 'btrfs':
-                run_command(['mount', '-o', 'compress-force=zstd:12', devnode, mountpoint], sudo=True)
+            if dev_fstype == 'btrfs' and desired_btrfs_opt:
+                run_command(['mount', '-o', desired_btrfs_opt, devnode, mountpoint], sudo=True)
             else:
                 run_command(['mount', devnode, mountpoint], sudo=True)
 
         if dev_fstype == 'btrfs' or use_fstab:
-            self._ensure_btrfs_compression_on_mount(mountpoint)
+            self._ensure_btrfs_compression_on_mount(mountpoint, desired_opt=desired_btrfs_opt)
 
     def _invoking_user_group(self):
         """
@@ -2234,12 +2287,14 @@ class DiskMgrShell(cmd.Cmd):
         except Exception as e:
             log(f"Could not set ownership on new filesystem root {mp}: {e}", 'WARN')
 
-    def _desired_fstab_options(self, label, fstype=None):
+    def _desired_fstab_options(self, label, fstype=None, target_dev=None):
         gvfs_name = str(label or "").replace(",", "_")
         gvfs_name = self._fstab_escape(gvfs_name)
         opts = ["defaults", "nofail"]
         if (str(fstype or "").strip().lower() == "btrfs"):
-            opts.append("compress-force=zstd:12")
+            default_btrfs_opt = self._default_btrfs_mount_option(target_dev) if target_dev else None
+            if default_btrfs_opt:
+                opts.append(default_btrfs_opt)
         opts.extend(["x-gvfs-show", f"x-gvfs-name={gvfs_name}"])
         return ",".join(opts)
 
@@ -2342,7 +2397,7 @@ class DiskMgrShell(cmd.Cmd):
         added = 0
         if add_entry and new_label:
             fs_t = (fstype or "auto").strip() or "auto"
-            opts = self._desired_fstab_options(new_label, fs_t)
+            opts = self._desired_fstab_options(new_label, fs_t, target_dev=target_dev)
             entry = (
                 f"UUID={self._fstab_escape(target_uuid)}\t"
                 f"{self._fstab_escape(new_mountpoint)}\t"
@@ -2934,12 +2989,12 @@ class DiskMgrShell(cmd.Cmd):
 
     def _resolve_confirmation_identity(self, target_name):
         """
-        Resolve confirmation identity as (device_real, persistent_path).
-        Returns (None, None) when identity cannot be determined reliably.
+        Resolve confirmation identity as (device_real, persistent_path, pci_path).
+        Returns (None, None, None) when identity cannot be determined reliably.
         """
         text = str(target_name or "").strip()
         if not text:
-            return (None, None)
+            return (None, None, None)
 
         candidates = []
 
@@ -3002,7 +3057,7 @@ class DiskMgrShell(cmd.Cmd):
                 break
 
         if not device_real:
-            return (None, None)
+            return (None, None, None)
 
         # Map virtual devices (e.g. /dev/mapper/*) to a stable underlying block
         # node before resolving persistent by-id identity.
@@ -3036,12 +3091,16 @@ class DiskMgrShell(cmd.Cmd):
             res_wwn = run_command(['lsblk', '-no', 'WWN', id_dev], check=False)
             wwn = (getattr(res_wwn, 'stdout', '') or '').strip()
             pdp = self.find_persistent_path(kname, wwn=wwn, type_=dtype)
+            pci = self.find_pci_path(kname, type_=dtype)
         except Exception:
             pdp = "-"
+            pci = "-"
 
         if not pdp or pdp == "-":
-            return (device_real, None)
-        return (device_real, pdp)
+            return (device_real, None, None)
+        if not pci or pci == "-":
+            return (device_real, pdp, None)
+        return (device_real, pdp, pci)
 
     def _print_lsblk_rows(self, rows, widths=None, cols=None):
         """
@@ -4149,17 +4208,21 @@ class DiskMgrShell(cmd.Cmd):
             print(f"You are about to perform a HIGH-IMPACT operation on: {Colors.WARNING}{target_name}{Colors.ENDC}")
         self._show_target_entries_for_confirmation(target_name)
         if destructive:
-            dev_real, pdp = self._resolve_confirmation_identity(target_name)
+            dev_real, pdp, pci = self._resolve_confirmation_identity(target_name)
             if not dev_real:
                 log("Could not resolve confirmation device. Aborting operation.", 'ERROR')
                 return False
             if not pdp:
                 log("Could not resolve persistent path for confirmation. Aborting operation.", 'ERROR')
                 return False
+            if not pci:
+                log("Could not resolve PCI path for confirmation. Aborting operation.", 'ERROR')
+                return False
 
-            print("To proceed, type BOTH values exactly as shown:")
+            print("To proceed, type ALL THREE values exactly as shown:")
             print(f"  DEVICE: {Colors.OKCYAN}{dev_real}{Colors.ENDC}")
             print(f"  PERSISTENT PATH: {Colors.OKCYAN}{pdp}{Colors.ENDC}")
+            print(f"  PCI: {Colors.OKCYAN}{pci}{Colors.ENDC}")
 
             user_dev = self._input_no_history("Confirm DEVICE: ")
             if (user_dev or "").strip() != dev_real:
@@ -4169,6 +4232,11 @@ class DiskMgrShell(cmd.Cmd):
             user_pdp = self._input_no_history("Confirm PERSISTENT PATH: ")
             if (user_pdp or "").strip() != pdp:
                 log("Persistent path confirmation mismatch. Aborting operation.", 'ERROR')
+                return False
+
+            user_pci = self._input_no_history("Confirm PCI: ")
+            if (user_pci or "").strip() != pci:
+                log("PCI path confirmation mismatch. Aborting operation.", 'ERROR')
                 return False
         else:
             print("To proceed, type YES.")
@@ -4377,7 +4445,8 @@ class DiskMgrShell(cmd.Cmd):
             - Otherwise identifies preferred mountpoint: /media/$USER/<label>.
             - If no hardware label is present, falls back to /media/$USER/<mapping_name>.
             - Ensures the directory exists and attaches the device.
-            - For btrfs, enforces compression (compress-force=zstd:12) on the mounted filesystem.
+            - For btrfs, default mount policy is HDD => compress-force=zstd:12; non-HDD => no compression option.
+            - Override per command with --compress=<mode> or --compress-force=<mode>.
         6.  Policy Enforcement: If the disk is already mounted at a non-standard path, 
             it unmounts and remounts it to the preferred path.
 
@@ -4387,10 +4456,31 @@ class DiskMgrShell(cmd.Cmd):
           it is unambiguous (exactly one candidate). Otherwise it will refuse and ask you to map
           the correct partition explicitly.
         '''
-        target = arg.strip()
-        if not target:
-             log("Usage: open <name/id>", 'ERROR')
-             return
+        parser = CmdArgumentParser(prog='open', add_help=False)
+        parser.add_argument('target')
+        cgroup = parser.add_mutually_exclusive_group()
+        cgroup.add_argument('--compress', dest='compress', metavar='MODE')
+        cgroup.add_argument('--compress-force', dest='compress_force', metavar='MODE')
+
+        try:
+            args = parser.parse_args(shlex.split(arg) if arg else [])
+        except argparse.ArgumentError as e:
+            log(str(e), 'ERROR')
+            log("Usage: open <name/id> [--compress MODE | --compress-force MODE]", 'ERROR')
+            return
+        except SystemExit:
+            return
+
+        target = args.target
+        try:
+            btrfs_compression_opt = self._normalize_btrfs_compression_override(
+                compress=args.compress,
+                compress_force=args.compress_force
+            )
+        except ValueError as e:
+            log(str(e), 'ERROR')
+            log("Usage: open <name/id> [--compress MODE | --compress-force MODE]", 'ERROR')
+            return
 
         self.mappings = read_luks_map()
         mapping_name = None
@@ -4709,7 +4799,13 @@ class DiskMgrShell(cmd.Cmd):
                 except Exception:
                     pass
             log(f"Mounting {target_to_mount} to {mountpoint}...")
-            self._mount_device(target_to_mount, mountpoint, use_fstab=use_fstab_mount, announce_btrfs=True)
+            self._mount_device(
+                target_to_mount,
+                mountpoint,
+                use_fstab=use_fstab_mount,
+                announce_btrfs=True,
+                btrfs_compression_opt=btrfs_compression_opt
+            )
             _prune_extra_mounts()
             log("Mounted.")
         elif mountpoint in current_targets:
@@ -4723,7 +4819,8 @@ class DiskMgrShell(cmd.Cmd):
                         log(f"Failed to unmount {mp}: {e}. It may be in use.", 'WARN')
             _prune_extra_mounts()
             try:
-                self._ensure_btrfs_compression_on_mount(mountpoint)
+                desired_btrfs_opt = self._effective_btrfs_mount_option(target_to_mount, btrfs_compression_opt)
+                self._ensure_btrfs_compression_on_mount(mountpoint, desired_opt=desired_btrfs_opt)
             except Exception as e:
                 log(f"Failed to enforce btrfs compression on {mountpoint}: {e}", 'ERROR')
                 return
@@ -4733,7 +4830,13 @@ class DiskMgrShell(cmd.Cmd):
             try:
                 for mp in current_targets:
                     run_command(['umount', mp], sudo=True)
-                self._mount_device(target_to_mount, mountpoint, use_fstab=use_fstab_mount, announce_btrfs=True)
+                self._mount_device(
+                    target_to_mount,
+                    mountpoint,
+                    use_fstab=use_fstab_mount,
+                    announce_btrfs=True,
+                    btrfs_compression_opt=btrfs_compression_opt
+                )
                 _prune_extra_mounts()
                 log(f"Successfully moved mount to {mountpoint}")
             except Exception as e:
@@ -4807,15 +4910,23 @@ class DiskMgrShell(cmd.Cmd):
             fuser_bin = shutil.which('fuser')
             if fuser_bin:
                 res_f = run_command(['fuser', '-m', mp], sudo=True, check=False)
-                raw_f = "\n".join([
-                    (getattr(res_f, 'stdout', '') or ''),
-                    (getattr(res_f, 'stderr', '') or '')
-                ])
-                for m in re.findall(r'\b\d+\b', raw_f):
-                    try:
-                        pids.append(int(m))
-                    except Exception:
-                        pass
+                out_f = (getattr(res_f, 'stdout', '') or '')
+                for ln in out_f.splitlines():
+                    line = (ln or '').strip()
+                    if not line:
+                        continue
+                    # fuser -m typically returns either:
+                    #   /mount/path: 123 456
+                    # or just PID tokens depending on version/locale.
+                    rhs = line.split(':', 1)[1] if ':' in line else line
+                    for tok in rhs.split():
+                        m = re.match(r'^(\d+)', tok)
+                        if not m:
+                            continue
+                        try:
+                            pids.append(int(m.group(1)))
+                        except Exception:
+                            pass
 
             if not pids:
                 lsof_bin = shutil.which('lsof')
@@ -4983,12 +5094,12 @@ class DiskMgrShell(cmd.Cmd):
                 pass
             return None
 
-        def _attempt_rescue_for_disk(devnode, reason):
+        def _attempt_rescue_for_disk(devnode, reason, allow_detach=False, persistent_hint=None):
             """
             Best-effort rescue for unresponsive whole-disk targets.
             - Unmount all child mounts
             - Close child crypt mappings
-            - Ask kernel to drop the device (/sys/block/<disk>/device/delete)
+            - Optional: ask kernel to drop the device (/sys/block/<disk>/device/delete)
             """
             disk_dev = _top_level_disk(devnode)
             if not disk_dev or (_lsblk_type(disk_dev) or '').strip().lower() != 'disk':
@@ -5010,6 +5121,19 @@ class DiskMgrShell(cmd.Cmd):
             # Try closing child crypt mappings.
             _close_child_crypt_mappers_for_disk(disk_dev)
 
+            if not allow_detach:
+                log(f"Rescue completed for {disk_dev} (no kernel detach without --force).", 'WARN')
+                return False
+
+            # Prefer caller-provided persistent path; otherwise derive one before detach.
+            if not persistent_hint:
+                try:
+                    pdp = self.find_persistent_path(os.path.basename(disk_dev), type_='disk')
+                    if pdp and pdp != '-':
+                        persistent_hint = pdp
+                except Exception:
+                    persistent_hint = None
+
             # Final step: remove dead/stuck block device from kernel view.
             kname = os.path.basename(disk_dev)
             delete_path = f"/sys/block/{kname}/device/delete"
@@ -5020,6 +5144,45 @@ class DiskMgrShell(cmd.Cmd):
             res_del = run_command(['tee', delete_path], input_str="1\n", sudo=True, check=False, timeout=3)
             if getattr(res_del, 'returncode', 1) == 0:
                 log(f"Rescue detached {disk_dev} from kernel. Replug to re-discover.", 'WARN')
+                log("Rescue: attempting automatic bus rescan and re-attach...", 'WARN')
+                # Trigger broad re-discovery across common buses.
+                run_command(['udevadm', 'settle'], sudo=True, check=False, timeout=4)
+                run_command(['tee', '/sys/bus/pci/rescan'], input_str="1\n", sudo=True, check=False, timeout=3)
+                try:
+                    for host in sorted(os.listdir('/sys/class/scsi_host')):
+                        scan_path = f"/sys/class/scsi_host/{host}/scan"
+                        if os.path.exists(scan_path):
+                            run_command(['tee', scan_path], input_str="- - -\n", sudo=True, check=False, timeout=3)
+                except Exception:
+                    pass
+                run_command(['udevadm', 'settle'], sudo=True, check=False, timeout=6)
+
+                # Wait briefly for the expected path to re-appear.
+                reattached = False
+                for _ in range(20):
+                    if persistent_hint and os.path.exists(persistent_hint):
+                        new_dev = os.path.realpath(persistent_hint)
+                        log(f"Rescue re-attached: {persistent_hint} -> {new_dev}", 'WARN')
+                        reattached = True
+                        break
+                    if os.path.exists(disk_dev):
+                        log(f"Rescue re-attached device node: {disk_dev}", 'WARN')
+                        reattached = True
+                        break
+                    time.sleep(0.25)
+                if not reattached:
+                    if persistent_hint:
+                        log(
+                            f"Rescan completed, but {persistent_hint} did not reappear yet. "
+                            f"Try replug or manual host scan.",
+                            'WARN'
+                        )
+                    else:
+                        log(
+                            f"Rescan completed, but {disk_dev} did not reappear yet. "
+                            f"Try replug or manual host scan.",
+                            'WARN'
+                        )
                 return True
 
             err = (getattr(res_del, 'stderr', '') or '').strip()
@@ -5090,10 +5253,23 @@ class DiskMgrShell(cmd.Cmd):
             run_command(['sudo', '-v'])  # Refresh sudo
             res_sync = run_command(['sync'], sudo=True, check=False, timeout=8)
             dev_from_id_type = (_lsblk_type(dev_from_id) or '').strip().lower()
+            dev_from_id_persistent = None
+            if dev_from_id_type == 'disk':
+                try:
+                    pdp = self.find_persistent_path(os.path.basename(dev_from_id), type_='disk')
+                    if pdp and pdp != '-':
+                        dev_from_id_persistent = pdp
+                except Exception:
+                    dev_from_id_persistent = None
             if getattr(res_sync, 'returncode', 0) == 124:
                 log("sync timed out; continuing close attempt.", 'WARN')
                 if dev_from_id_type == 'disk':
-                    _attempt_rescue_for_disk(dev_from_id, "sync timed out")
+                    _attempt_rescue_for_disk(
+                        dev_from_id,
+                        "sync timed out",
+                        allow_detach=force,
+                        persistent_hint=dev_from_id_persistent
+                    )
 
             if dev_from_id_type != 'disk' and _sysfs_is_whole_disk(dev_from_id):
                 dev_from_id_type = 'disk'
@@ -5105,7 +5281,12 @@ class DiskMgrShell(cmd.Cmd):
             for mp in targets:
                 if not _try_unmount(mp):
                     if dev_from_id_type == 'disk':
-                        if _attempt_rescue_for_disk(dev_from_id, f"failed to unmount {mp}"):
+                        if _attempt_rescue_for_disk(
+                            dev_from_id,
+                            f"failed to unmount {mp}",
+                            allow_detach=force,
+                            persistent_hint=dev_from_id_persistent
+                        ):
                             return
                     log("Close aborted: target is still mounted/in use.", 'ERROR')
                     return
@@ -5134,15 +5315,29 @@ class DiskMgrShell(cmd.Cmd):
         # Never attempt unmount/close operations on the system root drive.
         self.mappings = read_luks_map()
         src_disk_for_rescue = None
+        src_persistent_for_rescue = None
         if name in self.mappings:
             real_src = os.path.realpath(self.mappings[name])
             if self._block_if_root_drive(real_src, f"close {name}"):
                 return
             try:
+                mapped_src = str(self.mappings[name] or "")
+                if mapped_src.startswith('/dev/disk/by-id/'):
+                    src_persistent_for_rescue = mapped_src
+            except Exception:
+                src_persistent_for_rescue = None
+            try:
                 if _sysfs_is_whole_disk(real_src) or (_lsblk_type(real_src) or '').strip().lower() == 'disk':
                     src_disk_for_rescue = real_src
             except Exception:
                 src_disk_for_rescue = None
+            if src_disk_for_rescue and not src_persistent_for_rescue:
+                try:
+                    pdp = self.find_persistent_path(os.path.basename(src_disk_for_rescue), type_='disk')
+                    if pdp and pdp != '-':
+                        src_persistent_for_rescue = pdp
+                except Exception:
+                    src_persistent_for_rescue = None
 
         mapper_path = f"/dev/mapper/{name}"
         mount_guess = f"/media/{os.environ.get('USER', 'root')}/{name}"
@@ -5152,7 +5347,12 @@ class DiskMgrShell(cmd.Cmd):
         if getattr(res_sync, 'returncode', 0) == 124:
             log("sync timed out; continuing close attempt.", 'WARN')
             if src_disk_for_rescue:
-                _attempt_rescue_for_disk(src_disk_for_rescue, "sync timed out")
+                _attempt_rescue_for_disk(
+                    src_disk_for_rescue,
+                    "sync timed out",
+                    allow_detach=force,
+                    persistent_hint=src_persistent_for_rescue
+                )
 
         # Unmount
         unmounted = False
@@ -5163,7 +5363,12 @@ class DiskMgrShell(cmd.Cmd):
             for mp in targets:
                 if not _try_unmount(mp):
                     if src_disk_for_rescue:
-                        if _attempt_rescue_for_disk(src_disk_for_rescue, f"failed to unmount {mp}"):
+                        if _attempt_rescue_for_disk(
+                            src_disk_for_rescue,
+                            f"failed to unmount {mp}",
+                            allow_detach=force,
+                            persistent_hint=src_persistent_for_rescue
+                        ):
                             return
                     log("Close aborted: mapper target is still mounted/in use.", 'ERROR')
                     return
@@ -5184,7 +5389,12 @@ class DiskMgrShell(cmd.Cmd):
                     for mp in targets:
                         if not _try_unmount(mp):
                             if src_disk_for_rescue:
-                                if _attempt_rescue_for_disk(src_disk_for_rescue, f"failed to unmount {mp}"):
+                                if _attempt_rescue_for_disk(
+                                    src_disk_for_rescue,
+                                    f"failed to unmount {mp}",
+                                    allow_detach=force,
+                                    persistent_hint=src_persistent_for_rescue
+                                ):
                                     return
                             log("Close aborted: source target is still mounted/in use.", 'ERROR')
                             return
@@ -5196,7 +5406,12 @@ class DiskMgrShell(cmd.Cmd):
             if run_command(['findmnt', '-rn', '-M', mount_guess], check=False).returncode == 0:
                  if not _try_unmount(mount_guess):
                      if src_disk_for_rescue:
-                         if _attempt_rescue_for_disk(src_disk_for_rescue, f"failed to unmount {mount_guess}"):
+                         if _attempt_rescue_for_disk(
+                             src_disk_for_rescue,
+                             f"failed to unmount {mount_guess}",
+                             allow_detach=force,
+                             persistent_hint=src_persistent_for_rescue
+                         ):
                              return
                      log("Close aborted: guessed target is still mounted/in use.", 'ERROR')
                      return
@@ -5427,10 +5642,14 @@ class DiskMgrShell(cmd.Cmd):
         4.  Unmount: Unmounts all current mount targets for the device (if any).
         5.  Cleanup: Removes empty old mountpoint directories under /media/$USER (best-effort rmdir).
         6.  Mount: Uses fstab mount when present; otherwise direct mount to LABEL path.
-            For btrfs, compression is enforced (compress-force=zstd:12).
+            For btrfs, default remount policy is HDD => compress-force=zstd:12; non-HDD => no compression option.
+            Override per command with --compress=<mode> or --compress-force=<mode>.
         '''
         parser = CmdArgumentParser(prog='remount', add_help=False)
         parser.add_argument('name')
+        cgroup = parser.add_mutually_exclusive_group()
+        cgroup.add_argument('--compress', dest='compress', metavar='MODE')
+        cgroup.add_argument('--compress-force', dest='compress_force', metavar='MODE')
 
         try:
             split_args = shlex.split(arg)
@@ -5442,6 +5661,15 @@ class DiskMgrShell(cmd.Cmd):
             return
 
         name = args.name
+        try:
+            btrfs_compression_opt = self._normalize_btrfs_compression_override(
+                compress=args.compress,
+                compress_force=args.compress_force
+            )
+        except ValueError as e:
+            log(str(e), 'ERROR')
+            log("Usage: remount <name> [--compress MODE | --compress-force MODE]", 'ERROR')
+            return
 
         # Resolve target device (must be OPEN if it's LUKS).
         target_dev = None
@@ -5489,7 +5717,7 @@ class DiskMgrShell(cmd.Cmd):
         if use_fstab_mount:
             if label:
                 desired_mountpoint = f"/mnt/{label}"
-                desired_opts = self._desired_fstab_options(label, fs_type)
+                desired_opts = self._desired_fstab_options(label, fs_type, target_dev=target_dev)
                 need_mountpoint_update = (fstab_entry.get('mountpoint') != desired_mountpoint)
                 need_opts_update = (str(fstab_entry.get('opts') or '') != desired_opts)
                 if need_mountpoint_update or need_opts_update:
@@ -5531,7 +5759,8 @@ class DiskMgrShell(cmd.Cmd):
             extra = [t for t in current_targets if t != new_mountpoint]
             if not extra:
                 try:
-                    self._ensure_btrfs_compression_on_mount(new_mountpoint)
+                    desired_btrfs_opt = self._effective_btrfs_mount_option(target_dev, btrfs_compression_opt)
+                    self._ensure_btrfs_compression_on_mount(new_mountpoint, desired_opt=desired_btrfs_opt)
                 except Exception as e:
                     log(f"Failed to enforce btrfs compression on {new_mountpoint}: {e}", 'ERROR')
                     return
@@ -5547,7 +5776,8 @@ class DiskMgrShell(cmd.Cmd):
                 log(f"Failed to unmount extra mount(s): {e}", 'ERROR')
                 return
             try:
-                self._ensure_btrfs_compression_on_mount(new_mountpoint)
+                desired_btrfs_opt = self._effective_btrfs_mount_option(target_dev, btrfs_compression_opt)
+                self._ensure_btrfs_compression_on_mount(new_mountpoint, desired_opt=desired_btrfs_opt)
             except Exception as e:
                 log(f"Failed to enforce btrfs compression on {new_mountpoint}: {e}", 'ERROR')
             return
@@ -5576,7 +5806,13 @@ class DiskMgrShell(cmd.Cmd):
 
         log(f"Mounting {target_dev} to {new_mountpoint}...")
         try:
-            self._mount_device(target_dev, new_mountpoint, use_fstab=use_fstab_mount, announce_btrfs=True)
+            self._mount_device(
+                target_dev,
+                new_mountpoint,
+                use_fstab=use_fstab_mount,
+                announce_btrfs=True,
+                btrfs_compression_opt=btrfs_compression_opt
+            )
             log(f"Remounted successfully at {new_mountpoint}")
         except Exception as e:
             log(f"Failed to mount at {new_mountpoint}: {e}", 'ERROR')
@@ -6362,24 +6598,26 @@ class DiskMgrShell(cmd.Cmd):
             _cmd_log_close()
 
     def do_entropy(self, arg):
-        '''Plot entropy profile over a device byte range (GiB): entropy <name/id> <start_gib> <end_gib> [--step-mib N] [--window-mib N]
+        '''Plot entropy profile over a raw device range or stitched random samples.
 
-        Example:
-          entropy 7a 0 1
+        Range mode (explicit flags required):
+          entropy <name/id> --begin 0 --end 1GiB [--step 1MiB] [--window 1MiB]
 
-        Behavior:
-          - Reads raw device chunks via dd and computes Shannon entropy via ent.
-          - Saves samples and plot under /tmp:
-              /tmp/diskmgr_entropy_<pid>_<ts>.txt
-              /tmp/diskmgr_entropy_<pid>_<ts>.png
-          - Attempts to display the plot on screen via gnuplot/xdg-open.
+        Random stitched mode:
+          entropy <name/id> <span> --samples N
+          Example: entropy 1a 1GiB --samples 1000
+          - window size is derived as: span / N (integer bytes)
+          - N random windows are sampled across the whole device
+          - graph X axis is stitched as one contiguous span (not physical offsets)
         '''
         parser = CmdArgumentParser(prog='entropy', add_help=False)
         parser.add_argument('target', help='Mapped target name or discovery ID (#N)')
-        parser.add_argument('start_gib', type=float, help='Range start in GiB')
-        parser.add_argument('end_gib', type=float, help='Range end in GiB (must be > start)')
-        parser.add_argument('--step-mib', type=int, default=10, help='Sampling step in MiB (default: 10)')
-        parser.add_argument('--window-mib', type=int, default=10, help='Read window size in MiB per sample (default: 10)')
+        parser.add_argument('span', nargs='?', help='Stitched span with units for random mode (used with --samples)')
+        parser.add_argument('--begin', default=None, help='Range begin offset (units required; 0 allowed)')
+        parser.add_argument('--end', default=None, help='Range end offset with units (e.g. 1GiB)')
+        parser.add_argument('--step', default=None, help='Range mode step size with units (default: 10MiB)')
+        parser.add_argument('--window', default=None, help='Range mode read window size with units (default: --step)')
+        parser.add_argument('--samples', type=int, default=None, help='Enable random stitched mode with N samples')
         try:
             split_args = shlex.split(arg)
             args = parser.parse_args(split_args)
@@ -6389,18 +6627,103 @@ class DiskMgrShell(cmd.Cmd):
         except SystemExit:
             return
 
-        if args.start_gib < 0 or args.end_gib < 0:
-            log("start_gib and end_gib must be non-negative.", 'ERROR')
-            return
-        if args.end_gib <= args.start_gib:
-            log("end_gib must be greater than start_gib.", 'ERROR')
-            return
-        if args.step_mib <= 0:
-            log("--step-mib must be a positive integer.", 'ERROR')
-            return
-        if args.window_mib <= 0:
-            log("--window-mib must be a positive integer.", 'ERROR')
-            return
+        _SIZE_UNIT_MAP = {
+            'kib': 1024,
+            'mib': 1024 ** 2,
+            'gib': 1024 ** 3,
+            'tib': 1024 ** 4,
+        }
+
+        def _parse_size_to_bytes(spec, field_name, allow_plain_zero=False):
+            txt = str(spec or '').strip()
+            if allow_plain_zero and txt == '0':
+                return 0
+            m = re.fullmatch(r'(?i)\s*([0-9]+(?:\.[0-9]+)?)\s*(kib|mib|gib|tib)\s*', txt)
+            if not m:
+                raise ValueError(
+                    f"{field_name} must include a unit (KiB/MiB/GiB/TiB). "
+                    f"Example: {field_name}=1MiB"
+                )
+            val = float(m.group(1))
+            unit = (m.group(2) or '').strip().lower()
+            mul = _SIZE_UNIT_MAP.get(unit)
+            if mul is None:
+                raise ValueError(f"Unsupported unit for {field_name}: {unit}")
+            total_bytes = int(round(val * mul))
+            if total_bytes < 0:
+                raise ValueError(f"{field_name} must be non-negative")
+            return total_bytes
+
+        mode = None
+        begin_bytes = None
+        end_bytes = None
+        step_bytes = None
+        window_bytes = None
+        span_bytes = None
+        samples = None
+        begin_spec = None
+        end_spec = None
+        step_spec = None
+        window_spec = None
+
+        if args.samples is not None:
+            # Random stitched mode.
+            if args.begin is not None or args.end is not None:
+                log("Random mode (--samples) cannot be combined with --begin/--end.", 'ERROR')
+                return
+            if args.step is not None or args.window is not None:
+                log("Random mode (--samples) does not accept --step/--window; window is derived from <span>/samples.", 'ERROR')
+                return
+            if not args.span:
+                log("Random mode usage: entropy <name/id> <span> --samples N", 'ERROR')
+                return
+            if int(args.samples) <= 0:
+                log("--samples must be > 0.", 'ERROR')
+                return
+            try:
+                span_bytes = _parse_size_to_bytes(args.span, 'span', allow_plain_zero=False)
+            except ValueError as e:
+                log(str(e), 'ERROR')
+                return
+            if span_bytes <= 0:
+                log("span must be > 0.", 'ERROR')
+                return
+            samples = int(args.samples)
+            window_bytes = span_bytes // samples
+            if window_bytes <= 0:
+                log("span/samples is < 1 byte. Increase span or reduce --samples.", 'ERROR')
+                return
+            mode = 'rand'
+        else:
+            # Sequential range mode.
+            if args.span:
+                log("Range mode does not accept a positional span. Use: entropy <name/id> --begin <X> --end <Y>", 'ERROR')
+                return
+            if args.begin is None or args.end is None:
+                log("Range mode requires both --begin and --end. Example: entropy 1a --begin 0 --end 1GiB", 'ERROR')
+                return
+            begin_spec = args.begin
+            end_spec = args.end
+            step_spec = args.step or '10MiB'
+            window_spec = args.window or step_spec
+            try:
+                begin_bytes = _parse_size_to_bytes(begin_spec, '--begin', allow_plain_zero=True)
+                end_bytes = _parse_size_to_bytes(end_spec, '--end', allow_plain_zero=True)
+                step_bytes = _parse_size_to_bytes(step_spec, '--step', allow_plain_zero=False)
+                window_bytes = _parse_size_to_bytes(window_spec, '--window', allow_plain_zero=False)
+            except ValueError as e:
+                log(str(e), 'ERROR')
+                return
+            if end_bytes <= begin_bytes:
+                log("--end must be greater than --begin.", 'ERROR')
+                return
+            if step_bytes <= 0:
+                log("--step must be > 0.", 'ERROR')
+                return
+            if window_bytes <= 0:
+                log("--window must be > 0.", 'ERROR')
+                return
+            mode = 'seq'
 
         target = args.target
         resolved = self.resolve_target(target, allow_id=True)
@@ -6413,14 +6736,6 @@ class DiskMgrShell(cmd.Cmd):
             log(f"Target not found: {devnode}", 'ERROR')
             return
 
-        ent_bin = _find_tool_or_common_paths('ent', [
-            '/usr/bin/ent',
-            '/bin/ent',
-            '/usr/local/bin/ent',
-        ])
-        if ent_bin is None:
-            log("Dependency missing: 'ent' not found. Install package 'ent'.", 'ERROR')
-            return
         gnuplot_bin = _find_tool_or_common_paths('gnuplot', [
             '/usr/bin/gnuplot',
             '/bin/gnuplot',
@@ -6430,7 +6745,7 @@ class DiskMgrShell(cmd.Cmd):
             log("Dependency missing: 'gnuplot' not found.", 'ERROR')
             return
 
-        # Size guard so requested range cannot run past device end.
+        # Device size guard for sequential bounds and random-sample offset generation.
         size_bytes = None
         try:
             res_sz = run_command(['lsblk', '-bno', 'SIZE', devnode], check=False)
@@ -6438,58 +6753,213 @@ class DiskMgrShell(cmd.Cmd):
         except Exception:
             size_bytes = None
 
-        start_mib = int(args.start_gib * 1024.0)
-        end_mib = int(args.end_gib * 1024.0)
-        if end_mib <= start_mib:
-            log("Effective range is empty after GiB->MiB conversion. Increase end_gib.", 'ERROR')
-            return
-        if size_bytes is not None:
-            size_mib = int(size_bytes // (1024 * 1024))
-            if end_mib > size_mib:
-                max_gib = size_mib / 1024.0
-                log(f"Requested end_gib {args.end_gib:g} exceeds device size (~{max_gib:.3f} GiB).", 'ERROR')
+        if mode == 'seq':
+            if size_bytes is not None and end_bytes > int(size_bytes):
+                max_gib = float(size_bytes) / (1024.0 ** 3)
+                log(f"Requested --end {end_spec} exceeds device size (~{max_gib:.3f} GiB).", 'ERROR')
                 return
+            total_points = (end_bytes - begin_bytes + step_bytes - 1) // step_bytes
+        else:
+            if size_bytes is None:
+                log("Could not determine device size for random mode. Aborting.", 'ERROR')
+                return
+            if window_bytes > int(size_bytes):
+                log("Derived random window is larger than the device size.", 'ERROR')
+                return
+            total_points = samples
 
         log(f"Target resolved: {devnode}")
-        log(
-            f"Entropy range: {args.start_gib:g}..{args.end_gib:g} GiB "
-            f"(step={args.step_mib} MiB, window={args.window_mib} MiB)"
-        )
+        if mode == 'seq':
+            log(
+                f"Entropy range mode: begin={begin_spec}, end={end_spec} "
+                f"(step={step_spec}, window={window_spec})"
+            )
+        else:
+            stitched_bytes = window_bytes * samples
+            log(
+                f"Entropy random-stitch mode: span={args.span}, samples={samples}, "
+                f"window={self._format_bytes_binary(str(window_bytes), decimals=2)}"
+            )
+            if stitched_bytes != span_bytes:
+                log(
+                    f"Requested span {self._format_bytes_binary(str(span_bytes), decimals=2)}; "
+                    f"effective stitched span is {self._format_bytes_binary(str(stitched_bytes), decimals=2)} "
+                    f"(integer window rounding).",
+                    'WARN'
+                )
         run_command(['sudo', '-v'])
 
         stamp = f"{os.getpid()}_{int(time.time())}"
         data_file = f"/tmp/diskmgr_entropy_{stamp}.txt"
         plot_file = f"/tmp/diskmgr_entropy_{stamp}.png"
-
-        total_points = (end_mib - start_mib + args.step_mib - 1) // args.step_mib
         points_written = 0
+
+        helper_code = r'''
+import math
+import os
+import random
+import sys
+
+BYTES_PER_GIB = 1024.0 * 1024.0 * 1024.0
+
+def entropy_bits_per_byte(buf):
+    total = len(buf)
+    if total <= 0:
+        return 0.0
+    counts = [0] * 256
+    for b in buf:
+        counts[b] += 1
+    ent = 0.0
+    inv_total = 1.0 / float(total)
+    for c in counts:
+        if c:
+            p = c * inv_total
+            ent -= p * math.log2(p)
+    return ent
+
+def read_chunk(fd, off, need):
+    chunks = []
+    got = 0
+    while got < need:
+        chunk = os.pread(fd, need - got, off + got)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        got += len(chunk)
+    if got <= 0:
+        return b""
+    return chunks[0] if len(chunks) == 1 else b"".join(chunks)
+
+def main():
+    if len(sys.argv) != 7:
+        print('usage: <dev> <mode> <p1> <p2> <p3> <p4>', file=sys.stderr)
+        return 2
+
+    dev = sys.argv[1]
+    mode = sys.argv[2]
+    p1 = int(sys.argv[3])
+    p2 = int(sys.argv[4])
+    p3 = int(sys.argv[5])
+    p4 = int(sys.argv[6])
+
+    fd = os.open(dev, os.O_RDONLY)
+    try:
+        if mode == 'seq':
+            start_bytes = p1
+            end_bytes = p2
+            step_bytes = p3
+            window_bytes = p4
+            idx = 0
+            for skip_bytes in range(start_bytes, end_bytes, step_bytes):
+                count_bytes = min(window_bytes, end_bytes - skip_bytes)
+                if count_bytes <= 0:
+                    break
+                data = read_chunk(fd, skip_bytes, count_bytes)
+                if not data:
+                    continue
+                ent_val = entropy_bits_per_byte(data)
+                x_gib = skip_bytes / BYTES_PER_GIB
+                idx += 1
+                sys.stdout.write(f"{idx}\t{x_gib:.6f}\t{ent_val:.6f}\t{skip_bytes}\n")
+                sys.stdout.flush()
+        elif mode == 'rand':
+            device_size = p1
+            samples = p2
+            window_bytes = p3
+            max_start = device_size - window_bytes
+            if max_start < 0:
+                return 2
+            rng = random.Random()
+            for i in range(samples):
+                if max_start == 0:
+                    skip_bytes = 0
+                else:
+                    skip_bytes = rng.randrange(0, max_start + 1)
+                data = read_chunk(fd, skip_bytes, window_bytes)
+                if not data:
+                    continue
+                ent_val = entropy_bits_per_byte(data)
+                stitched_off = i * window_bytes
+                x_gib = stitched_off / BYTES_PER_GIB
+                idx = i + 1
+                sys.stdout.write(f"{idx}\t{x_gib:.6f}\t{ent_val:.6f}\t{skip_bytes}\n")
+                sys.stdout.flush()
+        else:
+            print(f"unknown mode: {mode}", file=sys.stderr)
+            return 2
+    finally:
+        os.close(fd)
+
+    return 0
+
+raise SystemExit(main())
+'''
+
+        if mode == 'seq':
+            sample_cmd = [
+                'python3', '-c', helper_code,
+                devnode, 'seq',
+                str(begin_bytes),
+                str(end_bytes),
+                str(step_bytes),
+                str(window_bytes),
+            ]
+        else:
+            sample_cmd = [
+                'python3', '-c', helper_code,
+                devnode, 'rand',
+                str(int(size_bytes)),
+                str(samples),
+                str(window_bytes),
+                '0',
+            ]
+
+        proc = subprocess.Popen(
+            ['sudo'] + sample_cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        )
 
         with open(data_file, 'w', encoding='utf-8') as f_data:
             f_data.write("# offset_gib entropy_bits_per_byte\n")
-            for idx, skip_mib in enumerate(range(start_mib, end_mib, args.step_mib), start=1):
-                count_mib = min(args.window_mib, end_mib - skip_mib)
-                if count_mib <= 0:
-                    break
-                cmd = (
-                    f"dd if={shlex.quote(devnode)} bs=1M count={count_mib} skip={skip_mib} "
-                    f"iflag=fullblock status=none 2>/dev/null | {shlex.quote(ent_bin)} "
-                    f"| awk '/Entropy =/ {{print $3}}'"
-                )
-                res = run_command(['bash', '-lc', cmd], sudo=True, check=False)
-                out = (getattr(res, 'stdout', '') or '').strip()
-                first = out.split()[0] if out else ''
+            if proc.stdout is None:
+                log("Entropy sampler failed to start stdout pipe.", 'ERROR')
+                return
+
+            for raw_line in proc.stdout:
+                line = (raw_line or '').strip()
+                if not line:
+                    continue
+                parts = line.split('\t')
+                if len(parts) != 4:
+                    continue
                 try:
-                    ent_val = float(first)
+                    idx = int(parts[0])
+                    x_gib = float(parts[1])
+                    ent_val = float(parts[2])
                 except Exception:
-                    log(f"Failed to parse entropy sample at offset {skip_mib} MiB.", 'WARN')
-                    print(f"\rSampling entropy: {idx}/{total_points} (parse warning)        ", end="", flush=True)
                     continue
 
-                x_gib = skip_mib / 1024.0
                 f_data.write(f"{x_gib:.6f} {ent_val:.6f}\n")
                 points_written += 1
+                if idx < 1:
+                    idx = points_written
+                if idx > total_points:
+                    idx = total_points
                 print(f"\rSampling entropy: {idx}/{total_points} at {x_gib:.3f} GiB", end="", flush=True)
+
+        rc = proc.wait()
+        stderr_txt = (proc.stderr.read() if proc.stderr else '') or ''
         print("")
+
+        if rc != 0:
+            err_line = (stderr_txt.strip().splitlines() or ['unknown error'])[-1]
+            if points_written == 0:
+                log(f"Entropy sampler failed: {err_line}", 'ERROR')
+                return
+            log(f"Entropy sampler ended with warnings: {err_line}", 'WARN')
 
         if points_written == 0:
             log(f"No entropy samples were written. Data file: {data_file}", 'ERROR')
@@ -6500,13 +6970,19 @@ class DiskMgrShell(cmd.Cmd):
 
         gp_data = _gp_escape(data_file)
         gp_plot = _gp_escape(plot_file)
-        gp_title = _gp_escape(f"Entropy Profile: {devnode} [{args.start_gib:g}..{args.end_gib:g} GiB]")
+        if mode == 'seq':
+            title = f"Entropy Profile: {devnode} [--begin {begin_spec}, --end {end_spec}]"
+            x_label = "Offset (GiB)"
+        else:
+            title = f"Entropy Profile (stitched random): {devnode} [span={args.span}, samples={samples}]"
+            x_label = "Stitched Offset (GiB)"
+        gp_title = _gp_escape(title)
 
         gp_png_script = (
             "set terminal pngcairo size 1600,900;"
             f"set output '{gp_plot}';"
             f"set title '{gp_title}';"
-            "set xlabel 'Offset (GiB)';"
+            f"set xlabel '{x_label}';"
             "set ylabel 'Entropy (bits/byte)';"
             "set grid;"
             "set yrange [0:8];"
@@ -6520,7 +6996,7 @@ class DiskMgrShell(cmd.Cmd):
         if os.environ.get('DISPLAY') or os.environ.get('WAYLAND_DISPLAY'):
             gp_live_script = (
                 f"set title '{gp_title}';"
-                "set xlabel 'Offset (GiB)';"
+                f"set xlabel '{x_label}';"
                 "set ylabel 'Entropy (bits/byte)';"
                 "set grid;"
                 "set yrange [0:8];"
@@ -6538,8 +7014,10 @@ class DiskMgrShell(cmd.Cmd):
     def do_entropise(self, arg):
         '''High-entropy random overwrite on a disk or partition: entropise <name/id>
 
-        Performs a full-device single pass using /dev/urandom via dd:
-          dd if=/dev/urandom of=<device> bs=16M status=progress oflag=direct conv=fsync
+        Performs a full-device single pass using /dev/urandom via dd with an
+        explicit byte count (count_bytes) so completion is clean at end-of-device:
+          dd if=/dev/urandom of=<device> bs=16M count=<device_size_bytes> count_bytes \
+             status=progress iflag=fullblock oflag=direct conv=fsync
 
         This destroys all existing data on the target.
         '''
@@ -6591,9 +7069,38 @@ class DiskMgrShell(cmd.Cmd):
         if log_path:
             print(f"Log: {log_path}")
         try:
+            size_bytes = None
+            # Prefer blockdev exact byte size.
+            try:
+                res_sz = run_command(['blockdev', '--getsize64', real_target], sudo=True, check=False)
+                size_bytes = _first_int_from_text(getattr(res_sz, 'stdout', '') or '')
+            except Exception:
+                size_bytes = None
+            # Fallback to lsblk byte size.
+            if size_bytes is None or int(size_bytes) <= 0:
+                try:
+                    res_ls = run_command(['lsblk', '-bno', 'SIZE', real_target], check=False)
+                    size_bytes = _first_int_from_text(getattr(res_ls, 'stdout', '') or '')
+                except Exception:
+                    size_bytes = None
+            if size_bytes is None or int(size_bytes) <= 0:
+                log(f"Failed to determine device size for {real_target}. Aborting entropise.", 'ERROR')
+                return
+
             log(f"Starting entropise on {real_target} (single random pass)...")
             run_command(
-                ['dd', 'if=/dev/urandom', f'of={real_target}', 'bs=16M', 'status=progress', 'oflag=direct', 'conv=fsync'],
+                [
+                    'dd',
+                    'if=/dev/urandom',
+                    f'of={real_target}',
+                    'bs=16M',
+                    f'count={int(size_bytes)}',
+                    'count_bytes',
+                    'iflag=fullblock',
+                    'status=progress',
+                    'oflag=direct',
+                    'conv=fsync',
+                ],
                 sudo=True,
                 capture_output=False
             )
