@@ -26,7 +26,7 @@ except ImportError:
 # Configuration
 MAP_FILENAME = 'diskmap.tsv'
 PASSGEN_BIN = 'passgen'
-VERSION = '3.5.6'
+VERSION = '3.5.7'
 HISTORY_FILE_ENV = 'DISKMGR_HISTORY'
 DEFAULT_HISTORY_FILE = Path.home() / '.local' / 'state' / 'diskmgr' / 'history'
 MAX_HISTORY_ENTRIES = 5000
@@ -1291,7 +1291,7 @@ class DiskMgrShell(cmd.Cmd):
         print("      Opens and mounts a plain or encrypted partition or superfloppy.")
         print("      For encrypted targets, unlocks LUKS then mounts payload filesystem.")
         print("      LUKS open tries on-disk header first, then ~/.local/share/diskmgr/<name> as detached header backup.")
-        print("      Btrfs mounts are enforced with compression (compress=zstd:12).")
+        print("      Btrfs mounts are enforced with compression (compress-force=zstd:12).")
         print("      Mountpoint selection: /etc/fstab entry wins when present (uses fstab mountpoint/options).")
         print("      Without fstab: /media/$USER/<mapped-name> when opened by mapping name;")
         print("      else /media/$USER/<FSLABEL>; else /media/$USER/<device>.")
@@ -2169,28 +2169,28 @@ class DiskMgrShell(cmd.Cmd):
         opts = (parts[1] if len(parts) > 1 else '').strip().lower()
         if fstype != 'btrfs':
             return
-        if ('compress=' in opts) or ('compress-force=' in opts):
+        if 'compress-force=' in opts:
             return
 
-        log(f"Enabling btrfs compression on {mountpoint} (compress=zstd:12).")
-        run_command(['mount', '-o', 'remount,compress=zstd:12', mountpoint], sudo=True)
+        log(f"Enabling btrfs compression on {mountpoint} (compress-force=zstd:12).")
+        run_command(['mount', '-o', 'remount,compress-force=zstd:12', mountpoint], sudo=True)
 
         verify = run_command(['findmnt', '-rn', '-M', mountpoint, '-o', 'OPTIONS'], check=False)
         vopts = (getattr(verify, 'stdout', '') or '').strip().lower()
-        if ('compress=' not in vopts) and ('compress-force=' not in vopts):
-            raise RuntimeError(f"Btrfs mount at {mountpoint} is missing compression options after remount.")
+        if 'compress-force=' not in vopts:
+            raise RuntimeError(f"Btrfs mount at {mountpoint} is missing compress-force option after remount.")
 
     def _mount_device(self, devnode, mountpoint, use_fstab=False, announce_btrfs=False):
         dev_fstype = self._detect_fstype(devnode)
         if announce_btrfs and dev_fstype == 'btrfs':
-            log(f"Enabling btrfs compression on {mountpoint} (compress=zstd:12).")
+            log(f"Enabling btrfs compression on {mountpoint} (compress-force=zstd:12).")
         run_command(['mkdir', '-p', mountpoint], sudo=True)
         if use_fstab:
             # Use /etc/fstab mount options and source selection.
             run_command(['mount', mountpoint], sudo=True)
         else:
             if dev_fstype == 'btrfs':
-                run_command(['mount', '-o', 'compress=zstd:12', devnode, mountpoint], sudo=True)
+                run_command(['mount', '-o', 'compress-force=zstd:12', devnode, mountpoint], sudo=True)
             else:
                 run_command(['mount', devnode, mountpoint], sudo=True)
 
@@ -2239,7 +2239,7 @@ class DiskMgrShell(cmd.Cmd):
         gvfs_name = self._fstab_escape(gvfs_name)
         opts = ["defaults", "nofail"]
         if (str(fstype or "").strip().lower() == "btrfs"):
-            opts.append("compress=zstd:12")
+            opts.append("compress-force=zstd:12")
         opts.extend(["x-gvfs-show", f"x-gvfs-name={gvfs_name}"])
         return ",".join(opts)
 
@@ -4377,7 +4377,7 @@ class DiskMgrShell(cmd.Cmd):
             - Otherwise identifies preferred mountpoint: /media/$USER/<label>.
             - If no hardware label is present, falls back to /media/$USER/<mapping_name>.
             - Ensures the directory exists and attaches the device.
-            - For btrfs, enforces compression (compress=zstd:12) on the mounted filesystem.
+            - For btrfs, enforces compression (compress-force=zstd:12) on the mounted filesystem.
         6.  Policy Enforcement: If the disk is already mounted at a non-standard path, 
             it unmounts and remounts it to the preferred path.
 
@@ -5427,7 +5427,7 @@ class DiskMgrShell(cmd.Cmd):
         4.  Unmount: Unmounts all current mount targets for the device (if any).
         5.  Cleanup: Removes empty old mountpoint directories under /media/$USER (best-effort rmdir).
         6.  Mount: Uses fstab mount when present; otherwise direct mount to LABEL path.
-            For btrfs, compression is enforced (compress=zstd:12).
+            For btrfs, compression is enforced (compress-force=zstd:12).
         '''
         parser = CmdArgumentParser(prog='remount', add_help=False)
         parser.add_argument('name')
