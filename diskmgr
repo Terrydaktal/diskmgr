@@ -26,7 +26,7 @@ except ImportError:
 # Configuration
 MAP_FILENAME = 'diskmap.tsv'
 PASSGEN_BIN = 'passgen'
-VERSION = '3.5.8'
+VERSION = '3.5.9'
 HISTORY_FILE_ENV = 'DISKMGR_HISTORY'
 DEFAULT_HISTORY_FILE = Path.home() / '.local' / 'state' / 'diskmgr' / 'history'
 MAX_HISTORY_ENTRIES = 5000
@@ -3004,6 +3004,10 @@ class DiskMgrShell(cmd.Cmd):
                 return
             if v not in candidates:
                 candidates.append(v)
+
+        # Full text path first (important for absolute paths containing spaces).
+        if os.path.exists(text):
+            _add_candidate(text)
 
         # Explicit /dev paths first.
         for p in re.findall(r"/dev/[A-Za-z0-9._/\-+:#]+", text):
