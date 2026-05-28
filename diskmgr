@@ -1031,6 +1031,11 @@ class DiskMgrShell(cmd.Cmd):
         if readline is None:
             return
         try:
+            # Prevent pasted multiline text from auto-submitting line-by-line.
+            readline.parse_and_bind("set enable-bracketed-paste on")
+        except Exception:
+            pass
+        try:
             readline.read_history_file(str(self.history_file))
         except FileNotFoundError:
             pass
@@ -2247,6 +2252,8 @@ class DiskMgrShell(cmd.Cmd):
             else:
                 run_command(['mount', devnode, mountpoint], sudo=True)
 
+        # Root-created mountpoint directories should end up owned by the invoking user.
+        self._chown_mountpoint_dir(mountpoint)
         if dev_fstype == 'btrfs' or use_fstab:
             self._ensure_btrfs_compression_on_mount(mountpoint, desired_opt=desired_btrfs_opt)
 
@@ -2286,6 +2293,21 @@ class DiskMgrShell(cmd.Cmd):
             log(f"Set new filesystem ownership: {mp} -> {user}:{group}")
         except Exception as e:
             log(f"Could not set ownership on new filesystem root {mp}: {e}", 'WARN')
+
+    def _chown_mountpoint_dir(self, mountpoint):
+        """
+        Set ownership of the mountpoint directory itself to the invoking user.
+        This keeps /media/$USER/<name> user-owned after root-created mkdir -p.
+        """
+        mp = str(mountpoint or '').strip()
+        if not mp:
+            return
+        user, _group = self._invoking_user_group()
+        try:
+            run_command(['chown', f'{user}:{user}', mp], sudo=True, check=False)
+            log(f"Set mountpoint ownership: {mp} -> {user}:{user}")
+        except Exception as e:
+            log(f"Could not set ownership on mountpoint directory {mp}: {e}", 'WARN')
 
     def _desired_fstab_options(self, label, fstype=None, target_dev=None):
         gvfs_name = str(label or "").replace(",", "_")
@@ -10158,6 +10180,49 @@ raise SystemExit(main())
         except SystemExit:
             return
 
+        if args.fs == 'btrfs':
+            mkfs_btrfs = _find_tool_or_common_paths('mkfs.btrfs', [
+                '/usr/sbin/mkfs.btrfs',
+                '/sbin/mkfs.btrfs',
+                '/usr/local/sbin/mkfs.btrfs',
+                '/usr/bin/mkfs.btrfs',
+                '/bin/mkfs.btrfs',
+            ])
+            if mkfs_btrfs is None:
+                log("btrfs not found. Install 'btrfs-progs' and retry.", 'ERROR')
+                return
+        elif args.fs == 'ext4':
+            mkfs_ext4 = _find_tool_or_common_paths('mkfs.ext4', [
+                '/usr/sbin/mkfs.ext4',
+                '/sbin/mkfs.ext4',
+                '/usr/local/sbin/mkfs.ext4',
+                '/usr/bin/mkfs.ext4',
+                '/bin/mkfs.ext4',
+            ])
+            if mkfs_ext4 is None:
+                log("mkfs.ext4 not found. Install 'e2fsprogs' and retry.", 'ERROR')
+                return
+        elif args.fs == 'fat32':
+            mkfs_vfat = (
+                _find_tool_or_common_paths('mkfs.vfat', [
+                    '/usr/sbin/mkfs.vfat',
+                    '/sbin/mkfs.vfat',
+                    '/usr/local/sbin/mkfs.vfat',
+                    '/usr/bin/mkfs.vfat',
+                    '/bin/mkfs.vfat',
+                ]) or
+                _find_tool_or_common_paths('mkfs.fat', [
+                    '/usr/sbin/mkfs.fat',
+                    '/sbin/mkfs.fat',
+                    '/usr/local/sbin/mkfs.fat',
+                    '/usr/bin/mkfs.fat',
+                    '/bin/mkfs.fat',
+                ])
+            )
+            if mkfs_vfat is None:
+                log("mkfs.vfat/mkfs.fat not found. Install 'dosfstools' and retry.", 'ERROR')
+                return
+
         name = args.args[0]
         input_token = name
         clean_input = input_token.strip('[]')
@@ -10259,6 +10324,12 @@ raise SystemExit(main())
             self._refresh_kernel_partition_state(real_target, drop_partitions=True)
 
         if args.luks:
+            res_is_luks = run_command(['cryptsetup', 'isLuks', crypt_target], sudo=True, check=False)
+            if getattr(res_is_luks, 'returncode', 1) == 0:
+                log(f"OPERATION BLOCKED: {crypt_target} is already a LUKS container. Refusing to run luksFormat again.", 'ERROR')
+                return
+
+        if args.luks:
             # LUKS Format
             log(f"Formatting LUKS on {crypt_target}...")
             log(f"LUKS PBKDF: memory={LUKS_PBKDF_DEFAULT_MEMORY_LABEL} ({luks_memory_kib:,} KiB), argon2id, threads={LUKS_PBKDF_DEFAULT_THREADS}, time={LUKS_PBKDF_DEFAULT_TIME}")
@@ -10303,7 +10374,14 @@ raise SystemExit(main())
         log(f"Formatting filesystem {args.fs} (label={label}) on {fs_target}...")
         
         if args.fs == 'ext4':
-            run_command(['mkfs.ext4', '-F', '-L', label, fs_target], sudo=True)
+            mkfs_ext4 = _find_tool_or_common_paths('mkfs.ext4', [
+                '/usr/sbin/mkfs.ext4',
+                '/sbin/mkfs.ext4',
+                '/usr/local/sbin/mkfs.ext4',
+                '/usr/bin/mkfs.ext4',
+                '/bin/mkfs.ext4',
+            ]) or 'mkfs.ext4'
+            run_command([mkfs_ext4, '-F', '-L', label, fs_target], sudo=True)
             log("Reclaiming 5% reserved space (tune2fs -m 0)...")
             run_command(['tune2fs', '-m', '0', fs_target], sudo=True)
         elif args.fs == 'xfs':
