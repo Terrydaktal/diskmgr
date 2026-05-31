@@ -26,7 +26,7 @@ except ImportError:
 # Configuration
 MAP_FILENAME = 'diskmap.tsv'
 PASSGEN_BIN = 'passgen'
-VERSION = '3.5.9'
+VERSION = '3.6.1'
 HISTORY_FILE_ENV = 'DISKMGR_HISTORY'
 DEFAULT_HISTORY_FILE = Path.home() / '.local' / 'state' / 'diskmgr' / 'history'
 MAX_HISTORY_ENTRIES = 5000
@@ -1285,6 +1285,8 @@ class DiskMgrShell(cmd.Cmd):
         print("      Partition target: formats inside that partition boundary (not a superfloppy), then mounts it.")
         print("      Default is plain format. Use --luks to run cryptsetup luksFormat, open a mapper,")
         print(f"      and mkfs the decrypted payload filesystem (PBKDF defaults: memory={LUKS_PBKDF_DEFAULT_MEMORY_LABEL}, parallelism={LUKS_PBKDF_DEFAULT_THREADS}, time={LUKS_PBKDF_DEFAULT_TIME}).")
+        print("      Use --detached-header (optionally with a file path) to keep LUKS metadata off-disk from the start.")
+        print(f"      Detached header default path: {LUKS_HEADER_BACKUP_DIR}/<name>")
         print("      Example: format data --luks")
         print("      Whole disks must be unpartitioned. format never creates, deletes, resizes, or moves partitions;")
         print("      it only writes a filesystem/LUKS+filesystem inside the selected disk or partition target.")
@@ -1549,7 +1551,7 @@ class DiskMgrShell(cmd.Cmd):
                 "PERSISTENT PATH (IEEE EUI WWID)": target_path,
                 "Model_Serial WWID": "-",
                 "PCI": "-",
-                "TYPE": "missing",
+                "TYPE": "-",
                 "STATE": "MISSING",
                 "OWNER": "-",
                 "FSTAB": "n",
@@ -1634,6 +1636,16 @@ class DiskMgrShell(cmd.Cmd):
             width_rows = all_rows + missing_rows
             separator_width = max(1, self._lsblk_rendered_list_width(width_rows, cols=selected_cols))
         separator_line = "-" * separator_width
+
+        # concise mode: one flat table, no per-disk geometry/banner blocks
+        if render_mode == 'concise':
+            if display_all_rows:
+                self._print_lsblk_rows(display_all_rows, widths=widths_global, cols=selected_cols)
+            if display_missing_rows:
+                print(f"{Colors.HEADER}Non-present mappings ({get_map_file_path()}){Colors.ENDC}")
+                self._print_lsblk_rows(display_missing_rows, widths=widths_global, cols=selected_cols)
+            print("")
+            return
 
         list_entry_cursor = 1
         for disk in disks:
@@ -1903,7 +1915,6 @@ class DiskMgrShell(cmd.Cmd):
             "STATE",
             "FSTYPE",
             "FSLABEL",
-            "FSUUID",
             "SIZE",
             "FSAVAIL",
             "FSMOUNTPOINTS",
@@ -1915,7 +1926,10 @@ class DiskMgrShell(cmd.Cmd):
             "#",
             "NAME",
             "DEVICE",
-            "TYPE",
+            "STATE",
+            "FSTYPE",
+            "SIZE",
+            "FSAVAIL",
             "MOUNTPOINT",
             "PERSISTENT PATH",
         ]
@@ -10147,6 +10161,9 @@ raise SystemExit(main())
           --label <label>   Set a different internal filesystem label (other than <name>)
           --luks            Encrypt target first with LUKS2, then format payload filesystem.
                             PBKDF defaults: argon2id, memory=4GiB, threads=4, time=8.
+          --detached-header [FILE]
+                            Store LUKS header detached from the target device.
+                            If FILE is omitted: ~/.local/share/diskmgr/<name>
 
         UNDER THE HOOD:
         1.  Safety: Refuses to run if anything is mounted on the target device tree.
@@ -10155,7 +10172,8 @@ raise SystemExit(main())
             - If target is a partition, format is applied directly within that partition.
         3.  LUKS Format (only when --luks is used):
             - Uses 'passgen' to generate a master key.
-            - Runs 'cryptsetup luksFormat' with LUKS2 encryption.
+            - Runs 'cryptsetup luksFormat' with LUKS2 encryption
+              (and --header FILE when --detached-header is used).
             - Opens the container as /dev/mapper/<name>.
         4.  Filesystem:
             - Plain mode (default): formats target directly with ext4, xfs, btrfs, or fat32.
@@ -10170,6 +10188,13 @@ raise SystemExit(main())
         parser.add_argument('--fs', default='ext4', choices=['ext4', 'xfs', 'btrfs', 'fat32'])
         parser.add_argument('--label', help='Filesystem label')
         parser.add_argument('--luks', action='store_true', help='Encrypt target with LUKS2 before mkfs')
+        parser.add_argument(
+            '--detached-header',
+            nargs='?',
+            const='__DEFAULT_DETACHED_HEADER__',
+            metavar='[FILE]',
+            help='Use detached LUKS header file (default: ~/.local/share/diskmgr/<name>)'
+        )
 
         try:
             split_args = shlex.split(arg)
@@ -10178,6 +10203,10 @@ raise SystemExit(main())
             log(str(e), 'ERROR')
             return
         except SystemExit:
+            return
+
+        if args.detached_header and not args.luks:
+            log("--detached-header requires --luks.", 'ERROR')
             return
 
         if args.fs == 'btrfs':
@@ -10270,6 +10299,27 @@ raise SystemExit(main())
                 log("Run: map #N <name> first, or pass --label <name>.", 'ERROR')
                 return
 
+        detached_header_path = None
+        if args.luks and args.detached_header:
+            raw_detached = str(args.detached_header or '').strip()
+            if raw_detached == '__DEFAULT_DETACHED_HEADER__':
+                detached_header_path = str(LUKS_HEADER_BACKUP_DIR / op_name)
+            else:
+                detached_header_path = os.path.abspath(os.path.expanduser(raw_detached))
+
+            try:
+                dh_parent = os.path.dirname(detached_header_path)
+                if dh_parent:
+                    os.makedirs(dh_parent, exist_ok=True)
+            except Exception as e:
+                log(f"Failed to prepare detached-header directory for {detached_header_path}: {e}", 'ERROR')
+                return
+
+            if os.path.exists(detached_header_path):
+                log(f"Detached header path already exists: {detached_header_path}", 'ERROR')
+                log("Refusing to overwrite existing detached header file. Choose another path or move/remove the old file.", 'ERROR')
+                return
+
         # Wait/Verify target existence
         real_target = os.path.realpath(target)
         if not os.path.exists(real_target):
@@ -10333,20 +10383,25 @@ raise SystemExit(main())
             # LUKS Format
             log(f"Formatting LUKS on {crypt_target}...")
             log(f"LUKS PBKDF: memory={LUKS_PBKDF_DEFAULT_MEMORY_LABEL} ({luks_memory_kib:,} KiB), argon2id, threads={LUKS_PBKDF_DEFAULT_THREADS}, time={LUKS_PBKDF_DEFAULT_TIME}")
+            if detached_header_path:
+                log(f"Using detached LUKS header file: {detached_header_path}")
             pg_cmd = subprocess.Popen([PASSGEN_BIN], stdout=subprocess.PIPE, text=True)
             try:
+                luks_format_cmd = [
+                    'cryptsetup', 'luksFormat',
+                    '--type', 'luks2',
+                    '--batch-mode',
+                    '--pbkdf', 'argon2id',
+                    '--pbkdf-memory', str(luks_memory_kib),
+                    '--pbkdf-parallel', str(LUKS_PBKDF_DEFAULT_THREADS),
+                    '--pbkdf-force-iterations', str(LUKS_PBKDF_DEFAULT_TIME),
+                    '--key-file', '-',
+                ]
+                if detached_header_path:
+                    luks_format_cmd.extend(['--header', detached_header_path])
+                luks_format_cmd.append(crypt_target)
                 run_command(
-                    [
-                        'cryptsetup', 'luksFormat',
-                        '--type', 'luks2',
-                        '--batch-mode',
-                        '--pbkdf', 'argon2id',
-                        '--pbkdf-memory', str(luks_memory_kib),
-                        '--pbkdf-parallel', str(LUKS_PBKDF_DEFAULT_THREADS),
-                        '--pbkdf-force-iterations', str(LUKS_PBKDF_DEFAULT_TIME),
-                        '--key-file', '-',
-                        crypt_target
-                    ],
+                    luks_format_cmd,
                     input_str=pg_cmd.communicate()[0],
                     sudo=True,
                     check=True
@@ -10358,12 +10413,20 @@ raise SystemExit(main())
             # Open
             log("Opening new LUKS volume...")
             pg_cmd = subprocess.Popen([PASSGEN_BIN], stdout=subprocess.PIPE, text=True)
+            open_cmd = ['cryptsetup', 'open', '--key-file', '-']
+            if detached_header_path:
+                open_cmd.extend(['--header', detached_header_path])
+            open_cmd.extend([crypt_target, op_name])
             run_command(
-                ['cryptsetup', 'open', '--key-file', '-', crypt_target, op_name],
+                open_cmd,
                 input_str=pg_cmd.communicate()[0],
                 sudo=True,
                 check=True
             )
+            if detached_header_path:
+                user, _group = self._invoking_user_group()
+                run_command(['chown', f'{user}:{user}', detached_header_path], sudo=True, check=False)
+                run_command(['chmod', '600', detached_header_path], sudo=True, check=False)
             fs_target = f"/dev/mapper/{op_name}"
         else:
             log("Using plain format mode (no LUKS).")
