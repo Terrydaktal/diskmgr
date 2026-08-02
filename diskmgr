@@ -26,7 +26,7 @@ except ImportError:
 # Configuration
 MAP_FILENAME = 'diskmap.tsv'
 PASSGEN_BIN = 'passgen'
-VERSION = '3.6.1'
+VERSION = '3.6.2'
 HISTORY_FILE_ENV = 'DISKMGR_HISTORY'
 DEFAULT_HISTORY_FILE = Path.home() / '.local' / 'state' / 'diskmgr' / 'history'
 MAX_HISTORY_ENTRIES = 5000
@@ -667,13 +667,13 @@ def _lsblk_type(dev_path):
     return ""
 
 def _lsblk_fstype(dev_path):
-    res = run_command_hard_timeout(['lsblk', '-no', 'FSTYPE', dev_path], 3, check=False)
+    # Query only the requested node. Without --nodeps, lsblk prints blank parent
+    # rows followed by child filesystems, which can misidentify a disk as NTFS.
+    res = run_command_hard_timeout(['lsblk', '--nodeps', '-no', 'FSTYPE', dev_path], 3, check=False)
     out = (getattr(res, 'stdout', '') or '')
-    # lsblk may return multiple rows (device + children); use only the target's first row.
+    # The target may legitimately have no filesystem, so preserve that blank result.
     for line in out.splitlines():
-        line = line.strip()
-        if line:
-            return line
+        return line.strip()
     return ""
 
 def _lsblk_pttype(dev_path):
@@ -1033,6 +1033,18 @@ class DiskMgrShell(cmd.Cmd):
         try:
             # Prevent pasted multiline text from auto-submitting line-by-line.
             readline.parse_and_bind("set enable-bracketed-paste on")
+            # Support Ctrl+Backspace in terminals that emit a distinct escape sequence.
+            # Do not remap plain Backspace (^H/^?) because many terminals send that for
+            # normal character deletion and readline cannot always distinguish them.
+            for seq in (
+                '"\\e[127;5u": backward-kill-word',
+                '"\\e[8;5~": backward-kill-word',
+                '"\\e[7;5~": backward-kill-word',
+                '"\\e[3;5~": backward-kill-word',
+                '"\\e\\C-?": backward-kill-word',
+                '"\\e\\C-h": backward-kill-word',
+            ):
+                readline.parse_and_bind(seq)
         except Exception:
             pass
         try:
@@ -1158,6 +1170,23 @@ class DiskMgrShell(cmd.Cmd):
                 return matches[0]
 
         return "-"
+
+    def _normalize_mapping_target(self, target_path):
+        """Replace an existing raw disk/partition path with its by-id path."""
+        raw = str(target_path or '').strip()
+        if not raw or not os.path.exists(raw):
+            return raw
+        try:
+            real = os.path.realpath(raw)
+            target_type = _lsblk_type(real)
+            if target_type not in ('disk', 'part'):
+                return raw
+            persistent = self.find_persistent_path(os.path.basename(real), type_=target_type)
+            if persistent and persistent != '-':
+                return persistent
+        except Exception:
+            pass
+        return raw
 
     def find_serial_wwid_path(self, dev_node, type_='disk'):
         """
@@ -1319,6 +1348,7 @@ class DiskMgrShell(cmd.Cmd):
         print("      If the same source is mounted multiple times (e.g. <label> and <label>1),")
         print("      open keeps the preferred path and unmounts extra mountpoints.")
         print("      If the preferred path is occupied by a different device, open is blocked.")
+        print("      A separate non-root partition on the same physical disk as / may be opened; the root partition and disk remain protected.")
         print(f"  {Colors.OKGREEN}close <name/id> [--force]{Colors.ENDC}")
         print("      close <name>: unmounts filesystem(s) and closes /dev/mapper/<name> when present (locks LUKS).")
         print("      If a whole-disk target is supplied, closes all mounted child partitions on that disk too.")
@@ -4288,14 +4318,27 @@ class DiskMgrShell(cmd.Cmd):
         print(f"{Colors.OKGREEN}Verification successful. Proceeding...{Colors.ENDC}")
         return True
 
-    def is_root_disk(self, target_path):
-        """Checks if the target path is the root disk or partition."""
+    def is_root_disk(self, target_path, allow_sibling_partitions=False):
+        """Checks if target is the root filesystem, its backing chain, or root disk."""
         try:
-            # Root SOURCE can be a partition (/dev/nvme0n1p1) or a dm-crypt device (/dev/dm-0).
+            # Root SOURCE can be a partition (/dev/nvme0n1p5) or a dm-crypt device.
             res = run_command(['findmnt', '-nro', 'SOURCE', '/'], capture_output=True)
             root_source = os.path.realpath(res.stdout.strip())
 
             target_real = os.path.realpath(target_path)
+
+            root_backing = {root_source}
+            try:
+                res_chain = run_command(
+                    ['lsblk', '-s', '-nrpo', 'PATH', root_source],
+                    check=False
+                )
+                for line in (getattr(res_chain, 'stdout', '') or '').splitlines():
+                    path = line.strip()
+                    if path:
+                        root_backing.add(os.path.realpath(path))
+            except Exception:
+                pass
 
             def _top_level_disk(dev_path):
                 """Return the top-level /dev/<disk> for any block device (partition/dm/crypt), or None."""
@@ -4319,22 +4362,25 @@ class DiskMgrShell(cmd.Cmd):
             root_disk = _top_level_disk(root_source)
             target_disk = _top_level_disk(target_real)
 
-            # Direct match against the root source (e.g., /dev/nvme0n1p1 or /dev/dm-0).
-            if target_real == root_source:
+            # Block the root source and any underlying partition/device in its chain.
+            if target_real in root_backing:
                 return True
 
-            # Anything that resolves to the same physical disk as '/' counts as "root drive".
+            # The whole root disk remains protected. A sibling partition may be
+            # opened, but is still protected for destructive operations.
             if root_disk and target_disk and target_disk == root_disk:
+                if allow_sibling_partitions and _lsblk_type(target_real) == 'part':
+                    return False
                 return True
 
         except:
             pass
         return False
 
-    def _block_if_root_drive(self, target_path, operation):
+    def _block_if_root_drive(self, target_path, operation, allow_sibling_partitions=False):
         """Return True (and log) if target_path is on the system root drive."""
         try:
-            if self.is_root_disk(target_path):
+            if self.is_root_disk(target_path, allow_sibling_partitions=allow_sibling_partitions):
                 log(f"OPERATION BLOCKED: {operation} is not allowed on the system root drive ({target_path}).", 'ERROR')
                 return True
         except Exception:
@@ -4393,6 +4439,11 @@ class DiskMgrShell(cmd.Cmd):
                 log(f"Invalid target: '{target}'. Use a Discovery ID (e.g., [#1]) or an existing name.", 'ERROR')
                 return
             log(f"Resolved {target} -> {real_target}")
+
+        normalized_target = self._normalize_mapping_target(real_target)
+        if normalized_target != real_target:
+            log(f"Normalized mapping target: {real_target} -> {normalized_target}")
+            real_target = normalized_target
 
         if name in self.mappings and name != old_name:
             log(f"Mapping '{name}' already exists.", 'ERROR')
@@ -4549,6 +4600,13 @@ class DiskMgrShell(cmd.Cmd):
                 log(f"Unknown mapping: {mapping_name}. Use 'list' to find Discovery IDs and 'map' them first.", 'ERROR')
                 return
             src = self.mappings[mapping_name]
+
+        normalized_src = self._normalize_mapping_target(src)
+        if normalized_src != src and mapping_name:
+            self.mappings[mapping_name] = normalized_src
+            save_luks_map(self.mappings)
+            log(f"Normalized mapping target: {src} -> {normalized_src}")
+            src = normalized_src
         
         # Wait for device
         log(f"Waiting for device {src}...")
@@ -4563,7 +4621,7 @@ class DiskMgrShell(cmd.Cmd):
             
         mapped_devnode = os.path.realpath(src)
         op_ref = mapping_name or target
-        if self._block_if_root_drive(mapped_devnode, f"open {op_ref}"):
+        if self._block_if_root_drive(mapped_devnode, f"open {op_ref}", allow_sibling_partitions=True):
             return
         devnode = mapped_devnode
         detached_header = str(LUKS_HEADER_BACKUP_DIR / mapping_name) if mapping_name else None
@@ -4839,13 +4897,17 @@ class DiskMgrShell(cmd.Cmd):
                 except Exception:
                     pass
             log(f"Mounting {target_to_mount} to {mountpoint}...")
-            self._mount_device(
-                target_to_mount,
-                mountpoint,
-                use_fstab=use_fstab_mount,
-                announce_btrfs=True,
-                btrfs_compression_opt=btrfs_compression_opt
-            )
+            try:
+                self._mount_device(
+                    target_to_mount,
+                    mountpoint,
+                    use_fstab=use_fstab_mount,
+                    announce_btrfs=True,
+                    btrfs_compression_opt=btrfs_compression_opt
+                )
+            except Exception as e:
+                log(f"Mount failed for {target_to_mount} at {mountpoint}: {e}", 'ERROR')
+                return
             _prune_extra_mounts()
             log("Mounted.")
         elif mountpoint in current_targets:
