@@ -1347,7 +1347,8 @@ class DiskMgrShell(cmd.Cmd):
         print("      else /media/$USER/<FSLABEL>; else /media/$USER/<device>.")
         print("      If the same source is mounted multiple times (e.g. <label> and <label>1),")
         print("      open keeps the preferred path and unmounts extra mountpoints.")
-        print("      If the preferred path is occupied by a different device, open is blocked.")
+        print("      If the preferred path references a missing /dev source, open clears that stale mount first.")
+        print("      If the preferred path is occupied by an existing different device, open is blocked.")
         print("      A separate non-root partition on the same physical disk as / may be opened; the root partition and disk remain protected.")
         print(f"  {Colors.OKGREEN}close <name/id> [--force]{Colors.ENDC}")
         print("      close <name>: unmounts filesystem(s) and closes /dev/mapper/<name> when present (locks LUKS).")
@@ -4536,6 +4537,8 @@ class DiskMgrShell(cmd.Cmd):
             - Otherwise identifies preferred mountpoint: /media/$USER/<label>.
             - If no hardware label is present, falls back to /media/$USER/<mapping_name>.
             - Ensures the directory exists and attaches the device.
+            - Clears a stale mount whose /dev source no longer exists before reusing the preferred path.
+              A preferred path occupied by an existing different device remains blocked.
             - For btrfs, default mount policy is HDD => compress-force=zstd:12; non-HDD => no compression option.
             - Override per command with --compress=<mode> or --compress-force=<mode>.
         6.  Policy Enforcement: If the disk is already mounted at a non-standard path, 
@@ -4846,11 +4849,68 @@ class DiskMgrShell(cmd.Cmd):
         res_check = run_command(['findmnt', '-rn', '-M', mountpoint], check=False)
         if res_check.returncode == 0:
             # Check if it's a DIFFERENT device
-            res_src = run_command(['findmnt', '-rn', '-M', mountpoint, '-o', 'SOURCE'], capture_output=True)
-            current_src = os.path.realpath(res_src.stdout.strip())
-            if current_src != os.path.realpath(target_to_mount):
-                log(f"MOUNT BLOCKED: Path {mountpoint} is already in use by {current_src}.", 'ERROR')
+            res_src = run_command(
+                ['findmnt', '-rn', '-M', mountpoint, '-o', 'SOURCE'],
+                capture_output=True,
+                check=False,
+            )
+            current_src_lines = (getattr(res_src, 'stdout', '') or '').strip().splitlines()
+            if not current_src_lines:
+                log(f"MOUNT BLOCKED: Could not identify the source mounted at {mountpoint}.", 'ERROR')
                 return
+            current_src_raw = current_src_lines[0]
+            # findmnt can append a btrfs subvolume in brackets; existence applies to the device path.
+            current_src_device = re.sub(r'\[.*\]$', '', current_src_raw)
+            current_src = os.path.realpath(current_src_device)
+            if current_src != os.path.realpath(target_to_mount):
+                stale_device_mount = (
+                    current_src_device.startswith('/dev/')
+                    and not os.path.exists(current_src_device)
+                )
+                if not stale_device_mount:
+                    log(f"MOUNT BLOCKED: Path {mountpoint} is already in use by {current_src_raw}.", 'ERROR')
+                    return
+
+                log(
+                    f"Stale mount detected: {mountpoint} still references missing source "
+                    f"{current_src_raw}. Attempting a normal unmount...",
+                    'WARN',
+                )
+                stale_umount = run_command(['umount', mountpoint], sudo=True, check=False)
+                if stale_umount.returncode != 0:
+                    stale_error = (
+                        (getattr(stale_umount, 'stderr', '') or '').strip()
+                        or (getattr(stale_umount, 'stdout', '') or '').strip()
+                        or "unknown unmount error"
+                    )
+                    log(f"Failed to clear stale mount {mountpoint}: {stale_error}", 'ERROR')
+                    holders = run_command(
+                        ['fuser', '-vm', mountpoint],
+                        sudo=True,
+                        capture_output=True,
+                        check=False,
+                    )
+                    holder_text = '\n'.join(
+                        part.strip('\n')
+                        for part in (
+                            getattr(holders, 'stdout', '') or '',
+                            getattr(holders, 'stderr', '') or '',
+                        )
+                        if part.strip()
+                    )
+                    if holder_text:
+                        log(f"Holders for {mountpoint} (fuser -vm):\n{holder_text}", 'WARN')
+                    return
+
+                if run_command(['findmnt', '-rn', '-M', mountpoint], check=False).returncode == 0:
+                    log(
+                        f"MOUNT BLOCKED: {mountpoint} remains mounted after the stale-mount cleanup attempt.",
+                        'ERROR',
+                    )
+                    return
+
+                cleanup_mountpoint_dir(mountpoint)
+                log(f"Cleared stale mount {mountpoint}; continuing with {target_to_mount}.")
 
         # Check if mounted (may have multiple mount targets)
         current_targets = find_mount_targets(target_to_mount)
