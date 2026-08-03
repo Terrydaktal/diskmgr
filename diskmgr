@@ -26,7 +26,7 @@ except ImportError:
 # Configuration
 MAP_FILENAME = 'diskmap.tsv'
 PASSGEN_BIN = 'passgen'
-VERSION = '3.6.2'
+VERSION = '3.6.3'
 HISTORY_FILE_ENV = 'DISKMGR_HISTORY'
 DEFAULT_HISTORY_FILE = Path.home() / '.local' / 'state' / 'diskmgr' / 'history'
 MAX_HISTORY_ENTRIES = 5000
@@ -1349,12 +1349,18 @@ class DiskMgrShell(cmd.Cmd):
         print("      open keeps the preferred path and unmounts extra mountpoints.")
         print("      If the preferred path references a missing /dev source, open clears that stale mount first.")
         print("      If the preferred path is occupied by an existing different device, open is blocked.")
+        print("      Device discovery waits up to 60 seconds and reports slow USB bridge/disk spin-up progress.")
         print("      A separate non-root partition on the same physical disk as / may be opened; the root partition and disk remain protected.")
         print(f"  {Colors.OKGREEN}close <name/id> [--force]{Colors.ENDC}")
         print("      close <name>: unmounts filesystem(s) and closes /dev/mapper/<name> when present (locks LUKS).")
         print("      If a whole-disk target is supplied, closes all mounted child partitions on that disk too.")
         print("      close #id (example: close #6): unmount-only for that discovered row; does NOT run cryptsetup close.")
-        print("      With --force, kills mount-holder processes (SIGKILL) if unmount is busy, then retries unmount.")
+        print("      --force kills userspace holders, but cannot kill kernel D-state writeback operations.")
+        print("      close flushes each filesystem, then waits up to 30 seconds for blocked kernel I/O recovery.")
+        print("      Kernel detach is attempted only after every filesystem on the disk is unmounted.")
+        print("      A vanished source is treated as an unplug; stale mount directories are removed after kernel teardown.")
+        print("      Only one rescue detach can be attempted by each close command.")
+        print("      With --force, kills mount-holder processes (SIGKILL) before flushing and normal unmount.")
         print("      Rescue kernel-detach is last-resort and only allowed with --force.")
         print("      Use #id if you want to close only the payload filesystem and keep the LUKS container open.")
         print(f"  {Colors.OKGREEN}luks <passwd|params|backup|restore|header|wipe> [options]{Colors.ENDC}")
@@ -4611,15 +4617,71 @@ class DiskMgrShell(cmd.Cmd):
             log(f"Normalized mapping target: {src} -> {normalized_src}")
             src = normalized_src
         
-        # Wait for device
-        log(f"Waiting for device {src}...")
-        for _ in range(50): # 10s wait
-            if os.path.exists(src):
+        # Slow USB HDDs can expose their bridge well before spin-up and udev create
+        # the persistent disk link. Keep reporting that distinction while waiting.
+        wait_seconds = 60.0
+        wait_interval = 0.25
+        wait_started = time.monotonic()
+        next_wait_report = 5.0
+        last_wait_state = ""
+
+        def _usb_storage_bridge_count():
+            count = 0
+            for driver_name in ('uas', 'usb-storage'):
+                driver_dir = f"/sys/bus/usb/drivers/{driver_name}"
+                try:
+                    count += sum(1 for entry in os.listdir(driver_dir) if ':' in entry)
+                except OSError:
+                    pass
+            return count
+
+        def _persistent_device_ready(path):
+            if not os.path.exists(path):
+                bridges = _usb_storage_bridge_count()
+                if bridges:
+                    return False, (
+                        f"{bridges} USB storage bridge{'s are' if bridges != 1 else ' is'} present system-wide; "
+                        "the target disk is not ready (it may still be spinning up or recovering)"
+                    )
+                return False, "persistent device path is not present"
+
+            resolved = os.path.realpath(path)
+            kname = os.path.basename(resolved)
+            state_path = f"/sys/class/block/{kname}/device/state"
+            try:
+                with open(state_path, 'r', encoding='utf-8', errors='replace') as state_fh:
+                    device_state = (state_fh.read() or '').strip().lower()
+            except OSError:
+                device_state = ""
+            if device_state and device_state != 'running':
+                return False, f"{resolved} exists but reports device state '{device_state}'"
+            return True, f"ready as {resolved}"
+
+        log(f"Waiting up to {int(wait_seconds)} seconds for device {src}...")
+        device_ready = False
+        while True:
+            device_ready, wait_state = _persistent_device_ready(src)
+            if device_ready:
+                elapsed = time.monotonic() - wait_started
+                if elapsed >= 1.0:
+                    log(f"Device became ready after {elapsed:.1f}s: {src} -> {os.path.realpath(src)}")
                 break
-            time.sleep(0.2)
-            
-        if not os.path.exists(src):
-            log(f"Device not found: {src}", 'ERROR')
+
+            elapsed = time.monotonic() - wait_started
+            state_changed = wait_state != last_wait_state
+            if elapsed >= next_wait_report or (state_changed and elapsed >= 1.0):
+                log(
+                    f"Still waiting for device ({int(elapsed)}s/{int(wait_seconds)}s): {wait_state}...",
+                    'WARN',
+                )
+                next_wait_report = max(next_wait_report + 5.0, elapsed + 5.0)
+            last_wait_state = wait_state
+            if elapsed >= wait_seconds:
+                break
+            time.sleep(wait_interval)
+
+        if not device_ready:
+            log(f"Device not ready after {int(wait_seconds)} seconds: {src} ({last_wait_state}).", 'ERROR')
             return
             
         mapped_devnode = os.path.realpath(src)
@@ -5008,15 +5070,20 @@ class DiskMgrShell(cmd.Cmd):
         '''Unmount and lock (if encrypted) a disk: close <name/id> [--force]
         
         UNDER THE HOOD:
-        1.  Unmounting (Encrypted & Plain): 
-            - Flushes all pending writes to the disk (data integrity).
-            - Terminates active file handles to the device.
+        1.  Unmounting (Encrypted & Plain):
+            - With --force, terminates userspace processes holding the filesystem.
+            - Flushes the target filesystem, then attempts a normal unmount.
+            - Waits for a bounded recovery period if only kernel writeback remains.
+            - --force cannot kill kernel tasks stuck in uninterruptible D-state I/O.
+            - Treats a vanished source as an unplug and cleans stale mount directories after teardown.
             - Attempts unmount by mapper path (LUKS), source path (Plain), or guessed mountpoint.
             - If target is a whole disk, also unmounts mounted child partitions on that disk.
         2.  Locking (LUKS only):
             - Commands the kernel to wipe encryption keys from RAM.
             - Removes the virtual cleartext device from /dev/mapper/.
         3.  Audit: Checks and displays remaining active mappings for security awareness.
+        4.  Rescue: A --force kernel detach is single-attempt and only runs after all
+            filesystems and child LUKS mappings have been closed.
         '''
         argv = shlex.split(arg) if arg else []
         force = False
@@ -5035,13 +5102,26 @@ class DiskMgrShell(cmd.Cmd):
             log("Usage: close <name/id> [--force]", 'ERROR')
             return
         target = positional[0]
+        close_state = {
+            'flush_timed_out': False,
+            'kernel_blocked': False,
+            'device_vanished': False,
+        }
+        flushed_mounts = set()
+        flush_timed_out_mounts = set()
+        detach_attempted_disks = set()
 
         def _log_mount_holders(mp):
             """Best-effort diagnostics: show processes holding a busy mount."""
             holder_shown = False
             fuser_bin = shutil.which('fuser')
             if fuser_bin:
-                res_f = run_command(['fuser', '-vm', mp], sudo=True, check=False)
+                res_f = run_command_hard_timeout(
+                    ['fuser', '-vm', mp],
+                    3,
+                    sudo=True,
+                    check=False,
+                )
                 out_f = (getattr(res_f, 'stdout', '') or '').strip()
                 err_f = (getattr(res_f, 'stderr', '') or '').strip()
                 combined = "\n".join([x for x in (out_f, err_f) if x]).strip()
@@ -5053,7 +5133,12 @@ class DiskMgrShell(cmd.Cmd):
             if not holder_shown:
                 lsof_bin = shutil.which('lsof')
                 if lsof_bin:
-                    res_l = run_command(['lsof', '+D', mp], sudo=True, check=False)
+                    res_l = run_command_hard_timeout(
+                        ['lsof', '+D', mp],
+                        3,
+                        sudo=True,
+                        check=False,
+                    )
                     out_l = (getattr(res_l, 'stdout', '') or '').strip()
                     err_l = (getattr(res_l, 'stderr', '') or '').strip()
                     combined = "\n".join([x for x in (out_l, err_l) if x]).strip()
@@ -5071,7 +5156,12 @@ class DiskMgrShell(cmd.Cmd):
 
             fuser_bin = shutil.which('fuser')
             if fuser_bin:
-                res_f = run_command(['fuser', '-m', mp], sudo=True, check=False)
+                res_f = run_command_hard_timeout(
+                    ['fuser', '-m', mp],
+                    3,
+                    sudo=True,
+                    check=False,
+                )
                 out_f = (getattr(res_f, 'stdout', '') or '')
                 for ln in out_f.splitlines():
                     line = (ln or '').strip()
@@ -5090,10 +5180,17 @@ class DiskMgrShell(cmd.Cmd):
                         except Exception:
                             pass
 
-            if not pids:
+            # Do not recursively walk a large/failing filesystem with lsof when
+            # fuser was available and simply found no userspace holder.
+            if not pids and not fuser_bin:
                 lsof_bin = shutil.which('lsof')
                 if lsof_bin:
-                    res_l = run_command(['lsof', '+D', mp], sudo=True, check=False)
+                    res_l = run_command_hard_timeout(
+                        ['lsof', '+D', mp],
+                        3,
+                        sudo=True,
+                        check=False,
+                    )
                     out_l = (getattr(res_l, 'stdout', '') or '').splitlines()
                     for line in out_l[1:]:
                         cols = line.split()
@@ -5121,12 +5218,13 @@ class DiskMgrShell(cmd.Cmd):
             pids = _collect_mount_holder_pids(mp)
             if not pids:
                 log(f"--force enabled, but no killable holder PIDs found for {mp}.", 'WARN')
-                return
+                return []
             log(f"--force enabled: sending SIGKILL to holder PIDs: {', '.join(str(p) for p in pids)}", 'WARN')
             chunk_size = 64
             for i in range(0, len(pids), chunk_size):
                 chunk = pids[i:i+chunk_size]
                 run_command(['kill', '-9'] + [str(p) for p in chunk], sudo=True, check=False)
+            return pids
 
         def _dm_mapper_name_from_kname(kname):
             k = str(kname or "").strip()
@@ -5192,7 +5290,12 @@ class DiskMgrShell(cmd.Cmd):
                     log(f"Skipping close of child mapping {mname} because one or more mount targets are still busy.", 'WARN')
                     continue
 
-                res = run_command(['cryptsetup', 'close', mname], sudo=True, check=False)
+                res = run_command_hard_timeout(
+                    ['cryptsetup', 'close', mname],
+                    8,
+                    sudo=True,
+                    check=False,
+                )
                 if getattr(res, 'returncode', 1) == 0:
                     closed += 1
                 else:
@@ -5256,32 +5359,186 @@ class DiskMgrShell(cmd.Cmd):
                 pass
             return None
 
+        def _mount_is_active(mp):
+            res = run_command_hard_timeout(
+                ['findmnt', '-rn', '-M', mp],
+                2,
+                check=False,
+            )
+            return getattr(res, 'returncode', 1) == 0
+
+        def _mount_source(mp):
+            res = run_command_hard_timeout(
+                ['findmnt', '-rn', '-M', mp, '-o', 'SOURCE'],
+                2,
+                check=False,
+            )
+            if getattr(res, 'returncode', 1) != 0:
+                return ""
+            lines = (getattr(res, 'stdout', '') or '').splitlines()
+            if not lines:
+                return ""
+            # findmnt appends a Btrfs subvolume as /dev/mapper/name[/subvol].
+            return re.sub(r'\[[^]]*\]$', '', lines[0].strip())
+
+        def _mount_source_is_present(source):
+            """Check a mount source and any device-mapper backing devices via sysfs."""
+            if not source.startswith('/dev/') or not os.path.exists(source):
+                return not source.startswith('/dev/')
+
+            kname = _sysfs_block_name(source)
+            if not kname.startswith('dm-'):
+                return True
+            slaves_dir = f"/sys/class/block/{kname}/slaves"
+            try:
+                slaves = os.listdir(slaves_dir)
+            except OSError:
+                return False
+            if not slaves:
+                return False
+            return all(os.path.exists(f"/dev/{slave}") for slave in slaves)
+
+        def _flush_mount(mp):
+            """Flush one mounted filesystem without blocking close indefinitely."""
+            if mp in flushed_mounts:
+                return True
+            flushed_mounts.add(mp)
+
+            res_fs = run_command_hard_timeout(
+                ['findmnt', '-rn', '-M', mp, '-o', 'FSTYPE'],
+                2,
+                check=False,
+            )
+            fstype = (getattr(res_fs, 'stdout', '') or '').splitlines()
+            fstype = fstype[0].strip().lower() if fstype else ""
+            if fstype == 'btrfs' and shutil.which('btrfs'):
+                command = ['btrfs', 'filesystem', 'sync', mp]
+                description = "Btrfs filesystem sync"
+            else:
+                command = ['sync', '-f', mp]
+                description = f"{fstype or 'filesystem'} syncfs flush"
+
+            log(f"Flushing {mp} ({description})...")
+            res = run_command_hard_timeout(command, 8, sudo=True, check=False)
+            rc = getattr(res, 'returncode', 1)
+            if rc == 0:
+                return True
+            if rc == 124:
+                close_state['flush_timed_out'] = True
+                flush_timed_out_mounts.add(mp)
+                log(
+                    f"Filesystem flush timed out for {mp}; kernel writeback may still be outstanding.",
+                    'WARN',
+                )
+            else:
+                err = (getattr(res, 'stderr', '') or '').strip()
+                detail = f": {err}" if err else ""
+                log(f"Filesystem flush failed for {mp}{detail}; continuing to normal unmount.", 'WARN')
+            return False
+
+        def _wait_for_kernel_release(mp, seconds=30, retry_unmount=True):
+            """Wait for kernel teardown/writeback while monitoring mount and source state."""
+            close_state['kernel_blocked'] = True
+            log(
+                f"No killable userspace holders remain for {mp}; the filesystem is blocked in kernel writeback/I/O.",
+                'WARN',
+            )
+            if force:
+                log(
+                    "--force cannot kill kernel tasks in uninterruptible D-state; waiting for kernel recovery.",
+                    'WARN',
+                )
+            else:
+                log("Waiting for bounded kernel recovery; --force would not bypass D-state I/O.", 'WARN')
+
+            started = time.monotonic()
+            next_report = 5
+            vanished_reported = False
+            while True:
+                if not _mount_is_active(mp):
+                    cleanup_mountpoint_dir(mp)
+                    return True
+
+                elapsed = time.monotonic() - started
+                if elapsed >= seconds:
+                    break
+
+                source = _mount_source(mp)
+                source_missing = bool(source and not _mount_source_is_present(source))
+                if source_missing:
+                    close_state['device_vanished'] = True
+                    if not vanished_reported:
+                        log(
+                            f"Device source {source} vanished during close; treating this as an unplug event "
+                            "and waiting for kernel mount teardown.",
+                            'WARN',
+                        )
+                        vanished_reported = True
+
+                if elapsed >= next_report:
+                    remaining = max(0, int(seconds - elapsed))
+                    state = "device vanished; kernel teardown pending" if source_missing else "kernel writeback/I/O pending"
+                    log(f"Close recovery: {mp} still mounted ({state}); up to {remaining}s remaining.", 'WARN')
+                    if retry_unmount:
+                        # Retry only when the previous unmount returned. A timed-out
+                        # unmount may still be blocked in D-state below its launcher.
+                        res_retry = run_command_hard_timeout(
+                            ['umount', mp],
+                            4,
+                            sudo=True,
+                            check=False,
+                        )
+                        if getattr(res_retry, 'returncode', 1) == 0:
+                            cleanup_mountpoint_dir(mp)
+                            return True
+                        if getattr(res_retry, 'returncode', 1) == 124:
+                            retry_unmount = False
+                            log(
+                                f"Unmount retry for {mp} timed out; monitoring only to avoid overlapping "
+                                "kernel operations.",
+                                'WARN',
+                            )
+                    next_report += 5
+                time.sleep(1)
+
+            if not _mount_is_active(mp):
+                cleanup_mountpoint_dir(mp)
+                return True
+            log(
+                f"Close recovery period expired after {seconds}s; {mp} remains mounted in kernel.",
+                'ERROR',
+            )
+            return False
+
         def _attempt_rescue_for_disk(devnode, reason, allow_detach=False, persistent_hint=None):
-            """
-            Best-effort rescue for unresponsive whole-disk targets.
-            - Unmount all child mounts
-            - Close child crypt mappings
-            - Optional: ask kernel to drop the device (/sys/block/<disk>/device/delete)
-            """
+            """Detach one already-unmounted whole disk at most once per close operation."""
             disk_dev = _top_level_disk(devnode)
             if not disk_dev or (_lsblk_type(disk_dev) or '').strip().lower() != 'disk':
                 return False
 
+            disk_real = os.path.realpath(disk_dev)
+            if disk_real in detach_attempted_disks:
+                log(f"Detach for {disk_dev} was already attempted; not launching another rescue operation.", 'WARN')
+                return False
+            detach_attempted_disks.add(disk_real)
+
             log(f"Close rescue path: {disk_dev} ({reason})", 'WARN')
-
-            # Try unmounting all mounts on the disk subtree.
             targets = _collect_mount_targets_for_device(disk_dev, include_children=True)
-            for mp in targets:
-                res_um = run_command(['umount', mp], sudo=True, check=False, timeout=4)
-                if getattr(res_um, 'returncode', 1) != 0 and force:
-                    _force_kill_mount_holders(mp)
-                    time.sleep(0.2)
-                    res_um = run_command(['umount', mp], sudo=True, check=False, timeout=4)
-                if getattr(res_um, 'returncode', 1) == 0:
-                    cleanup_mountpoint_dir(mp)
-
-            # Try closing child crypt mappings.
-            _close_child_crypt_mappers_for_disk(disk_dev)
+            if targets:
+                log(
+                    f"Refusing kernel detach for {disk_dev}: filesystem remains mounted at "
+                    f"{', '.join(targets)}.",
+                    'ERROR',
+                )
+                return False
+            child_mappers = _collect_child_crypt_mappers_for_disk(disk_dev)
+            if child_mappers:
+                log(
+                    f"Refusing kernel detach for {disk_dev}: LUKS mappings remain open: "
+                    f"{', '.join(child_mappers)}.",
+                    'ERROR',
+                )
+                return False
 
             if not allow_detach:
                 log(f"Rescue completed for {disk_dev} (no kernel detach without --force).", 'WARN')
@@ -5303,7 +5560,23 @@ class DiskMgrShell(cmd.Cmd):
                 log(f"Rescue could not find device-delete path: {delete_path}", 'WARN')
                 return False
 
-            res_del = run_command(['tee', delete_path], input_str="1\n", sudo=True, check=False, timeout=3)
+            # Re-check immediately before deletion; never detach mounted storage.
+            targets = _collect_mount_targets_for_device(disk_dev, include_children=True)
+            if targets:
+                log(
+                    f"Refusing kernel detach for {disk_dev}: mount state changed and now includes "
+                    f"{', '.join(targets)}.",
+                    'ERROR',
+                )
+                return False
+
+            res_del = run_command_hard_timeout(
+                ['tee', delete_path],
+                3,
+                input_str="1\n",
+                sudo=True,
+                check=False,
+            )
             if getattr(res_del, 'returncode', 1) == 0:
                 log(f"Rescue detached {disk_dev} from kernel. Replug to re-discover.", 'WARN')
                 log("Rescue: attempting automatic bus rescan and re-attach...", 'WARN')
@@ -5355,9 +5628,28 @@ class DiskMgrShell(cmd.Cmd):
             return False
 
         def _try_unmount(mp):
-            """Best-effort unmount; in --force mode kill holders and retry once."""
+            """Stop userspace holders, flush, unmount, then wait for kernel recovery."""
+            if not _mount_is_active(mp):
+                cleanup_mountpoint_dir(mp)
+                return True
+
+            holders = _collect_mount_holder_pids(mp)
+            if holders:
+                if force:
+                    _force_kill_mount_holders(mp)
+                    time.sleep(0.5)
+                else:
+                    log(f"Userspace processes are holding {mp}; normal close will not kill them.", 'WARN')
+                    _log_mount_holders(mp)
+
+            _flush_mount(mp)
             log(f"Unmounting {mp}...")
-            res_um = run_command(['umount', mp], sudo=True, check=False)
+            res_um = run_command_hard_timeout(
+                ['umount', mp],
+                8,
+                sudo=True,
+                check=False,
+            )
             if getattr(res_um, 'returncode', 1) == 0:
                 return True
 
@@ -5367,22 +5659,19 @@ class DiskMgrShell(cmd.Cmd):
                 log(f"Unmount failed for {mp}: {err}", 'ERROR')
             else:
                 log(f"Unmount failed for {mp}.", 'ERROR')
-            _log_mount_holders(mp)
-
             busy = ('busy' in err.lower()) or (rc == 32)
-            if force and busy:
-                _force_kill_mount_holders(mp)
-                time.sleep(0.2)
-                log(f"Retrying unmount for {mp} after --force kill...")
-                res_retry = run_command(['umount', mp], sudo=True, check=False)
-                if getattr(res_retry, 'returncode', 1) == 0:
-                    return True
-                err2 = (getattr(res_retry, 'stderr', '') or '').strip()
-                if err2:
-                    log(f"Unmount retry failed for {mp}: {err2}", 'ERROR')
-                else:
-                    log(f"Unmount retry failed for {mp}.", 'ERROR')
+            remaining_holders = _collect_mount_holder_pids(mp)
+            if remaining_holders:
                 _log_mount_holders(mp)
+                if force and busy:
+                    log(
+                        f"Userspace holders remain after --force for {mp}; refusing kernel detach while mounted.",
+                        'ERROR',
+                    )
+                return False
+
+            if busy or rc == 124 or mp in flush_timed_out_mounts:
+                return _wait_for_kernel_release(mp, retry_unmount=(rc != 124))
             return False
 
         # Support discovery IDs (#N) from the latest `list` output.
@@ -5406,14 +5695,13 @@ class DiskMgrShell(cmd.Cmd):
                 except Exception:
                     continue
             if mapped_name:
-                return self.do_close(mapped_name)
+                delegated = f"{mapped_name} --force" if force else mapped_name
+                return self.do_close(delegated)
 
             # Otherwise perform a direct close by device path.
             if self._block_if_root_drive(dev_from_id, f"close {target}"):
                 return
 
-            run_command(['sudo', '-v'])  # Refresh sudo
-            res_sync = run_command(['sync'], sudo=True, check=False, timeout=8)
             dev_from_id_type = (_lsblk_type(dev_from_id) or '').strip().lower()
             dev_from_id_persistent = None
             if dev_from_id_type == 'disk':
@@ -5423,16 +5711,6 @@ class DiskMgrShell(cmd.Cmd):
                         dev_from_id_persistent = pdp
                 except Exception:
                     dev_from_id_persistent = None
-            if getattr(res_sync, 'returncode', 0) == 124:
-                log("sync timed out; continuing close attempt.", 'WARN')
-                if dev_from_id_type == 'disk':
-                    _attempt_rescue_for_disk(
-                        dev_from_id,
-                        "sync timed out",
-                        allow_detach=force,
-                        persistent_hint=dev_from_id_persistent
-                    )
-
             if dev_from_id_type != 'disk' and _sysfs_is_whole_disk(dev_from_id):
                 dev_from_id_type = 'disk'
             targets = _collect_mount_targets_for_device(
@@ -5442,14 +5720,6 @@ class DiskMgrShell(cmd.Cmd):
             unmounted_targets = []
             for mp in targets:
                 if not _try_unmount(mp):
-                    if dev_from_id_type == 'disk':
-                        if _attempt_rescue_for_disk(
-                            dev_from_id,
-                            f"failed to unmount {mp}",
-                            allow_detach=force,
-                            persistent_hint=dev_from_id_persistent
-                        ):
-                            return
                     log("Close aborted: target is still mounted/in use.", 'ERROR')
                     return
                 unmounted_targets.append(mp)
@@ -5459,6 +5729,21 @@ class DiskMgrShell(cmd.Cmd):
             # For whole-disk ID targets, also close any open child LUKS mappings.
             if dev_from_id_type == 'disk':
                 _close_child_crypt_mappers_for_disk(dev_from_id)
+                remaining_mappers = _collect_child_crypt_mappers_for_disk(dev_from_id)
+                if remaining_mappers:
+                    log(
+                        f"Close aborted: child LUKS mappings remain open: {', '.join(remaining_mappers)}.",
+                        'ERROR',
+                    )
+                    return
+
+                if force and (close_state['flush_timed_out'] or close_state['kernel_blocked']):
+                    _attempt_rescue_for_disk(
+                        dev_from_id,
+                        "filesystem recovered after stalled kernel I/O",
+                        allow_detach=True,
+                        persistent_hint=dev_from_id_persistent,
+                    )
 
             # For non-disk ID targets, do not implicitly lock LUKS.
             # This path is used heavily for payload/embedded filesystem rows; keep it as unmount-only.
@@ -5504,18 +5789,6 @@ class DiskMgrShell(cmd.Cmd):
         mapper_path = f"/dev/mapper/{name}"
         mount_guess = f"/media/{os.environ.get('USER', 'root')}/{name}"
 
-        run_command(['sudo', '-v']) # Refresh sudo
-        res_sync = run_command(['sync'], sudo=True, check=False, timeout=8)
-        if getattr(res_sync, 'returncode', 0) == 124:
-            log("sync timed out; continuing close attempt.", 'WARN')
-            if src_disk_for_rescue:
-                _attempt_rescue_for_disk(
-                    src_disk_for_rescue,
-                    "sync timed out",
-                    allow_detach=force,
-                    persistent_hint=src_persistent_for_rescue
-                )
-
         # Unmount
         unmounted = False
         unmounted_targets = []
@@ -5524,14 +5797,6 @@ class DiskMgrShell(cmd.Cmd):
         if targets:
             for mp in targets:
                 if not _try_unmount(mp):
-                    if src_disk_for_rescue:
-                        if _attempt_rescue_for_disk(
-                            src_disk_for_rescue,
-                            f"failed to unmount {mp}",
-                            allow_detach=force,
-                            persistent_hint=src_persistent_for_rescue
-                        ):
-                            return
                     log("Close aborted: mapper target is still mounted/in use.", 'ERROR')
                     return
                 unmounted_targets.append(mp)
@@ -5550,14 +5815,6 @@ class DiskMgrShell(cmd.Cmd):
                 if targets:
                     for mp in targets:
                         if not _try_unmount(mp):
-                            if src_disk_for_rescue:
-                                if _attempt_rescue_for_disk(
-                                    src_disk_for_rescue,
-                                    f"failed to unmount {mp}",
-                                    allow_detach=force,
-                                    persistent_hint=src_persistent_for_rescue
-                                ):
-                                    return
                             log("Close aborted: source target is still mounted/in use.", 'ERROR')
                             return
                         unmounted_targets.append(mp)
@@ -5567,14 +5824,6 @@ class DiskMgrShell(cmd.Cmd):
         if not unmounted:
             if run_command(['findmnt', '-rn', '-M', mount_guess], check=False).returncode == 0:
                  if not _try_unmount(mount_guess):
-                     if src_disk_for_rescue:
-                         if _attempt_rescue_for_disk(
-                             src_disk_for_rescue,
-                             f"failed to unmount {mount_guess}",
-                             allow_detach=force,
-                             persistent_hint=src_persistent_for_rescue
-                         ):
-                             return
                      log("Close aborted: guessed target is still mounted/in use.", 'ERROR')
                      return
                  unmounted_targets.append(mount_guess)
@@ -5602,7 +5851,17 @@ class DiskMgrShell(cmd.Cmd):
         # Close
         if os.path.exists(mapper_path):
             log(f"Closing mapping {name}...")
-            run_command(['cryptsetup', 'close', name], sudo=True)
+            res_close = run_command_hard_timeout(
+                ['cryptsetup', 'close', name],
+                8,
+                sudo=True,
+                check=False,
+            )
+            if getattr(res_close, 'returncode', 1) != 0:
+                err = (getattr(res_close, 'stderr', '') or '').strip()
+                detail = f": {err}" if err else ""
+                log(f"Failed to close mapping {name}{detail}.", 'ERROR')
+                return
             log("Closed.")
         else:
             if unmounted_targets:
@@ -5611,6 +5870,27 @@ class DiskMgrShell(cmd.Cmd):
                 log(f"Closed {child_closed} child LUKS mapping{'s' if child_closed != 1 else ''}.")
             else:
                 log("Mapping not open or already closed.")
+
+        if force and src_disk_for_rescue and (close_state['flush_timed_out'] or close_state['kernel_blocked']):
+            remaining_mappers = _collect_child_crypt_mappers_for_disk(src_disk_for_rescue)
+            remaining_mounts = _collect_mount_targets_for_device(src_disk_for_rescue, include_children=True)
+            if remaining_mappers:
+                log(
+                    f"Skipping kernel detach: LUKS mappings remain open: {', '.join(remaining_mappers)}.",
+                    'WARN',
+                )
+            elif remaining_mounts:
+                log(
+                    f"Skipping kernel detach: filesystems remain mounted at {', '.join(remaining_mounts)}.",
+                    'WARN',
+                )
+            else:
+                _attempt_rescue_for_disk(
+                    src_disk_for_rescue,
+                    "filesystem recovered after stalled kernel I/O",
+                    allow_detach=True,
+                    persistent_hint=src_persistent_for_rescue,
+                )
 
     def do_label(self, arg):
         '''Get or set the filesystem label of an OPEN disk: label <name> [new_label] [--fstab]
