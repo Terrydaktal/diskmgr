@@ -26,7 +26,7 @@ except ImportError:
 # Configuration
 MAP_FILENAME = 'diskmap.tsv'
 PASSGEN_BIN = 'passgen'
-VERSION = '3.6.5'
+VERSION = '3.6.6'
 HISTORY_FILE_ENV = 'DISKMGR_HISTORY'
 DEFAULT_HISTORY_FILE = Path.home() / '.local' / 'state' / 'diskmgr' / 'history'
 MAX_HISTORY_ENTRIES = 5000

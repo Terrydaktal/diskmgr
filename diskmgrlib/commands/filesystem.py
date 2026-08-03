@@ -1053,15 +1053,21 @@ class FilesystemCommands:
           --label <label>   Set a different internal filesystem label (other than <name>)
           --luks            Encrypt target first with LUKS2, then format payload filesystem.
                             PBKDF defaults: argon2id, memory=4GiB, threads=4, time=8.
+          --reformat-existing
+                            Explicitly allow replacement of an existing filesystem/signature.
+                            Requires an additional exact UUID or label confirmation.
           --detached-header [FILE]
                             Store LUKS header detached from the target device.
                             If FILE is omitted: ~/.local/share/diskmgr/<name>
 
         UNDER THE HOOD:
-        1.  Safety: Refuses to run if anything is mounted on the target device tree.
+        1.  Safety: Probes the target and every child with wipefs/blkid, checks all
+            mounts, swaps, kernel holders, and mapper/RAID memberships before asking
+            for confirmation. Probe errors fail closed.
         2.  Disk Type Policy:
             - If target is a whole disk, it must be unpartitioned (no GPT/MBR table present).
             - If target is a partition, format is applied directly within that partition.
+            - Existing content requires --reformat-existing and an exact UUID/label.
         3.  LUKS Format (only when --luks is used):
             - Uses 'passgen' to generate a master key.
             - Runs 'cryptsetup luksFormat' with LUKS2 encryption
@@ -1073,13 +1079,19 @@ class FilesystemCommands:
             - (ext4 only): Reclaims the 5% reserved space for root using 'tune2fs -m 0'.
         5.  Persistence: Adds the new disk's PDP to diskmap.tsv automatically (best-effort).
 
-        Note: This is a DESTRUCTIVE operation. You must type both the resolved device path and persistent path to proceed.
+        Note: This is a DESTRUCTIVE operation. You must type the resolved device,
+        persistent path, and PCI path to proceed.
         '''
         parser = CmdArgumentParser(prog='format', add_help=False)
         parser.add_argument('args', nargs=1, help='<name>')
         parser.add_argument('--fs', default='ext4', choices=['ext4', 'xfs', 'btrfs', 'fat32'])
         parser.add_argument('--label', help='Filesystem label')
         parser.add_argument('--luks', action='store_true', help='Encrypt target with LUKS2 before mkfs')
+        parser.add_argument(
+            '--reformat-existing',
+            action='store_true',
+            help='Allow replacement of detected existing content after UUID/label confirmation',
+        )
         parser.add_argument(
             '--detached-header',
             nargs='?',
@@ -1227,49 +1239,120 @@ class FilesystemCommands:
         if op_name != input_token:
             log(f"Input token '{input_token}' resolved to operation name '{op_name}'.")
 
-        # Safety checks
-        if not self.extensive_confirm(f"{input_token} ({real_target})"):
+        # Run all read-only guards before asking for destructive confirmation.
+        preflight = self._format_safety_preflight(real_target)
+        if not preflight.get('ok'):
+            for error in preflight.get('errors') or ['unknown safety probe failure']:
+                log(f"FORMAT BLOCKED: safety probe failed: {error}", 'ERROR')
+            return
+        format_lock_fd = preflight.get('lock_fd')
+        log(f"Exclusive non-blocking device lock acquired for {real_target}.")
+        self._format_print_preflight(preflight)
+
+        active = preflight.get('active') or {}
+        if any(active.get(key) for key in ('mounts', 'swaps', 'holders', 'memberships')):
+            log(f"OPERATION BLOCKED: {real_target} or a child is active. Unmount/close it and retry.", 'ERROR')
+            self._format_release_device_lock(format_lock_fd)
+            return
+
+        dev_type = preflight.get('dev_type') or '-'
+        if dev_type not in ('disk', 'part'):
+            log(f"Unsupported target type for format: {dev_type or 'unknown'}. Map a disk or partition.", 'ERROR')
+            self._format_release_device_lock(format_lock_fd)
+            return
+
+        pttype = preflight.get('pttype') or ''
+        if dev_type == 'disk' and pttype:
+            log(f"OPERATION BLOCKED: {real_target} is partitioned ({pttype}). Refusing to format a whole-disk superfloppy over an existing partition table.", 'ERROR')
+            log("Use erase <name> first to wipe partition metadata, then run format again.", 'ERROR')
+            self._format_release_device_lock(format_lock_fd)
+            return
+
+        signatures = preflight.get('signatures') or []
+        luks_signature = any(
+            str(sig.get('type') or '').lower() in ('crypto_luks', 'luks', 'luks1', 'luks2')
+            for sig in signatures
+        )
+        if args.luks and luks_signature:
+            log(f"OPERATION BLOCKED: {real_target} is already a LUKS container. Refusing to run luksFormat again.", 'ERROR')
+            self._format_release_device_lock(format_lock_fd)
+            return
+        if signatures and not args.reformat_existing:
+            log(f"OPERATION BLOCKED: existing content was detected on {real_target}.", 'ERROR')
+            log("Use --reformat-existing and confirm its UUID/label, or run erase first.", 'ERROR')
+            self._format_release_device_lock(format_lock_fd)
+            return
+
+        try:
+            confirmed = self.extensive_confirm(f"{input_token} ({real_target})")
+        except BaseException:
+            self._format_release_device_lock(format_lock_fd)
+            raise
+        if not confirmed:
+            self._format_release_device_lock(format_lock_fd)
+            return
+        try:
+            existing_confirmed = self._format_existing_confirmation(signatures) if signatures else True
+        except BaseException:
+            self._format_release_device_lock(format_lock_fd)
+            raise
+        if not existing_confirmed:
+            self._format_release_device_lock(format_lock_fd)
+            return
+
+        # Re-read every safety field after confirmation. The second probe also
+        # repeats the non-blocking wipefs lock check immediately before format.
+        postflight = self._format_safety_preflight(real_target, lock_fd=format_lock_fd)
+        if not postflight.get('ok'):
+            for error in postflight.get('errors') or ['unknown post-confirmation probe failure']:
+                log(f"OPERATION BLOCKED after confirmation: {error}", 'ERROR')
+            self._format_release_device_lock(format_lock_fd)
+            return
+        changed = self._format_identity_changed(preflight['identity'], postflight['identity'])
+        if changed:
+            log(f"OPERATION BLOCKED: device identity changed after confirmation ({', '.join(changed)}).", 'ERROR')
+            self._format_release_device_lock(format_lock_fd)
+            return
+        if self._format_signatures_changed(preflight.get('signatures'), postflight.get('signatures')):
+            log("OPERATION BLOCKED: detected content changed after confirmation. Retry the format operation.", 'ERROR')
+            self._format_release_device_lock(format_lock_fd)
+            return
+        post_active = postflight.get('active') or {}
+        if any(post_active.get(key) for key in ('mounts', 'swaps', 'holders', 'memberships')):
+            log("OPERATION BLOCKED: the target became active while confirmation was in progress.", 'ERROR')
+            self._format_print_preflight(postflight)
+            self._format_release_device_lock(format_lock_fd)
             return
 
         run_command(['sudo', '-v'])
 
-        # Refuse if anything on the target device tree is mounted.
-        try:
-            res_m = run_command(['lsblk', '-nr', '-o', 'MOUNTPOINT', real_target], check=False)
-            mounts = [ln.strip() for ln in (getattr(res_m, 'stdout', '') or '').splitlines() if ln.strip()]
-            if mounts:
-                log(f"OPERATION BLOCKED: {real_target} has mounted filesystems ({', '.join(mounts)}). Unmount/close it first.", 'ERROR')
-                return
-        except Exception:
-            pass
-
         crypt_target = real_target
-        dev_type = _lsblk_type(real_target)
-
-        if dev_type not in ('disk', 'part'):
-            log(f"Unsupported target type for format: {dev_type or 'unknown'}. Map a disk or partition.", 'ERROR')
-            return
 
         # Superfloppy mode only: whole disks must be unpartitioned.
         if dev_type == 'disk':
-            try:
-                res_pt = run_command(['lsblk', '-no', 'PTTYPE', real_target], check=False)
-                pttype = (getattr(res_pt, 'stdout', '') or '').strip().lower()
-            except Exception:
-                pttype = ""
-            if pttype:
-                log(f"OPERATION BLOCKED: {real_target} is partitioned ({pttype}). Refusing to format a whole-disk superfloppy over an existing partition table.", 'ERROR')
-                log("Use erase <name> first to wipe partition metadata, then run format again.", 'ERROR')
-                return
             # Ensure stale child partitions from prior layouts are dropped before
             # whole-disk superfloppy/LUKS formatting.
             self._refresh_kernel_partition_state(real_target, drop_partitions=True)
 
-        if args.luks:
-            res_is_luks = run_command(['cryptsetup', 'isLuks', crypt_target], sudo=True, check=False)
-            if getattr(res_is_luks, 'returncode', 1) == 0:
-                log(f"OPERATION BLOCKED: {crypt_target} is already a LUKS container. Refusing to run luksFormat again.", 'ERROR')
-                return
+        # Partition-state refresh can expose a changed node or a new holder. Do
+        # one final read-only validation while the device lock is still held.
+        final_preflight = self._format_safety_preflight(real_target, lock_fd=format_lock_fd)
+        if not final_preflight.get('ok'):
+            for error in final_preflight.get('errors') or ['unknown final safety probe failure']:
+                log(f"OPERATION BLOCKED immediately before format: {error}", 'ERROR')
+            self._format_release_device_lock(format_lock_fd)
+            return
+        final_changed = self._format_identity_changed(postflight['identity'], final_preflight['identity'])
+        if final_changed or self._format_signatures_changed(postflight.get('signatures'), final_preflight.get('signatures')):
+            log("OPERATION BLOCKED immediately before format: device identity or content changed.", 'ERROR')
+            self._format_release_device_lock(format_lock_fd)
+            return
+        final_active = final_preflight.get('active') or {}
+        if any(final_active.get(key) for key in ('mounts', 'swaps', 'holders', 'memberships')):
+            log("OPERATION BLOCKED immediately before format: target became active.", 'ERROR')
+            self._format_print_preflight(final_preflight)
+            self._format_release_device_lock(format_lock_fd)
+            return
 
         if args.luks:
             # LUKS Format
@@ -1300,6 +1383,7 @@ class FilesystemCommands:
                 )
             except Exception as e:
                 log(f"LUKS Format failed: {e}", 'ERROR')
+                self._format_release_device_lock(format_lock_fd)
                 return
 
             # Open
@@ -1347,7 +1431,8 @@ class FilesystemCommands:
                 '/sbin/mkfs.btrfs',
                 '/usr/local/sbin/mkfs.btrfs',
             ]) or 'mkfs.btrfs'
-            # -f required because we just wipefs'ed; still safer to be explicit.
+            # -f is explicit because this operation is only reachable after the
+            # blank-target or reformat-existing confirmations above.
             run_command([mkfs_btrfs, '-f', '-L', label, fs_target], sudo=True)
         elif args.fs == 'fat32':
             mkfs_vfat = (
@@ -1386,12 +1471,25 @@ class FilesystemCommands:
 
         # Safety Check: Is this mountpoint already in use by another device?
         res_check = run_command(['findmnt', '-rn', '-M', mountpoint], check=False)
+        if res_check.returncode not in (0, 1):
+            log(f"MOUNT BLOCKED: could not verify whether {mountpoint} is already in use.", 'ERROR')
+            self._format_release_device_lock(format_lock_fd)
+            return
         if res_check.returncode == 0:
-            res_src = run_command(['findmnt', '-rn', '-M', mountpoint, '-o', 'SOURCE'], capture_output=True)
+            res_src = run_command(
+                ['findmnt', '-rn', '-M', mountpoint, '-o', 'SOURCE'],
+                capture_output=True,
+                check=False,
+            )
+            if res_src.returncode != 0:
+                log(f"MOUNT BLOCKED: could not resolve the existing source for {mountpoint}.", 'ERROR')
+                self._format_release_device_lock(format_lock_fd)
+                return
             current_src = os.path.realpath(res_src.stdout.strip())
             if current_src != os.path.realpath(fs_target):
                 log(f"MOUNT BLOCKED: Path {mountpoint} is already in use by {current_src}.", 'ERROR')
                 log("Disk was initialized successfully, but could not be mounted at the preferred path.", 'WARN')
+                self._format_release_device_lock(format_lock_fd)
                 return
 
         self._mount_device(fs_target, mountpoint, use_fstab=use_fstab_mount)
@@ -1411,3 +1509,4 @@ class FilesystemCommands:
             log(f"Added mapping: {op_name} -> {stable_path}")
 
         log("Disk initialization complete.")
+        self._format_release_device_lock(format_lock_fd)

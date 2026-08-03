@@ -1,5 +1,7 @@
 """Shared discovery, mount, formatting, and target-resolution helpers."""
 
+import fcntl
+
 from .common import *
 
 
@@ -1786,6 +1788,485 @@ class ShellHelpersMixin:
         except Exception:
             pass
         return False
+
+    def _format_device_tree(self, real_target):
+        """Return the target and every lsblk child, or a probe error."""
+        res = run_command_hard_timeout(
+            ['lsblk', '-nr', '-o', 'NAME,TYPE', real_target],
+            5,
+            check=False,
+        )
+        if getattr(res, 'returncode', 1) != 0:
+            detail = (getattr(res, 'stderr', '') or '').strip()
+            return None, detail or f"lsblk exited with status {getattr(res, 'returncode', '?')}"
+
+        devices = []
+        missing_children = []
+        for raw in (getattr(res, 'stdout', '') or '').splitlines():
+            fields = raw.strip().split()
+            if len(fields) < 2:
+                continue
+            name, dtype = fields[0], fields[1].lower()
+            path = name if name.startswith('/dev/') else f'/dev/{name}'
+            if os.path.exists(path):
+                devices.append({'path': os.path.realpath(path), 'type': dtype})
+            else:
+                missing_children.append(path)
+
+        if missing_children:
+            return None, "lsblk reported child device nodes that are unavailable: " + ', '.join(missing_children)
+
+        target_real = os.path.realpath(real_target)
+        if not any(d['path'] == target_real for d in devices):
+            devices.insert(0, {'path': target_real, 'type': _lsblk_type(target_real).lower()})
+        unique = []
+        seen = set()
+        for item in devices:
+            if item['path'] in seen:
+                continue
+            seen.add(item['path'])
+            unique.append(item)
+        if not unique:
+            return None, "lsblk returned no target device"
+        return unique, ""
+
+    def _format_identity_snapshot(self, real_target):
+        """Capture the identity fields that must remain stable while confirming format."""
+        real_target = os.path.realpath(real_target)
+        if not os.path.exists(real_target):
+            return None, f"device disappeared: {real_target}"
+
+        kname = os.path.basename(real_target)
+        sysfs = Path('/sys/class/block') / kname
+        errors = []
+
+        def _read_sysfs(relative, label, required=True):
+            try:
+                value = (sysfs / relative).read_text().strip()
+            except Exception as exc:
+                value = ''
+                if required:
+                    errors.append(f"{label}: {exc}")
+            if required and not value:
+                errors.append(f"{label}: no value")
+            return value
+
+        sectors = _read_sysfs('size', 'device size')
+        logical = _read_sysfs('queue/logical_block_size', 'logical sector size')
+        physical = _read_sysfs('queue/physical_block_size', 'physical sector size')
+        try:
+            size_bytes = int(sectors, 10) * 512
+        except (TypeError, ValueError):
+            size_bytes = 0
+            errors.append('device size: invalid sector count')
+
+        try:
+            st = os.stat(real_target)
+            major_minor = f"{os.major(st.st_rdev)}:{os.minor(st.st_rdev)}"
+        except Exception as exc:
+            major_minor = ''
+            errors.append(f"major/minor: {exc}")
+
+        props = {}
+        udev = run_command_hard_timeout(
+            ['udevadm', 'info', '--query=property', '--name', real_target],
+            5,
+            check=False,
+        )
+        if getattr(udev, 'returncode', 1) == 0:
+            for raw in (getattr(udev, 'stdout', '') or '').splitlines():
+                if '=' in raw:
+                    key, value = raw.split('=', 1)
+                    props[key.strip()] = value.strip()
+        elif getattr(udev, 'returncode', 1) not in (1,):
+            errors.append(
+                f"udevadm identity probe failed (status {getattr(udev, 'returncode', '?')})"
+            )
+
+        dtype = (_lsblk_type(real_target) or '').strip().lower()
+        if dtype not in ('disk', 'part'):
+            if _sysfs_is_whole_disk(real_target):
+                dtype = 'disk'
+            elif not dtype:
+                errors.append('device type: unavailable')
+
+        wwn_res = run_command_hard_timeout(
+            ['lsblk', '--nodeps', '-no', 'WWN', real_target],
+            5,
+            check=False,
+        )
+        wwn = (getattr(wwn_res, 'stdout', '') or '').strip().splitlines()
+        wwn = wwn[0].strip() if wwn else (props.get('ID_WWN') or '')
+        pdp = self.find_persistent_path(kname, wwn=wwn, type_=dtype or 'disk')
+        serial_path = self.find_serial_wwid_path(kname, type_=dtype or 'disk')
+        pci_path = self.find_pci_path(kname, type_=dtype or 'disk')
+
+        # USB devices can lack a true WWN or PCI by-id link. The persistent
+        # model/serial path remains a useful identity, but missing required
+        # values are still displayed and compared when available.
+        serial = props.get('ID_SERIAL') or props.get('ID_SERIAL_SHORT') or serial_path
+        pci_identity = pci_path if pci_path and pci_path != '-' else (props.get('ID_PATH') or '-')
+        snapshot = {
+            'device': real_target,
+            'kname': kname,
+            'wwn': wwn or '-',
+            'serial': serial or '-',
+            'pci': pci_identity or '-',
+            'major_minor': major_minor or '-',
+            'size_bytes': size_bytes,
+            'logical_sector_bytes': logical or '-',
+            'physical_sector_bytes': physical or '-',
+            'persistent_path': pdp or '-',
+            'serial_path': serial_path or '-',
+            'pci_path': pci_path or '-',
+            'type': dtype or '-',
+        }
+        if snapshot['persistent_path'] == '-':
+            errors.append('persistent device path: unavailable')
+        if size_bytes <= 0:
+            errors.append('device size: zero or unavailable')
+        return snapshot, '; '.join(errors)
+
+    def _format_probe_wipefs(self, device, use_lock=True):
+        wipefs_bin = _find_tool_or_common_paths('wipefs', [
+            '/usr/sbin/wipefs', '/sbin/wipefs', '/usr/bin/wipefs', '/bin/wipefs'
+        ]) or 'wipefs'
+        command = [wipefs_bin, '--no-act', '--json']
+        if use_lock:
+            command.append('--lock=nonblock')
+        command.append(device)
+        res = run_command_hard_timeout(command, 8, check=False)
+        rc = getattr(res, 'returncode', 1)
+        if rc != 0:
+            detail = (getattr(res, 'stderr', '') or '').strip()
+            return None, f"wipefs probe failed for {device} (status {rc})" + (f": {detail}" if detail else '')
+        try:
+            data = json.loads(getattr(res, 'stdout', '') or '{}')
+        except json.JSONDecodeError as exc:
+            return None, f"wipefs returned invalid JSON for {device}: {exc}"
+        signatures = data.get('signatures', [])
+        if not isinstance(signatures, list):
+            return None, f"wipefs returned an invalid signature list for {device}"
+        return signatures, ""
+
+    def _format_probe_blkid(self, device):
+        res = run_command_hard_timeout(
+            ['blkid', '--probe', '--output', 'export', device],
+            8,
+            check=False,
+        )
+        rc = getattr(res, 'returncode', 1)
+        stdout = getattr(res, 'stdout', '') or ''
+        stderr = (getattr(res, 'stderr', '') or '').strip()
+        # blkid uses a non-zero status for an unrecognised blank device. Any
+        # diagnostic output indicating I/O/permission/device failure is not a
+        # blank result and must fail closed.
+        bad_words = ('input/output error', 'permission denied', 'cannot open', 'timed out', 'no such device')
+        if rc != 0 and (stdout.strip() or any(word in stderr.lower() for word in bad_words)):
+            return None, f"blkid probe failed for {device} (status {rc})" + (f": {stderr}" if stderr else '')
+        values = {}
+        for raw in stdout.splitlines():
+            if '=' in raw:
+                key, value = raw.split('=', 1)
+                values[key.strip()] = value.strip()
+        if rc != 0 and not values and stderr:
+            # A normal blank probe returns status 2 with no output. Any
+            # diagnostic text means the probe did not establish that the device
+            # is safely blank, so fail closed.
+            return None, f"blkid probe failed for {device} (status {rc}): {stderr}"
+        return values, ""
+
+    def _format_probe_contents(self, devices, use_lock=True):
+        """Probe target/children and return normalized existing signatures."""
+        found = []
+        errors = []
+        seen = set()
+        for item in devices:
+            device = item['path']
+            wipe_signatures, error = self._format_probe_wipefs(device, use_lock=use_lock)
+            if error:
+                errors.append(error)
+            else:
+                for sig in wipe_signatures or []:
+                    if not isinstance(sig, dict):
+                        errors.append(f"wipefs returned an invalid signature for {device}")
+                        continue
+                    entry = {
+                        'device': str(sig.get('device') or device),
+                        'type': str(sig.get('type') or 'unknown'),
+                        'label': str(sig.get('label') or '-'),
+                        'uuid': str(sig.get('uuid') or '-'),
+                        'offset': str(sig.get('offset') or '-'),
+                        'source': 'wipefs',
+                    }
+                    key = tuple(entry.get(k, '') for k in ('device', 'type', 'label', 'uuid'))
+                    if key not in seen:
+                        seen.add(key)
+                        found.append(entry)
+
+            blkid_values, error = self._format_probe_blkid(device)
+            if error:
+                errors.append(error)
+            elif blkid_values:
+                for key in ('PTTYPE', 'TYPE', 'USAGE'):
+                    value = blkid_values.get(key)
+                    if not value:
+                        continue
+                    entry = {
+                        'device': blkid_values.get('DEVNAME') or device,
+                        'type': value if key != 'USAGE' else f"{value} ({blkid_values.get('TYPE', 'unknown')})",
+                        'label': (blkid_values.get('PTLABEL') if key == 'PTTYPE' else blkid_values.get('LABEL')) or '-',
+                        'uuid': (blkid_values.get('PTUUID') if key == 'PTTYPE' else blkid_values.get('UUID')) or '-',
+                        'offset': '-',
+                        'source': 'blkid',
+                    }
+                    sig_key = tuple(entry.get(k, '') for k in ('device', 'type', 'label', 'uuid'))
+                    if sig_key not in seen:
+                        seen.add(sig_key)
+                        found.append(entry)
+        return found, errors
+
+    def _format_active_use(self, devices):
+        """Check mounts, swaps, holders, and active mapper-style consumers."""
+        mounts = []
+        swaps = []
+        holders = []
+        memberships = []
+        errors = []
+        device_paths = {os.path.realpath(item['path']) for item in devices}
+
+        for item in devices:
+            device = item['path']
+            lsblk = run_command_hard_timeout(
+                ['lsblk', '--nodeps', '-nr', '-o', 'MOUNTPOINTS', device],
+                5,
+                check=False,
+            )
+            if getattr(lsblk, 'returncode', 1) != 0:
+                errors.append(f"lsblk mountpoint probe failed for {device}")
+            else:
+                for mountpoint in (getattr(lsblk, 'stdout', '') or '').splitlines():
+                    mountpoint = mountpoint.strip()
+                    if mountpoint and mountpoint != '-':
+                        mounts.append((device, mountpoint))
+
+            findmnt = run_command_hard_timeout(
+                ['findmnt', '-rn', '-S', device, '-o', 'TARGET,SOURCE,FSTYPE'],
+                5,
+                check=False,
+            )
+            if getattr(findmnt, 'returncode', 1) not in (0, 1):
+                errors.append(f"findmnt probe failed for {device}")
+            elif getattr(findmnt, 'returncode', 1) == 0:
+                for row in (getattr(findmnt, 'stdout', '') or '').splitlines():
+                    row = row.strip()
+                    if row:
+                        mounts.append((device, row))
+
+            kname = os.path.basename(device)
+            holder_dir = Path('/sys/class/block') / kname / 'holders'
+            try:
+                if holder_dir.exists():
+                    for holder in holder_dir.iterdir():
+                        holders.append((device, holder.name))
+            except OSError as exc:
+                errors.append(f"holder probe failed for {device}: {exc}")
+
+            # An active crypt/LVM/MD/multipath child is itself unsafe even when
+            # its mountpoint is not visible through the parent node.
+            dtype = item.get('type', '').lower()
+            if dtype in ('crypt', 'dm', 'lvm', 'md', 'mpath', 'raid0', 'raid1', 'raid10', 'raid5', 'raid6'):
+                memberships.append((device, dtype))
+
+        try:
+            swap_lines = Path('/proc/swaps').read_text().splitlines()[1:]
+        except Exception as exc:
+            errors.append(f"/proc/swaps probe failed: {exc}")
+            swap_lines = []
+        for raw in swap_lines:
+            fields = raw.split()
+            if not fields:
+                continue
+            source = fields[0]
+            source_real = os.path.realpath(source)
+            if source_real in device_paths:
+                swaps.append(source)
+
+        return {
+            'mounts': mounts,
+            'swaps': swaps,
+            'holders': holders,
+            'memberships': memberships,
+            'errors': errors,
+        }
+
+    def _format_acquire_device_lock(self, real_target):
+        """Acquire a non-blocking advisory lock that lasts through formatting."""
+        flags = os.O_RDONLY | getattr(os, 'O_CLOEXEC', 0)
+        fd = None
+        try:
+            fd = os.open(os.path.realpath(real_target), flags)
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return fd, ""
+        except BlockingIOError:
+            try:
+                os.close(fd)
+            except Exception:
+                pass
+            return None, "another process owns the target device lock"
+        except Exception as exc:
+            try:
+                os.close(fd)
+            except Exception:
+                pass
+            return None, f"could not acquire target device lock: {exc}"
+
+    @staticmethod
+    def _format_release_device_lock(lock_fd):
+        if lock_fd is None:
+            return
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        except Exception:
+            pass
+        try:
+            os.close(lock_fd)
+        except Exception:
+            pass
+
+    def _format_safety_preflight(self, real_target, lock_fd=None):
+        """Run all read-only format guards and return a structured snapshot."""
+        identity, error = self._format_identity_snapshot(real_target)
+        if error:
+            return {'ok': False, 'errors': [f"identity probe failed: {error}"]}
+        devices, error = self._format_device_tree(real_target)
+        if error:
+            return {'ok': False, 'errors': [error]}
+
+        dev_type = identity.get('type') or '-'
+        pttype_res = run_command_hard_timeout(
+            ['lsblk', '--nodeps', '-no', 'PTTYPE', real_target],
+            5,
+            check=False,
+        )
+        if getattr(pttype_res, 'returncode', 1) != 0:
+            return {'ok': False, 'errors': [f"partition-table probe failed for {real_target}"]}
+        pttype = (getattr(pttype_res, 'stdout', '') or '').strip().lower()
+
+        signatures, probe_errors = self._format_probe_contents(devices, use_lock=lock_fd is None)
+        active = self._format_active_use(devices)
+        errors = list(probe_errors) + list(active.get('errors') or [])
+        if errors:
+            return {
+                'ok': False,
+                'errors': errors,
+                'identity': identity,
+                'devices': devices,
+                'signatures': signatures,
+                'active': active,
+                'pttype': pttype,
+                'dev_type': dev_type,
+            }
+        if lock_fd is None:
+            lock_fd, lock_error = self._format_acquire_device_lock(real_target)
+            if lock_error:
+                return {
+                    'ok': False,
+                    'errors': [lock_error],
+                    'identity': identity,
+                    'devices': devices,
+                    'signatures': signatures,
+                    'active': active,
+                    'pttype': pttype,
+                    'dev_type': dev_type,
+                }
+        return {
+            'ok': True,
+            'errors': [],
+            'lock_fd': lock_fd,
+            'identity': identity,
+            'devices': devices,
+            'signatures': signatures,
+            'active': active,
+            'pttype': pttype,
+            'dev_type': dev_type,
+        }
+
+    def _format_print_preflight(self, preflight):
+        """Print the existing-content and active-use summary before confirmation."""
+        identity = preflight.get('identity') or {}
+        if identity:
+            print(f"\n{Colors.BOLD}Identity snapshot:{Colors.ENDC}")
+            print(f"  WWN: {identity.get('wwn', '-')}  Serial: {identity.get('serial', '-')}  PCI: {identity.get('pci', '-')}")
+            print(
+                f"  Major:Minor: {identity.get('major_minor', '-')}  "
+                f"Size: {identity.get('size_bytes', 0):,} bytes  "
+                f"Sector: L{identity.get('logical_sector_bytes', '-')} / P{identity.get('physical_sector_bytes', '-')}"
+            )
+        signatures = preflight.get('signatures') or []
+        if signatures:
+            print(f"\n{Colors.WARNING}Existing content/signatures detected:{Colors.ENDC}")
+            for sig in signatures:
+                print(
+                    f"  {sig.get('device', '-')}  type={sig.get('type', '-')}"
+                    f"  label={sig.get('label', '-')}  uuid={sig.get('uuid', '-')}"
+                )
+        else:
+            print(f"\n{Colors.OKGREEN}Existing content/signatures: none detected on target or children.{Colors.ENDC}")
+
+        if preflight.get('pttype'):
+            print(f"  partition table: {preflight['pttype']}")
+        active = preflight.get('active') or {}
+        if active.get('mounts'):
+            print(f"{Colors.FAIL}Active mounts:{Colors.ENDC}")
+            for device, mount in active['mounts']:
+                print(f"  {device}: {mount}")
+        if active.get('swaps'):
+            print(f"{Colors.FAIL}Active swap devices:{Colors.ENDC} {', '.join(active['swaps'])}")
+        if active.get('holders'):
+            print(f"{Colors.FAIL}Kernel/device-mapper holders:{Colors.ENDC}")
+            for device, holder in active['holders']:
+                print(f"  {device}: {holder}")
+        if active.get('memberships'):
+            print(f"{Colors.FAIL}Active mapper/RAID memberships:{Colors.ENDC}")
+            for device, dtype in active['memberships']:
+                print(f"  {device}: {dtype}")
+
+    def _format_existing_confirmation(self, signatures):
+        """Require an existing UUID or label before allowing reformat override."""
+        values = []
+        for sig in signatures or []:
+            for key in ('uuid', 'label'):
+                value = str(sig.get(key) or '').strip()
+                if value and value != '-' and value not in values:
+                    values.append(value)
+        if not values:
+            log("Existing content has no UUID or label to confirm. Use erase first.", 'ERROR')
+            return False
+        print("To reformat existing content, type one existing UUID or label exactly as shown:")
+        print(f"  {', '.join(values)}")
+        answer = self._input_no_history("Confirm existing UUID/LABEL: ")
+        if (answer or '').strip() not in values:
+            log("Existing UUID/label confirmation mismatch. Aborting operation.", 'ERROR')
+            return False
+        return True
+
+    @staticmethod
+    def _format_identity_changed(before, after):
+        fields = (
+            'wwn', 'serial', 'pci', 'major_minor', 'size_bytes',
+            'logical_sector_bytes', 'physical_sector_bytes',
+        )
+        return [field for field in fields if before.get(field) != after.get(field)]
+
+    @staticmethod
+    def _format_signatures_changed(before, after):
+        def normalize(items):
+            return sorted(
+                tuple(str(item.get(key) or '-') for key in ('device', 'type', 'label', 'uuid', 'offset'))
+                for item in (items or [])
+            )
+        return normalize(before) != normalize(after)
 
     def _soft_erase_target(self, real_target):
         dev_type = _lsblk_type(real_target)
