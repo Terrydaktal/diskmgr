@@ -6,18 +6,37 @@ A utility designed to simplify the management of encrypted and plain removable m
 
 ```text
 .
-|-- diskmap.tsv      # Configuration file storing disk mappings
-|-- diskmgr          # Main Python-based interactive CLI tool
-|-- gen_readme.py    # Script to regenerate this documentation
-`-- README.md        # This file
+|-- diskmap.tsv                # Configuration file storing disk mappings
+|-- diskmgr                    # Thin executable compatibility wrapper
+|-- diskmgrlib/                # Modular application package
+|   |-- app.py                 # CLI entry point
+|   |-- shell.py               # Composed interactive shell
+|   |-- shell_core.py          # History, prompts, and shell lifecycle
+|   |-- shell_helpers.py       # Shared discovery, mount, and formatting helpers
+|   |-- common.py              # Shared constants, process, device, and SMART helpers
+|   `-- commands/              # Workflow-focused command mixins
+|       |-- listing.py         # list
+|       |-- boot.py            # layout and boot
+|       |-- mapping.py         # map and unmap
+|       |-- mounting.py        # open, close, label, remount
+|       |-- luks.py            # LUKS management
+|       |-- destructive.py     # erase, nuke, entropise, clone
+|       |-- entropy.py         # entropy sampling
+|       |-- health.py          # SMART and filesystem health commands
+|       |-- transfer.py        # sync and diff
+|       |-- filesystem.py      # defrag, format, conversion, and scrub
+|       `-- partition.py       # create and remove partitions
+|-- tests/                     # Import and command-dispatch regression tests
+|-- gen_readme.py              # Script to regenerate this documentation
+`-- README.md                  # This file
 ```
 
 ## File Descriptions
 
-### `diskmgr` (Main Application)
-- **Description**: A comprehensive interactive shell for managing disks, LUKS containers, and filesystems.
-- **Inputs**: User commands via interactive shell or pipe; system hardware information via `lsblk`, `udevadm`, `cryptsetup`, etc.
-- **Outputs**: Formatted tables, system state changes (mounts, encryption status), and updates to `diskmap.tsv`.
+### `diskmgr` and `diskmgrlib/` (Application)
+- **Description**: The executable wrapper delegates to a composed interactive shell. Shared runtime behavior lives in `common.py` and `shell_helpers.py`; command groups live under `diskmgrlib/commands/`.
+- **Inputs**: User commands via interactive shell or one-shot CLI invocation; system hardware information via `lsblk`, `udevadm`, `cryptsetup`, and related tools.
+- **Outputs**: Formatted tables, system state changes (mounts, encryption status), command logs, and updates to `diskmap.tsv`.
 
 ### `diskmap.tsv` (Configuration)
 - **Description**: Tab-separated values file that stores the mapping between user-defined friendly names and persistent device paths (e.g., `/dev/disk/by-id/...`).
