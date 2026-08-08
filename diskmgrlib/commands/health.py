@@ -1,6 +1,15 @@
 """HealthCommands command implementations."""
 
-from ..common import *
+import argparse
+import cmd
+import os
+import re
+import shlex
+import sys
+import time
+from ..runtime import Colors, _cmd_log_close, _cmd_log_open, _cmd_log_write, _find_tool_or_common_paths, _first_int_from_text, _fmt_hms, log, run_command
+from ..devices import _sysfs_block_name, _sysfs_to_parent_disk_name
+from ..smart import _decode_seagate_command_timeout, _decode_seagate_hi16_lo32, _parse_smart_attr_raw, _parse_smart_attr_row, _parse_smart_error_log_count, _parse_smart_last_error_poh, _parse_smart_long_selftest_failures, _smartctl_looks_seagate
 from ..shell_core import CmdArgumentParser
 
 
@@ -61,8 +70,6 @@ class HealthCommands:
         cmd = [smartctl_bin, '-x', disk_dev]
         if use_sat:
             cmd = [smartctl_bin, '-d', 'sat', '-x', disk_dev]
-
-        run_command(['sudo', '-v'])
 
         res = run_command(cmd, sudo=True, capture_output=True, check=False)
         out = (res.stdout or "")
@@ -724,9 +731,7 @@ class HealthCommands:
         if not self.extensive_confirm(f"selftest {name} ({disk_dev})", destructive=False):
             return
 
-        run_command(['sudo', '-v'])
-
-        log_path = _cmd_log_open("selftest") if (_CMD_LOG_FH is None) else _CMD_LOG_PATH
+        log_path = _cmd_log_open("selftest")
         if log_path:
             print(f"Log: {log_path}")
         start_ts = time.time()
@@ -750,7 +755,7 @@ class HealthCommands:
 
             def _parse_remaining_pct(text):
                 # ATA: "Self-test execution status: ... 90% of test remaining."
-                m = re.search(r"(?im)\\b([0-9]{1,3})%\\s+of\\s+test\\s+remaining\\b", text)
+                m = re.search(r"(?im)\b([0-9]{1,3})%\s+of\s+test\s+remaining\b", text)
                 if m:
                     try:
                         return int(m.group(1), 10)
@@ -773,7 +778,7 @@ class HealthCommands:
                     line = f"SMART self-test: {done}% complete ({rem}% remaining)"
                 else:
                     # If we can't parse remaining%, fall back to detecting the "in progress" phrase.
-                    if re.search(r"(?im)self-test\\s+routine\\s+in\\s+progress", txt):
+                    if re.search(r"(?im)self-test\s+routine\s+in\s+progress", txt):
                         in_progress = True
                         line = "SMART self-test: in progress (unable to parse % remaining)"
                     else:

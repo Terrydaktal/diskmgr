@@ -1,6 +1,12 @@
 """EntropyCommands command implementations."""
 
-from ..common import *
+import argparse
+import os
+import re
+import shlex
+import subprocess
+import time
+from ..runtime import _find_tool_or_common_paths, _first_int_from_text, log, popen_command, run_command
 from ..shell_core import CmdArgumentParser
 
 
@@ -196,8 +202,6 @@ class EntropyCommands:
                     f"(integer window rounding).",
                     'WARN'
                 )
-        run_command(['sudo', '-v'])
-
         stamp = f"{os.getpid()}_{int(time.time())}"
         data_file = f"/tmp/diskmgr_entropy_{stamp}.txt"
         plot_file = f"/tmp/diskmgr_entropy_{stamp}.png"
@@ -323,43 +327,47 @@ raise SystemExit(main())
                 '0',
             ]
 
-        proc = subprocess.Popen(
-            ['sudo'] + sample_cmd,
+        proc = popen_command(
+            sample_cmd,
+            sudo=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
             bufsize=1,
         )
 
-        with open(data_file, 'w', encoding='utf-8') as f_data:
-            f_data.write("# offset_gib entropy_bits_per_byte\n")
-            if proc.stdout is None:
-                log("Entropy sampler failed to start stdout pipe.", 'ERROR')
-                return
+        try:
+            with open(data_file, 'w', encoding='utf-8') as f_data:
+                f_data.write("# offset_gib entropy_bits_per_byte\n")
+                if proc.stdout is None:
+                    log("Entropy sampler failed to start stdout pipe.", 'ERROR')
+                    return
 
-            for raw_line in proc.stdout:
-                line = (raw_line or '').strip()
-                if not line:
-                    continue
-                parts = line.split('\t')
-                if len(parts) != 4:
-                    continue
-                try:
-                    idx = int(parts[0])
-                    x_gib = float(parts[1])
-                    ent_val = float(parts[2])
-                except Exception:
-                    continue
+                for raw_line in proc.stdout:
+                    line = (raw_line or '').strip()
+                    if not line:
+                        continue
+                    parts = line.split('\t')
+                    if len(parts) != 4:
+                        continue
+                    try:
+                        idx = int(parts[0])
+                        x_gib = float(parts[1])
+                        ent_val = float(parts[2])
+                    except Exception:
+                        continue
 
-                f_data.write(f"{x_gib:.6f} {ent_val:.6f}\n")
-                points_written += 1
-                if idx < 1:
-                    idx = points_written
-                if idx > total_points:
-                    idx = total_points
-                print(f"\rSampling entropy: {idx}/{total_points} at {x_gib:.3f} GiB", end="", flush=True)
-
-        rc = proc.wait()
+                    f_data.write(f"{x_gib:.6f} {ent_val:.6f}\n")
+                    points_written += 1
+                    if idx < 1:
+                        idx = points_written
+                    if idx > total_points:
+                        idx = total_points
+                    print(f"\rSampling entropy: {idx}/{total_points} at {x_gib:.3f} GiB", end="", flush=True)
+        finally:
+            if proc.poll() is None:
+                proc.terminate()
+            rc = proc.wait()
         stderr_txt = (proc.stderr.read() if proc.stderr else '') or ''
         print("")
 

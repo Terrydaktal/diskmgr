@@ -3,5 +3,8 @@ __pycache__/
 diskmap.tsv
 entropy_data.txt
 my_entropy_graph.png
+*.log
+my_entropy_graph.png
+.diskmgr-generated/
 
 .codex

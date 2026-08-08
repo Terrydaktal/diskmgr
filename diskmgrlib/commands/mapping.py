@@ -1,6 +1,14 @@
 """MappingCommands command implementations."""
 
-from ..common import *
+import os
+import shlex
+from ..runtime import log
+from ..mappings import (
+    read_luks_map,
+    update_luks_map,
+    validate_mapping_name,
+    validate_persistent_target,
+)
 from ..shell_core import CmdArgumentParser
 
 
@@ -25,12 +33,21 @@ class MappingCommands:
 
         This ensures the disk is recognized correctly regardless of USB port or device node changes.
         '''
-        args = arg.split()
+        try:
+            args = shlex.split(arg)
+        except ValueError as exc:
+            log(f"Invalid map arguments: {exc}", 'ERROR')
+            return
         if len(args) != 2:
             log("Usage: map <id/name> <new_name>", 'ERROR')
             return
 
         target, name = args
+        try:
+            name = validate_mapping_name(name)
+        except ValueError as exc:
+            log(f"Invalid mapping name: {exc}", 'ERROR')
+            return
         self.mappings = read_luks_map() # Refresh
 
         clean_target = target.strip('[]')
@@ -64,24 +81,27 @@ class MappingCommands:
             log(f"Normalized mapping target: {real_target} -> {normalized_target}")
             real_target = normalized_target
 
-        if name in self.mappings and name != old_name:
-            log(f"Mapping '{name}' already exists.", 'ERROR')
+        try:
+            real_target = validate_persistent_target(real_target, migrate_legacy=True)
+        except ValueError as exc:
+            log(f"Cannot save mapping: {exc}", 'ERROR')
             return
 
-        # Collision Prevention: Prevent names that look like IDs
-        clean_name = name.strip('[]')
-        if (
-            (clean_name.startswith('#') and clean_name[1:].isdigit()) or
-            (clean_name.startswith('U') and clean_name[1:].isdigit()) or
-            clean_name.isdigit()
-        ):
-            log(f"Invalid name: '{name}'. Names cannot be simple numbers or match discovery ID formats like '#1'.", 'ERROR')
-            return
+        def apply_mapping(current):
+            if name in current and name != old_name:
+                raise ValueError(f"Mapping '{name}' already exists.")
+            if old_name:
+                if old_name not in current:
+                    raise ValueError(f"Mapping '{old_name}' changed concurrently; retry.")
+                del current[old_name]
+            current[name] = real_target
+            return current
 
-        if old_name and old_name in self.mappings:
-            del self.mappings[old_name]
-        self.mappings[name] = real_target
-        save_luks_map(self.mappings)
+        try:
+            self.mappings = update_luks_map(apply_mapping)
+        except ValueError as exc:
+            log(str(exc), 'ERROR')
+            return
         log(f"Mapping saved: {name} -> {real_target}")
 
     def do_unmap(self, arg):
@@ -101,8 +121,16 @@ class MappingCommands:
 
         self.mappings = read_luks_map()
         if target in self.mappings:
-            del self.mappings[target]
-            save_luks_map(self.mappings)
+            def remove_name(current):
+                if target not in current:
+                    raise ValueError(f"Mapping '{target}' changed concurrently; retry.")
+                del current[target]
+                return current
+            try:
+                self.mappings = update_luks_map(remove_name)
+            except ValueError as exc:
+                log(str(exc), 'ERROR')
+                return
             log(f"Mapping '{target}' removed successfully.")
             return
 
@@ -126,9 +154,21 @@ class MappingCommands:
             log(f"No mapping found for target: '{target}' ({resolved_real})", 'ERROR')
             return
 
-        for name in to_remove:
-            del self.mappings[name]
-        save_luks_map(self.mappings)
+        def remove_targets(current):
+            removed = []
+            for name, path in list(current.items()):
+                if os.path.realpath(path) == resolved_real:
+                    removed.append(name)
+                    del current[name]
+            if set(removed) != set(to_remove):
+                raise ValueError("Mappings changed concurrently; retry unmap.")
+            return current
+
+        try:
+            self.mappings = update_luks_map(remove_targets)
+        except ValueError as exc:
+            log(str(exc), 'ERROR')
+            return
         if len(to_remove) == 1:
             log(f"Mapping '{to_remove[0]}' removed successfully.")
         else:

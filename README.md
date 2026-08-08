@@ -13,8 +13,17 @@ A utility designed to simplify the management of encrypted and plain removable m
 |   |-- shell.py               # Composed interactive shell
 |   |-- shell_core.py          # History, prompts, and shell lifecycle
 |   |-- shell_helpers.py       # Shared discovery, mount, and formatting helpers
-|   |-- common.py              # Shared constants, process, device, and SMART helpers
-|   `-- commands/              # Workflow-focused command mixins
+|   |-- common.py              # Backward-compatible re-exports for older callers
+|   |-- runtime.py             # Privileged execution, logging, output, and timing
+|   |-- devices.py             # lsblk/sysfs device resolution helpers
+|   |-- inventory.py            # Device inventory and formatted list data
+|   |-- mappings.py             # Atomic persistent friendly-name mappings
+|   |-- mount_policy.py         # Mount, fstab, ownership, and compression policy
+|   |-- mounts.py               # Mountpoint discovery and cleanup helpers
+|   |-- rawio.py                # Erase, sanitize, and overwrite primitives
+|   |-- safety.py               # Destructive-operation preflight and identity checks
+|   |-- smart.py                # SMART parsing and vendor decoding
+|   `-- commands/               # Workflow-focused command mixins
 |       |-- listing.py         # list
 |       |-- boot.py            # layout and boot
 |       |-- mapping.py         # map and unmap
@@ -24,9 +33,13 @@ A utility designed to simplify the management of encrypted and plain removable m
 |       |-- entropy.py         # entropy sampling
 |       |-- health.py          # SMART and filesystem health commands
 |       |-- transfer.py        # sync and diff
-|       |-- filesystem.py      # defrag, format, conversion, and scrub
+|       |-- filesystem.py      # Compatibility composition for maintenance/provisioning
+|       |-- filesystem_maintenance.py # defrag, fshealth, and scrub
+|       |-- provisioning.py    # format, convert, create, and remove
+|       |-- block.py           # erase, nuke, entropise, and clone
 |       `-- partition.py       # create and remove partitions
 |-- tests/                     # Import and command-dispatch regression tests
+|-- DEPENDENCIES.md            # External command and capability requirements
 |-- gen_readme.py              # Script to regenerate this documentation
 `-- README.md                  # This file
 ```
@@ -34,7 +47,7 @@ A utility designed to simplify the management of encrypted and plain removable m
 ## File Descriptions
 
 ### `diskmgr` and `diskmgrlib/` (Application)
-- **Description**: The executable wrapper delegates to a composed interactive shell. Shared runtime behavior lives in `common.py` and `shell_helpers.py`; command groups live under `diskmgrlib/commands/`.
+- **Description**: The executable wrapper delegates to a composed interactive shell. Shared behavior is separated into runtime, device, inventory, mapping, mount-policy, safety, raw-I/O, and SMART modules; command groups live under `diskmgrlib/commands/`.
 - **Inputs**: User commands via interactive shell or one-shot CLI invocation; system hardware information via `lsblk`, `udevadm`, `cryptsetup`, and related tools.
 - **Outputs**: Formatted tables, system state changes (mounts, encryption status), command logs, and updates to `diskmap.tsv`.
 
@@ -46,6 +59,11 @@ A utility designed to simplify the management of encrypted and plain removable m
 - **Description**: Automates the generation of `README.md` by querying `diskmgr`'s help system and examples.
 - **Inputs**: `diskmgr` help output and command examples.
 - **Outputs**: An updated `README.md` file.
+
+### `DEPENDENCIES.md` (Capability Manifest)
+- **Description**: Lists Python/runtime requirements and optional command-line capabilities by workflow.
+- **Inputs**: None.
+- **Outputs**: Documentation only; the application does not install packages.
 
 ## Overview
 
@@ -72,8 +90,10 @@ disk:
       (USB uses -d sat). Use: selftest <name/id> --watch to poll progress until complete.
   health <name/id> [alias: smart]
       Shows SMART health (smartctl -x) for the underlying disk (USB uses -d sat).
-  entropy <name/id> <start_gib> <end_gib> [--step-mib N] [--window-mib N]
-      Samples Shannon entropy over a raw device range and plots it (ent + gnuplot).
+  entropy <name/id> --begin <START> --end <END> [--step SIZE] [--window SIZE]
+  entropy <name/id> <SPAN> --samples <N>
+      Samples Shannon entropy and plots it (built-in sampler + gnuplot).
+      Random mode stitches N random windows across the disk into one contiguous graph span.
       Saves data/plot in /tmp and attempts to display the plot on screen.
 
 disk/part (applied to mapped disk/partition targets):
@@ -87,6 +107,8 @@ disk/part (applied to mapped disk/partition targets):
       Partition target: formats inside that partition boundary (not a superfloppy), then mounts it.
       Default is plain format. Use --luks to run cryptsetup luksFormat, open a mapper,
       and mkfs the decrypted payload filesystem (PBKDF defaults: memory=4GiB, parallelism=4, time=8).
+      Use --detached-header (optionally with a file path) to keep LUKS metadata off-disk from the start.
+      Detached header default path: /tmp/diskmgr-readme-home/.local/share/diskmgr/<name>
       Example: format data --luks
       Whole disks must be unpartitioned. format never creates, deletes, resizes, or moves partitions;
       it only writes a filesystem/LUKS+filesystem inside the selected disk or partition target.
@@ -94,8 +116,8 @@ disk/part (applied to mapped disk/partition targets):
       Use: erase <name> first if the whole disk is currently partitioned.
   erase <name/id>
       Fast metadata wipe for re-provisioning (wipefs + zap GPT/MBR metadata) on disk/part.
-      Whole-disk erase wipes partition signatures/metadata, GPT headers, protective MBR metadata,
-      and rewrites an empty MBR table in MBR mode.
+      Whole-disk erase wipes partition signatures/metadata, GPT headers, and protective MBR metadata;
+      it leaves the device without a newly-created partition table. Use 'create' afterward if needed.
   nuke <name/id>
       Secure erase (multi-step hardware-aware wipe) on disk/part.
   entropise <name/id>
@@ -107,17 +129,32 @@ disk/part (applied to mapped disk/partition targets):
       Includes a multi-pass rescue phase to recover data from failing sectors.
 
 file system (applied to disk/part entries with mountable FSTYPE):
-  open <name/id>
+  open <name/id> [--compress MODE | --compress-force MODE]
       Opens and mounts a plain or encrypted partition or superfloppy.
       For encrypted targets, unlocks LUKS then mounts payload filesystem.
       LUKS open tries on-disk header first, then ~/.local/share/diskmgr/<name> as detached header backup.
-      Btrfs mounts are enforced with compression (compress=zstd:3).
-      Uses /etc/fstab mountpoint/options when an entry exists; otherwise /media/$USER/<label>.
+      Btrfs default mount policy: HDD => compress-force=zstd:12, non-HDD => no compression option.
+      Override per open/remount with --compress=<mode> or --compress-force=<mode>.
+      Mountpoint selection: /etc/fstab entry wins when present (uses fstab mountpoint/options).
+      Without fstab: /media/$USER/<mapped-name> when opened by mapping name;
+      else /media/$USER/<FSLABEL>; else /media/$USER/<device>.
+      If the same source is mounted multiple times (e.g. <label> and <label>1),
+      open keeps the preferred path and unmounts extra mountpoints.
+      If the preferred path references a missing /dev source, open clears that stale mount first.
+      If the preferred path is occupied by an existing different device, open is blocked.
+      Device discovery waits up to 60 seconds and reports slow USB bridge/disk spin-up progress.
+      A separate non-root partition on the same physical disk as / may be opened; the root partition and disk remain protected.
   close <name/id> [--force]
       close <name>: unmounts filesystem(s) and closes /dev/mapper/<name> when present (locks LUKS).
       If a whole-disk target is supplied, closes all mounted child partitions on that disk too.
       close #id (example: close #6): unmount-only for that discovered row; does NOT run cryptsetup close.
-      With --force, kills mount-holder processes (SIGKILL) if unmount is busy, then retries unmount.
+      --force kills userspace holders, but cannot kill kernel D-state writeback operations.
+      close flushes each filesystem, then waits up to 30 seconds for blocked kernel I/O recovery.
+      Kernel detach is attempted only after every filesystem on the disk is unmounted.
+      A vanished source is treated as an unplug; stale mount directories are removed after kernel teardown.
+      Only one rescue detach can be attempted by each close command.
+      With --force, kills mount-holder processes (SIGKILL) before flushing and normal unmount.
+      Rescue kernel-detach is last-resort and only allowed with --force.
       Use #id if you want to close only the payload filesystem and keep the LUKS container open.
   luks <passwd|params|backup|restore|header|wipe> [options]
       LUKS management for mapped containers (grouped under filesystem workflows):
@@ -126,13 +163,14 @@ file system (applied to disk/part entries with mountable FSTYPE):
       passwd/params auto-fallback to detached header ~/.local/share/diskmgr/<name> when on-disk header is missing.
       passwd uses passgen for current passphrase and double-prompts new passphrase for confirmation.
       params uses passgen for current passphrase and updates PBKDF params (defaults: time=8, parallelism=4).
-      backup default path: /home/lewis/.local/share/diskmgr/<name>
+      backup default path: /tmp/diskmgr-readme-home/.local/share/diskmgr/<name>
   label <name> [new_label] [--fstab]
       Get or set the filesystem label of an OPEN disk.
       On relabel: removes old LABEL-based fstab entry. With --fstab, adds UUID entry at /mnt/<label>.
       Generated fstab options: defaults,nofail,x-gvfs-show,x-gvfs-name=<label>.
+      For btrfs on HDD targets, generated fstab options also include compress-force=zstd:12.
       For LUKS: acts on payload filesystem when open; errors if locked.
-  remount <name>
+  remount <name> [--compress MODE | --compress-force MODE]
       Move an OPEN disk's mount to /mnt/<label> when /etc/fstab entry exists;
       otherwise /media/$USER/<label>, and clean old empty mountpoint dirs.
       For LUKS: acts on payload filesystem when open; errors if locked.
@@ -175,7 +213,7 @@ file system (applied to disk/part entries with mountable FSTYPE):
 shell:
   version
       Print diskmgr version.
-      Command history persists across sessions in /home/lewis/.local/state/diskmgr/history (override with $DISKMGR_HISTORY).
+      Command history persists across sessions in /tmp/diskmgr-readme-home/.local/state/diskmgr/history (override with $DISKMGR_HISTORY).
   exit / quit / Ctrl+D
       Exit the application.
 ```
@@ -184,84 +222,21 @@ shell:
 
 ```text
 Display the physical partition layout and free space for all plugged-in disks.
-        Usage:
-          list            -> standard table (default)
-          list concise    -> concise table
-          list verbose    -> verbose key/value entries (alias: list list)
+Usage:
+  list            -> standard table (default)
+  list concise    -> concise table
+  list verbose    -> verbose key/value entries (alias: list list)
 
-        UNDER THE HOOD:
-        1.  Hardware Scan: Identifies all physical 'disk' devices (excluding partitions).
-        2.  Geometry Query: Runs 'sudo parted -m <dev> unit s print free' and 'blockdev --getsz'.
-        3.  Parsing:
-            - Extracts Partition Table type (gpt/mbr) and sector sizes.
-            - Calculates total logical sectors from blockdev output.
-        4.  Formatting:
-            - Adds GPT metadata blocks (Primary/Backup) if applicable.
-            - Identifies 'free' space segments.
-            - Calculates MiB and GiB values from sector counts.
-```
-
-### Example Output
-
-```text
-Disk: /dev/sda (ST1000LM048-2E7172) [none] [Sector: L512/P4096] [Total Sectors: 1953525168]
-
- #   NAME  DEVICE       TYPE     STATE      FSTYPE       FSLABEL    FSUUID                                SIZE        FSAVAIL     FSMOUNTPOINTS                      PERSISTENT PATH
- 1   7a    sda          disk     -                                                                        931.51 GiB                                                 /dev/disk/by-id/wwn-0x5000c500c082605a
------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-
-Disk: /dev/sdb (ST2000DM008-2FR102) [none] [Sector: L512/P4096] [Total Sectors: 3907029168]
-[ sdb crypto_LUKS 3907029168s (1907729.09MiB ~ 1863.0GiB (1.819 TiB)) ]
-
- #   NAME  DEVICE       TYPE     STATE      FSTYPE       FSLABEL    FSUUID                                SIZE        FSAVAIL     FSMOUNTPOINTS                      PERSISTENT PATH
- 2   1b    sdb          disk     OPEN       crypto_LUKS             885a66c1-6d5f-4d24-adfd-e7c7975dfe65  1.82 TiB                                                   /dev/disk/by-id/wwn-0x5000c500e31e6cb2
- 3   -     `--dm-0 (1b)  crypt    MOUNTED    btrfs        1b         08aad883-1143-4d5d-84b9-d715665e332a  1.82 TiB    730.51 GiB  /media/lewis/1b1, /media/lewis/1b  -
------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-
-Disk: /dev/sdc (TransMemory) [gpt] [Sector: L512/P512] [Total Sectors: 30274560]
-[ GPT Primary 34s (17408.00B) ] [ free 2014s (1007.00KiB) ] [ sdc1 fat32 30271488s (14781.00MiB ~ 14.4GiB) (boot, esp) ] [ free 991s (495.50KiB) ] [ GPT Backup 33s (16896.00B) ]
-
- #   NAME  DEVICE       TYPE     STATE      FSTYPE       FSLABEL    FSUUID                                SIZE        FSAVAIL     FSMOUNTPOINTS                      PERSISTENT PATH
- 4   boot  sdc          disk     -                                                                        14.44 GiB                                                  /dev/disk/by-id/usb-TOSHIBA_TransMemory_0022CFF6B89AC1419CD1477B-0:0
- 5   -     `--sdc1       part     UNMOUNTED  vfat         BOOT_STUB  6E9F-3FF3                             14.43 GiB                                                  /dev/disk/by-id/usb-TOSHIBA_TransMemory_0022CFF6B89AC1419CD1477B-0:0-part1
------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-
-Disk: /dev/sdd (USB Flash Disk) [none] [Sector: L512/P512] [Total Sectors: 0]
-
- #   NAME  DEVICE       TYPE     STATE      FSTYPE       FSLABEL    FSUUID                                SIZE        FSAVAIL     FSMOUNTPOINTS                      PERSISTENT PATH
- 6   -     sdd          disk     -                                                                                                                                   /dev/disk/by-id/usb-Generic_USB_Flash_Disk-0:0
------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-
-Disk: /dev/zram0 (None) [loop] [Sector: L4096/P4096] [Total Sectors: 24608328]
-[ zram01 linux-swap(v1) 24608328s (96126.28MiB ~ 93.9GiB) ]
-
- #   NAME  DEVICE       TYPE     STATE      FSTYPE       FSLABEL    FSUUID                                SIZE        FSAVAIL     FSMOUNTPOINTS                      PERSISTENT PATH
- 7   -     zram0        disk     -                                                                        93.87 GiB               [SWAP]                             -
------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-
-Disk: /dev/nvme1n1 (WD_BLACK SN8100 2000GB) [msdos] [Sector: L512/P512] [Total Sectors: 3907029168]
-[ MBR 2s (1024.00B) ] [ free 2046s (1023.00KiB) ] [ nvme1n1p1 ext4 3907026944s (1907728.00MiB ~ 1863.0GiB (1.819 TiB)) (boot) ] [ free 176s (88.00KiB) ]
-
- #   NAME  DEVICE       TYPE     STATE      FSTYPE       FSLABEL    FSUUID                                SIZE        FSAVAIL     FSMOUNTPOINTS                      PERSISTENT PATH
- 8   -     nvme1n1      disk     -                                                                        1.82 TiB                                                   /dev/disk/by-id/nvme-eui.e8238fa6bf530001001b448b42d60852
- 9   os    `--nvme1n1p1  part     MOUNTED    ext4                    88f1dad3-95c6-418e-bea8-f5f3e072ea29  1.82 TiB    1.40 TiB    /                                  /dev/disk/by-id/nvme-eui.e8238fa6bf530001001b448b42d60852-part1
------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-
-Disk: /dev/nvme0n1 (WD Blue SN570 1TB) [msdos] [Sector: L512/P512] [Total Sectors: 1953525168]
-[ MBR 2s (1024.00B) ] [ free 2046s (1023.00KiB) ] [ nvme0n1p1 ext4 1953523120s (953868.71MiB ~ 931.5GiB) ]
-
- #   NAME  DEVICE       TYPE     STATE      FSTYPE       FSLABEL    FSUUID                                SIZE        FSAVAIL     FSMOUNTPOINTS                      PERSISTENT PATH
- 10  -     nvme0n1      disk     -                                                                        931.51 GiB                                                 /dev/disk/by-id/nvme-eui.e8238fa6bf530001001b444a49598af9
- 11  data  `--nvme0n1p1  part     MOUNTED    ext4         data       72c22012-b161-4e2a-a762-94ff7fda47f9  931.51 GiB  657.29 GiB  /mnt/data                          /dev/disk/by-id/nvme-eui.e8238fa6bf530001001b444a49598af9-part1
------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-Non-present mappings (/home/lewis/Dev/diskmgr/diskmap.tsv)
- #   NAME  DEVICE       TYPE     STATE      FSTYPE       FSLABEL    FSUUID                                SIZE        FSAVAIL     FSMOUNTPOINTS                      PERSISTENT PATH
- 12  1a    -            missing  MISSING    -            -          -                                     -           -           -                                  /dev/disk/by-id/wwn-0x5000c500a89d6e44-part2
- 13  2a    -            missing  MISSING    -            -          -                                     -           -           -                                  /dev/disk/by-id/wwn-0x50004cf20836ca17
- 14  2b    -            missing  MISSING    -            -          -                                     -           -           -                                  /dev/disk/by-id/wwn-0x5000cca8c0d68e12
- 15  3a    -            missing  MISSING    -            -          -                                     -           -           -                                  /dev/disk/by-id/wwn-0x5000c500ab9fa51b
- 16  4a    -            missing  MISSING    -            -          -                                     -           -           -                                  /dev/disk/by-id/wwn-0x5000c500c08a4cea
------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+UNDER THE HOOD:
+1.  Hardware Scan: Identifies all physical 'disk' devices (excluding partitions).
+2.  Geometry Query: Runs 'sudo parted -m <dev> unit s print free' and 'blockdev --getsz'.
+3.  Parsing:
+    - Extracts Partition Table type (gpt/mbr) and sector sizes.
+    - Calculates total logical sectors from blockdev output.
+4.  Formatting:
+    - Adds GPT metadata blocks (Primary/Backup) if applicable.
+    - Identifies 'free' space segments.
+    - Calculates MiB and GiB values from sector counts.
 ```
 
 ## Command Reference: `boot`
@@ -269,10 +244,10 @@ Non-present mappings (/home/lewis/Dev/diskmgr/diskmap.tsv)
 ```text
 Display boot entries from GRUB and fstab detection for each partition.
 
-        UNDER THE HOOD:
-        Scans partition devices. If mounted, it parses /boot/grub/grub.cfg
-        and checks for /etc/fstab inside that mounted partition.
-        If unmounted or encrypted, it explains why it cannot yet read the config.
+UNDER THE HOOD:
+Scans partition devices. If mounted, it parses /boot/grub/grub.cfg
+and checks for /etc/fstab inside that mounted partition.
+If unmounted or encrypted, it explains why it cannot yet read the config.
 ```
 
 ## Command Reference: `map`
@@ -280,21 +255,21 @@ Display boot entries from GRUB and fstab detection for each partition.
 ```text
 Create or modify a persistent mapping: map <name/id> <name>
 
-        Usage:
-          map [#1] backup    Assigns friendly name to discovery ID (e.g., map #1 backup)
-          map 1a backup      Renames an existing mapping (e.g., map 1a backup)
+Usage:
+  map [#1] backup    Assigns friendly name to discovery ID (e.g., map #1 backup)
+  map 1a backup      Renames an existing mapping (e.g., map 1a backup)
 
-        Note: Raw device paths (e.g., /dev/sdb) are NOT allowed.
+Note: Raw device paths (e.g., /dev/sdb) are NOT allowed.
 
-        UNDER THE HOOD:
-        1.  Input Resolution:
-            - discovery ID (e.g., [#1]): Resolves the temporary device to its Persistent Device Path (PDP).
-            - mapping name (e.g., 1a): Selects an existing mapping for RENAME operations.
-        2.  PDP Linking: Extracts the /dev/disk/by-id/ path for the target hardware.
-        3.  Conflict Check: Ensures the new friendly name is not already in use.
-        4.  Persistence: Writes the [Name <TAB> PDP] pair to diskmap.tsv.
+UNDER THE HOOD:
+1.  Input Resolution:
+    - discovery ID (e.g., [#1]): Resolves the temporary device to its Persistent Device Path (PDP).
+    - mapping name (e.g., 1a): Selects an existing mapping for RENAME operations.
+2.  PDP Linking: Extracts the /dev/disk/by-id/ path for the target hardware.
+3.  Conflict Check: Ensures the new friendly name is not already in use.
+4.  Persistence: Writes the [Name <TAB> PDP] pair to diskmap.tsv.
 
-        This ensures the disk is recognized correctly regardless of USB port or device node changes.
+This ensures the disk is recognized correctly regardless of USB port or device node changes.
 ```
 
 ## Command Reference: `unmap`
@@ -302,12 +277,12 @@ Create or modify a persistent mapping: map <name/id> <name>
 ```text
 Remove a persistent mapping: unmap <name/id>
 
-        UNDER THE HOOD:
-        1.  Resolution:
-            - Name mode: removes the exact mapping name.
-            - ID mode (#N): resolves to a device and removes mapping(s) pointing to that device.
-        2.  Removal: Deletes the [Name <TAB> PDP] pair(s) from the internal dictionary.
-        3.  Persistence: Re-writes diskmap.tsv with the mapping(s) removed.
+UNDER THE HOOD:
+1.  Resolution:
+    - Name mode: removes the exact mapping name.
+    - ID mode (#N): resolves to a device and removes mapping(s) pointing to that device.
+2.  Removal: Deletes the [Name <TAB> PDP] pair(s) from the internal dictionary.
+3.  Persistence: Re-writes diskmap.tsv with the mapping(s) removed.
 ```
 
 ## Command Reference: `create`
@@ -315,26 +290,26 @@ Remove a persistent mapping: unmap <name/id>
 ```text
 Create partition table or partition on a whole disk: create <name/id> [--gpt|--mbr] [--partition] [--start X] [--end Y]
 
-        Scope:
-          - Whole disks only (not partitions).
-          - Table creation requires prior erase: target must look erased (no partitions, no PT metadata, no signatures).
-          - Partition-only mode can add a partition to an existing partitioned disk.
+Scope:
+  - Whole disks only (not partitions).
+  - Table creation requires prior erase: target must look erased (no partitions, no PT metadata, no signatures).
+  - Partition-only mode can add a partition to an existing partitioned disk.
 
-        Actions:
-          - --gpt / --mbr: create a new partition table (erased disk only)
-          - --partition:
-              * with --gpt/--mbr: create first partition after table creation
-              * without --gpt/--mbr: create an additional partition on existing table
-              * when --start/--end are omitted, the largest free extent is selected automatically
-              * overlapping ranges are rejected; existing partitions are not overwritten
+Actions:
+  - --gpt / --mbr: create a new partition table (erased disk only)
+  - --partition:
+      * with --gpt/--mbr: create first partition after table creation
+      * without --gpt/--mbr: create an additional partition on existing table
+      * when --start/--end are omitted, the largest free extent is selected automatically
+      * overlapping ranges are rejected; existing partitions are not overwritten
 
-        Examples:
-          erase 1b
-          create 1b --gpt
-          create 1b --gpt --partition
-          create 1b --partition
-          create 1b --partition --start 500GiB --end 100%
-          create #4 --mbr --partition
+Examples:
+  erase 1b
+  create 1b --gpt
+  create 1b --gpt --partition
+  create 1b --partition
+  create 1b --partition --start 500GiB --end 100%
+  create #4 --mbr --partition
 ```
 
 ## Command Reference: `format`
@@ -342,40 +317,51 @@ Create partition table or partition on a whole disk: create <name/id> [--gpt|--m
 ```text
 Format a superfloppy disk/partition volume: format <name/id> [options]
 
-        Note: You must 'map' a disk first to give it a name before initializing it.
+Note: You must 'map' a disk first to give it a name before initializing it.
 
-        NUANCES & SCOPE:
-        1. Running format on a Partition (e.g., sda2)
-           - Formats inside the existing partition boundary (plain or LUKS + payload FS).
-           - Other partitions on the disk are untouched.
+NUANCES & SCOPE:
+1. Running format on a Partition (e.g., sda2)
+   - Formats inside the existing partition boundary (plain or LUKS + payload FS).
+   - Other partitions on the disk are untouched.
 
-        2. Running format on a Whole Disk (e.g., sda)
-           - Creates a superfloppy-style volume directly on the disk (plain or LUKS + payload FS).
-           - Refuses if the disk already has a partition table (non-destructive policy).
-           - To wipe partition metadata first, use: erase <name>
+2. Running format on a Whole Disk (e.g., sda)
+   - Creates a superfloppy-style volume directly on the disk (plain or LUKS + payload FS).
+   - Refuses if the disk already has a partition table (non-destructive policy).
+   - To wipe partition metadata first, use: erase <name>
 
-        Options:
-          --fs <ext4|xfs|btrfs|fat32>   Filesystem type (default: ext4)
-          --label <label>   Set a different internal filesystem label (other than <name>)
-          --luks            Encrypt target first with LUKS2, then format payload filesystem.
-                            PBKDF defaults: argon2id, memory=4GiB, threads=4, time=8.
+Options:
+  --fs <ext4|xfs|btrfs|fat32>   Filesystem type (default: ext4)
+  --label <label>   Set a different internal filesystem label (other than <name>)
+  --luks            Encrypt target first with LUKS2, then format payload filesystem.
+                    PBKDF defaults: argon2id, memory=4GiB, threads=4, time=8.
+  --reformat-existing
+                    Explicitly allow replacement of an existing filesystem/signature.
+                    Requires an additional exact UUID or label confirmation.
+  --detached-header [FILE]
+                    Store LUKS header detached from the target device.
+                    If FILE is omitted: ~/.local/share/diskmgr/<name>
 
-        UNDER THE HOOD:
-        1.  Safety: Refuses to run if anything is mounted on the target device tree.
-        2.  Disk Type Policy:
-            - If target is a whole disk, it must be unpartitioned (no GPT/MBR table present).
-            - If target is a partition, format is applied directly within that partition.
-        3.  LUKS Format (only when --luks is used):
-            - Uses 'passgen' to generate a master key.
-            - Runs 'cryptsetup luksFormat' with LUKS2 encryption.
-            - Opens the container as /dev/mapper/<name>.
-        4.  Filesystem:
-            - Plain mode (default): formats target directly with ext4, xfs, btrfs, or fat32.
-            - --luks mode: formats the opened mapper payload with ext4, xfs, btrfs, or fat32.
-            - (ext4 only): Reclaims the 5% reserved space for root using 'tune2fs -m 0'.
-        5.  Persistence: Adds the new disk's PDP to diskmap.tsv automatically (best-effort).
+UNDER THE HOOD:
+1.  Safety: Probes the target and every child with wipefs/blkid, checks all
+    mounts, swaps, kernel holders, and mapper/RAID memberships before asking
+    for confirmation. Probe errors fail closed.
+2.  Disk Type Policy:
+    - If target is a whole disk, it must be unpartitioned (no GPT/MBR table present).
+    - If target is a partition, format is applied directly within that partition.
+    - Existing content requires --reformat-existing and an exact UUID/label.
+3.  LUKS Format (only when --luks is used):
+    - Uses 'passgen' to generate a master key.
+    - Runs 'cryptsetup luksFormat' with LUKS2 encryption
+      (and --header FILE when --detached-header is used).
+    - Opens the container as /dev/mapper/<name>.
+4.  Filesystem:
+    - Plain mode (default): formats target directly with ext4, xfs, btrfs, or fat32.
+    - --luks mode: formats the opened mapper payload with ext4, xfs, btrfs, or fat32.
+    - (ext4 only): Reclaims the 5% reserved space for root using 'tune2fs -m 0'.
+5.  Persistence: Adds the new disk's PDP to diskmap.tsv automatically (best-effort).
 
-        Note: This is a DESTRUCTIVE operation. Solving two math problems is MANDATORY to proceed.
+Note: This is a DESTRUCTIVE operation. You must type the resolved device,
+persistent path, and PCI path to proceed.
 ```
 
 ## Command Reference: `erase`
@@ -383,15 +369,15 @@ Format a superfloppy disk/partition volume: format <name/id> [options]
 ```text
 Fast metadata wipe (soft erase): erase <name/id> [--soft]
 
-        This is a fast "re-provisioning" wipe. It removes recognizable signatures and zaps GPT/MBR metadata
-        (when the target is a whole disk). It is NOT a secure wipe.
+This is a fast "re-provisioning" wipe. It removes recognizable signatures and zaps GPT/MBR metadata
+(when the target is a whole disk). It is NOT a secure wipe.
 
-        It performs:
-          - wipefs -a (and --force for whole-disk partition-table signatures)
-          - sgdisk --zap-all (GPT) when available
-          - sfdisk (MBR)
+It performs:
+  - wipefs -a (and --force for whole-disk partition-table signatures)
+  - sgdisk --zap-all (GPT) when available
+  - sfdisk (MBR)
 
-        Note: This is a DESTRUCTIVE operation. Solving two math problems is MANDATORY to proceed.
+Note: This is a DESTRUCTIVE operation. You must type both the resolved device path and persistent path to proceed.
 ```
 
 ## Command Reference: `nuke`
@@ -399,49 +385,49 @@ Fast metadata wipe (soft erase): erase <name/id> [--soft]
 ```text
 Securely erase a disk: nuke <name/id>
 
-        Note: You must 'map' a disk first to give it a name before erasing it.
+Note: You must 'map' a disk first to give it a name before erasing it.
 
-        NUANCES & SAFETY:
-        - Whole Disk (sda):
-          Attempts deep hardware-level wipes (NVMe Sanitize, ATA Secure Erase, etc.).
-          Destroys the Partition Table and ALL partitions on the drive.
-        - Partition (sda2):
-          Hardware-level wipes are SKIPPED for safety. The script falls back to
-          highly effective software wipes (blkdiscard or dd zero-overwrite).
-          ONLY the specified partition is wiped; other partitions remain safe.
-        - Mapped Name (1a):
-          Resolves to the physical partition and follows partition-level safety rules.
+NUANCES & SAFETY:
+- Whole Disk (sda):
+  Attempts deep hardware-level wipes (NVMe Sanitize, ATA Secure Erase, etc.).
+  Destroys the Partition Table and ALL partitions on the drive.
+- Partition (sda2):
+  Hardware-level wipes are SKIPPED for safety. The script falls back to
+  highly effective software wipes (blkdiscard or dd zero-overwrite).
+  ONLY the specified partition is wiped; other partitions remain safe.
+- Mapped Name (1a):
+  Resolves to the physical partition and follows partition-level safety rules.
 
-        UNDER THE HOOD:
-        1.  Target Resolution: Maps friendly name to a raw block device.
-        2.  Destructive Wipe:
-            - NVMe: Prioritizes (1) Sanitize Crypto Erase, (2) Sanitize Block Erase,
-              (3) Format Crypto Erase, and (4) Format Block Erase.
-            - SSD: Prioritizes (1) PSID Revert, (2) ATA Sanitize, (3) ATA Secure Erase (Enhanced),
-              (4) ATA Secure Erase (Standard), (5) blkdiscard --secure, and (6) blkdiscard.
-            - HDD: Prioritizes (1) ATA Sanitize, (2) ATA Secure Erase (Enhanced),
-              (3) ATA Secure Erase (Standard), and (4) Zero Overwrite + Verify.
-        3.  Verification: Executes 'udevadm settle' and 'sync' to ensure all operations are committed.
+UNDER THE HOOD:
+1.  Target Resolution: Maps friendly name to a raw block device.
+2.  Destructive Wipe:
+    - NVMe: Prioritizes (1) Sanitize Crypto Erase, (2) Sanitize Block Erase,
+      (3) Format Crypto Erase, and (4) Format Block Erase.
+    - SSD: Prioritizes (1) PSID Revert, (2) ATA Sanitize, (3) ATA Secure Erase (Enhanced),
+      (4) ATA Secure Erase (Standard), (5) blkdiscard --secure, and (6) blkdiscard.
+    - HDD: Prioritizes (1) ATA Sanitize, (2) ATA Secure Erase (Enhanced),
+      (3) ATA Secure Erase (Standard), and (4) Zero Overwrite + Verify.
+3.  Verification: Executes 'udevadm settle' and 'sync' to ensure all operations are committed.
 
-        Note: This is a DESTRUCTIVE operation. Solving two math problems is MANDATORY to proceed.
+Note: This is a DESTRUCTIVE operation. You must type both the resolved device path and persistent path to proceed.
 
-        WARNING: This operation is IRREVERSIBLE.
+WARNING: This operation is IRREVERSIBLE.
 ```
 
 ## Command Reference: `entropy`
 
 ```text
-Plot entropy profile over a device byte range (GiB): entropy <name/id> <start_gib> <end_gib> [--step-mib N] [--window-mib N]
+Plot entropy profile over a raw device range or stitched random samples.
 
-        Example:
-          entropy 7a 0 1
+Range mode (explicit flags required):
+  entropy <name/id> --begin 0 --end 1GiB [--step 1MiB] [--window 1MiB]
 
-        Behavior:
-          - Reads raw device chunks via dd and computes Shannon entropy via ent.
-          - Saves samples and plot under /tmp:
-              /tmp/diskmgr_entropy_<pid>_<ts>.txt
-              /tmp/diskmgr_entropy_<pid>_<ts>.png
-          - Attempts to display the plot on screen via gnuplot/xdg-open.
+Random stitched mode:
+  entropy <name/id> <span> --samples N
+  Example: entropy 1a 1GiB --samples 1000
+  - window size is derived as: span / N (integer bytes)
+  - N random windows are sampled across the whole device
+  - graph X axis is stitched as one contiguous span (not physical offsets)
 ```
 
 ## Command Reference: `entropise`
@@ -449,10 +435,11 @@ Plot entropy profile over a device byte range (GiB): entropy <name/id> <start_gi
 ```text
 High-entropy random overwrite on a disk or partition: entropise <name/id>
 
-        Performs a full-device single pass using /dev/urandom via dd:
-          dd if=/dev/urandom of=<device> bs=16M status=progress oflag=direct conv=fsync
+Performs a full-device single pass using /dev/urandom via dd with an
+explicit byte count (count_bytes) so completion is clean at end-of-device:
+  dd if=/dev/urandom of=<device> bs=16M count=<device_size_bytes> count_bytes              status=progress iflag=fullblock oflag=direct conv=fsync
 
-        This destroys all existing data on the target.
+This destroys all existing data on the target.
 ```
 
 ## Command Reference: `remove`
@@ -460,9 +447,9 @@ High-entropy random overwrite on a disk or partition: entropise <name/id>
 ```text
 Remove a partition from its parent disk: remove <name/id>
 
-        Scope:
-          - Partition targets only.
-          - Whole-disk targets are refused.
+Scope:
+  - Partition targets only.
+  - Whole-disk targets are refused.
 ```
 
 ## Command Reference: `selftest`
@@ -470,11 +457,11 @@ Remove a partition from its parent disk: remove <name/id>
 ```text
 Start a SMART long self-test: selftest <name/id>
 
-        Runs smartctl long test against the underlying DISK device for the mapping.
-        - If the mapping points to a partition, diskmgr targets the parent disk.
-        - If the disk transport is USB and the device is /dev/sdX, diskmgr uses:
-              smartctl -d sat -t long /dev/sdX
-          (common for USB-SATA bridges).
+Runs smartctl long test against the underlying DISK device for the mapping.
+- If the mapping points to a partition, diskmgr targets the parent disk.
+- If the disk transport is USB and the device is /dev/sdX, diskmgr uses:
+      smartctl -d sat -t long /dev/sdX
+  (common for USB-SATA bridges).
 ```
 
 ## Command Reference: `health`
@@ -482,11 +469,11 @@ Start a SMART long self-test: selftest <name/id>
 ```text
 Display SMART health for a mapped disk: health <name/id>
 
-        Runs smartctl against the underlying DISK device for the mapping.
-        - If the mapping points to a partition, diskmgr automatically targets the parent disk.
-        - If the disk transport is USB and the device is /dev/sdX, diskmgr uses:
-              smartctl -d sat -x /dev/sdX
-          (common for USB-SATA bridges).
+Runs smartctl against the underlying DISK device for the mapping.
+- If the mapping points to a partition, diskmgr automatically targets the parent disk.
+- If the disk transport is USB and the device is /dev/sdX, diskmgr uses:
+      smartctl -d sat -x /dev/sdX
+  (common for USB-SATA bridges).
 ```
 
 ## Command Reference: `clone`
@@ -494,59 +481,59 @@ Display SMART health for a mapped disk: health <name/id>
 ```text
 Clone one disk or partition to another: clone <src_name/id> <dst_name/id>
 
-        WARNING (DATA DESTRUCTION):
-        - This command writes directly to the destination block device (like running ddrescue/dd).
-        - The destination is overwritten starting at byte 0. Any existing partition table,
-          filesystems, and files on the destination WILL BE DESTROYED.
-        - If the destination is larger than the source, bytes beyond the source size are
-          not overwritten. Old data may still physically exist there, but it will not be
-          referenced by the cloned partition table.
-        - diskmgr does NOT unmount the destination for you. Unmount/close it first to
-          avoid live corruption.
-        - If you need to sanitize the destination (secure wipe), run: nuke <dst_name>
-        - If you only need a fast metadata wipe for re-provisioning, run: erase <dst_name>
+WARNING (DATA DESTRUCTION):
+- This command writes directly to the destination block device (like running ddrescue/dd).
+- The destination is overwritten starting at byte 0. Any existing partition table,
+  filesystems, and files on the destination WILL BE DESTROYED.
+- If the destination is larger than the source, bytes beyond the source size are
+  not overwritten. Old data may still physically exist there, but it will not be
+  referenced by the cloned partition table.
+- diskmgr does NOT unmount the destination for you. Unmount/close it first to
+  avoid live corruption.
+- If you need to sanitize the destination (secure wipe), run: nuke <dst_name>
+- If you only need a fast metadata wipe for re-provisioning, run: erase <dst_name>
 
-        Note: The target disk MUST be the same size or larger than the source.
+Note: The target disk MUST be the same size or larger than the source.
 
-        STEP-BY-STEP PROCESS:
-        1.  Resolution: Maps both friendly names to their physical device nodes (PDP).
-        2.  Size Validation: Queries 'blockdev --getsize64' for both. Aborts if dst < src.
-        3.  Safety Audit: Verifies that the target is NOT the system root drive.
-        4.  Confirmation: Requires solving two math problems to authorize data destruction.
-        5.  Cloning: Executes ddrescue in two phases:
-            - Pass 1: 'ddrescue --force <src> <dst> <mapfile>'
-            - Retry:  'ddrescue --force -r3 <src> <dst> <mapfile>'
-        6.  Sync: Flushes kernel buffers to ensure all data is physically committed to disk.
+STEP-BY-STEP PROCESS:
+1.  Resolution: Maps both friendly names to their physical device nodes (PDP).
+2.  Size Validation: Queries 'blockdev --getsize64' for both. Aborts if dst < src.
+3.  Safety Audit: Verifies that the target is NOT the system root drive.
+4.  Confirmation: Requires typing resolved device and persistent path to authorize data destruction.
+5.  Cloning: Executes ddrescue in two phases:
+    - Pass 1: 'ddrescue --force <src> <dst> <mapfile>'
+    - Retry:  'ddrescue --force -r3 <src> <dst> <mapfile>'
+6.  Sync: Flushes kernel buffers to ensure all data is physically committed to disk.
 
-        Note: This is a DESTRUCTIVE operation. Solving two math problems is MANDATORY to proceed.
+Note: This is a DESTRUCTIVE operation. You must type both the resolved device path and persistent path to proceed.
 
-        SCENARIOS:
-        - Drive to Drive:
-          Creates a 1:1 bit-perfect clone. The target disk becomes an identical twin,
-          including the Partition Table, UUIDs, and all partitions.
-          Note: If the target is larger, the extra space appears as 'free' at the end.
-        - Partition to Partition:
-          Copies the internal data of the source partition into the target partition.
-          Useful for moving a LUKS container or a specific filesystem.
-          Warning: Filesystem UUIDs will be duplicated; avoid mounting both simultaneously.
-        - Partition to Drive:
-          The source partition's content is written to the start of the physical disk.
-          This destroys the target's partition table and turns the disk into a
-          "partitionless" volume (e.g., a raw LUKS device).
-        - Drive to Partition (DANGEROUS):
-          Writes the source's boot sectors and partition table into the target partition.
-          This usually results in an unreadable "nested" structure.
+SCENARIOS:
+- Drive to Drive:
+  Creates a 1:1 bit-perfect clone. The target disk becomes an identical twin,
+  including the Partition Table, UUIDs, and all partitions.
+  Note: If the target is larger, the extra space appears as 'free' at the end.
+- Partition to Partition:
+  Copies the internal data of the source partition into the target partition.
+  Useful for moving a LUKS container or a specific filesystem.
+  Warning: Filesystem UUIDs will be duplicated; avoid mounting both simultaneously.
+- Partition to Drive:
+  The source partition's content is written to the start of the physical disk.
+  This destroys the target's partition table and turns the disk into a
+  "partitionless" volume (e.g., a raw LUKS device).
+- Drive to Partition (DANGEROUS):
+  Writes the source's boot sectors and partition table into the target partition.
+  This usually results in an unreadable "nested" structure.
 
-        CLONING & ENCRYPTION (CRITICAL):
-        - Source is LOCKED (e.g., clone sda sdb):
-          Creates a bit-perfect "Encrypted Twin." The destination remains encrypted
-          and requires the same password. (Recommended for backups).
-        - Source is OPEN (e.g., clone sda sdb):
-          Copies encrypted data but may capture a "dirty" filesystem state if
-          files are currently being written. (Close before cloning if possible).
-        - Source is MAPPER (e.g., clone dm-0 sdb):
-          Performs a "Strip-and-Clone." The destination receives RAW DECRYPTED
-          DATA. The resulting clone will be completely UNENCRYPTED.
+CLONING & ENCRYPTION (CRITICAL):
+- Source is LOCKED (e.g., clone sda sdb):
+  Creates a bit-perfect "Encrypted Twin." The destination remains encrypted
+  and requires the same password. (Recommended for backups).
+- Source is OPEN (e.g., clone sda sdb):
+  Copies encrypted data but may capture a "dirty" filesystem state if
+  files are currently being written. (Close before cloning if possible).
+- Source is MAPPER (e.g., clone dm-0 sdb):
+  Performs a "Strip-and-Clone." The destination receives RAW DECRYPTED
+  DATA. The resulting clone will be completely UNENCRYPTED.
 ```
 
 ## Command Reference: `open`
@@ -554,33 +541,36 @@ Clone one disk or partition to another: clone <src_name/id> <dst_name/id>
 ```text
 Unlock (if encrypted) and mount a disk: open <name/id>
 
-        UNDER THE HOOD:
-        1.  Identity Resolution: Looks up the friendly name in diskmap.tsv.
-        2.  Hardware Wait: Polls for up to 10 seconds to allow for hardware spin-up/udev events.
-        3.  Validation:
-            - Runs 'cryptsetup isLuks' to check for encryption.
-            - If NOT encrypted (Plain Disk):
-              * Skips decryption step.
-              * Verifies the existence of a valid filesystem.
-              * Proceeds to label detection and mounting.
-        4.  Decryption (LUKS only):
-            - Executes 'passgen' to retrieve the passphrase.
-            - Tries 'cryptsetup open' with on-disk LUKS header first.
-            - If that fails, retries with detached header at ~/.local/share/diskmgr/<mapping_name> when present.
-        5.  Mounting:
-            - Uses /etc/fstab mountpoint/options when an entry exists for the device.
-            - Otherwise identifies preferred mountpoint: /media/$USER/<label>.
-            - If no hardware label is present, falls back to /media/$USER/<mapping_name>.
-            - Ensures the directory exists and attaches the device.
-            - For btrfs, enforces compression (compress=zstd:3) on the mounted filesystem.
-        6.  Policy Enforcement: If the disk is already mounted at a non-standard path,
-            it unmounts and remounts it to the preferred path.
+UNDER THE HOOD:
+1.  Identity Resolution: Looks up the friendly name in diskmap.tsv.
+2.  Hardware Wait: Polls for up to 60 seconds to allow for hardware spin-up/udev events.
+3.  Validation:
+    - Runs 'cryptsetup isLuks' to check for encryption.
+    - If NOT encrypted (Plain Disk):
+      * Skips decryption step.
+      * Verifies the existence of a valid filesystem.
+      * Proceeds to label detection and mounting.
+4.  Decryption (LUKS only):
+    - Executes 'passgen' to retrieve the passphrase.
+    - Tries 'cryptsetup open' with on-disk LUKS header first.
+    - If that fails, retries with detached header at ~/.local/share/diskmgr/<mapping_name> when present.
+5.  Mounting:
+    - Uses /etc/fstab mountpoint/options when an entry exists for the device.
+    - Otherwise identifies preferred mountpoint: /media/$USER/<label>.
+    - If no hardware label is present, falls back to /media/$USER/<mapping_name>.
+    - Ensures the directory exists and attaches the device.
+    - Clears a stale mount whose /dev source no longer exists before reusing the preferred path.
+      A preferred path occupied by an existing different device remains blocked.
+    - For btrfs, default mount policy is HDD => compress-force=zstd:12; non-HDD => no compression option.
+    - Override per command with --compress=<mode> or --compress-force=<mode>.
+6.  Policy Enforcement: If the disk is already mounted at a non-standard path,
+    it unmounts and remounts it to the preferred path.
 
-        SAFETY NOTE:
-        - If your mapping points to a whole disk (e.g. /dev/sda) but the actual LUKS/filesystem
-          lives on a partition (e.g. /dev/sda2), diskmgr will only auto-select a partition when
-          it is unambiguous (exactly one candidate). Otherwise it will refuse and ask you to map
-          the correct partition explicitly.
+SAFETY NOTE:
+- If your mapping points to a whole disk (e.g. /dev/sda) but the actual LUKS/filesystem
+  lives on a partition (e.g. /dev/sda2), diskmgr will only auto-select a partition when
+  it is unambiguous (exactly one candidate). Otherwise it will refuse and ask you to map
+  the correct partition explicitly.
 ```
 
 ## Command Reference: `close`
@@ -588,16 +578,21 @@ Unlock (if encrypted) and mount a disk: open <name/id>
 ```text
 Unmount and lock (if encrypted) a disk: close <name/id> [--force]
 
-        UNDER THE HOOD:
-        1.  Unmounting (Encrypted & Plain):
-            - Flushes all pending writes to the disk (data integrity).
-            - Terminates active file handles to the device.
-            - Attempts unmount by mapper path (LUKS), source path (Plain), or guessed mountpoint.
-            - If target is a whole disk, also unmounts mounted child partitions on that disk.
-        2.  Locking (LUKS only):
-            - Commands the kernel to wipe encryption keys from RAM.
-            - Removes the virtual cleartext device from /dev/mapper/.
-        3.  Audit: Checks and displays remaining active mappings for security awareness.
+UNDER THE HOOD:
+1.  Unmounting (Encrypted & Plain):
+    - With --force, terminates userspace processes holding the filesystem.
+    - Flushes the target filesystem, then attempts a normal unmount.
+    - Waits for a bounded recovery period if only kernel writeback remains.
+    - --force cannot kill kernel tasks stuck in uninterruptible D-state I/O.
+    - Treats a vanished source as an unplug and cleans stale mount directories after teardown.
+    - Attempts unmount by mapper path (LUKS), source path (Plain), or guessed mountpoint.
+    - If target is a whole disk, also unmounts mounted child partitions on that disk.
+2.  Locking (LUKS only):
+    - Commands the kernel to wipe encryption keys from RAM.
+    - Removes the virtual cleartext device from /dev/mapper/.
+3.  Audit: Checks and displays remaining active mappings for security awareness.
+4.  Rescue: A --force kernel detach is single-attempt and only runs after all
+    filesystems and child LUKS mappings have been closed.
 ```
 
 ## Command Reference: `luks`
@@ -605,17 +600,17 @@ Unmount and lock (if encrypted) a disk: close <name/id> [--force]
 ```text
 LUKS encryption management: luks <passwd|params|backup|restore|header|wipe> [options]
 
-        Subcommands:
-          passwd <name>
-                                 Change the LUKS passphrase (old from passgen, new passphrase confirmed via passgen twice).
-          params <name> time=<N> memory=<VALUE> parallelism=<N>
-                                 Change PBKDF parameters without changing passphrase.
-                                 Example: luks params 7a time=8 memory=4GiB parallelism=4
-          backup <name> [file]    Save the LUKS header to a file.
-                                 Default file when omitted: ~/.local/share/diskmgr/<name>
-          restore <name> <file>   Restore the LUKS header from a file (Destructive).
-          header <name>           Print the current LUKS header (cryptsetup luksDump).
-          wipe <name>             Overwrite LUKS header/keyslots with random data (Destructive; test helper).
+Subcommands:
+  passwd <name>
+                         Change the LUKS passphrase (old from passgen, new passphrase confirmed via passgen twice).
+  params <name> time=<N> memory=<VALUE> parallelism=<N>
+                         Change PBKDF parameters without changing passphrase.
+                         Example: luks params 7a time=8 memory=4GiB parallelism=4
+  backup <name> [file]    Save the LUKS header to a file.
+                         Default file when omitted: ~/.local/share/diskmgr/<name>
+  restore <name> <file>   Restore the LUKS header from a file (Destructive).
+  header <name>           Print the current LUKS header (cryptsetup luksDump).
+  wipe <name>             Overwrite LUKS header/keyslots with random data (Destructive; test helper).
 ```
 
 ## Command Reference: `label`
@@ -623,18 +618,18 @@ LUKS encryption management: luks <passwd|params|backup|restore|header|wipe> [opt
 ```text
 Get or set the filesystem label of an OPEN disk: label <name> [new_label] [--fstab]
 
-        UNDER THE HOOD:
-        1.  Validation: Verifies that the disk is currently open/unlocked.
-        2.  Identification: Queries the filesystem type (ext4, xfs, etc.) via 'lsblk'.
-        3.  Labeling:
-            - ext4: Uses 'e2label' on the active device.
-            - xfs: Requires a temporary unmount, then uses 'xfs_admin -L', then remounts.
-        4.  Refresh: Executes 'udevadm trigger' to force tools like 'lsblk' to see the change.
-        5.  Optional fstab update (--fstab):
-            - Removes old label-based /etc/fstab entry.
-            - Adds UUID-based entry with mountpoint /mnt/<new_label>.
+UNDER THE HOOD:
+1.  Validation: Verifies that the disk is currently open/unlocked.
+2.  Identification: Queries the filesystem type (ext4, xfs, etc.) via 'lsblk'.
+3.  Labeling:
+    - ext4: Uses 'e2label' on the active device.
+    - xfs: Requires a temporary unmount, then uses 'xfs_admin -L', then remounts.
+4.  Refresh: Executes 'udevadm trigger' to force tools like 'lsblk' to see the change.
+5.  Optional fstab update (--fstab):
+    - Removes old label-based /etc/fstab entry.
+    - Adds UUID-based entry with mountpoint /mnt/<new_label>.
 
-        The label is written directly to the disk hardware and persists across different computers.
+The label is written directly to the disk hardware and persists across different computers.
 ```
 
 ## Command Reference: `remount`
@@ -642,26 +637,27 @@ Get or set the filesystem label of an OPEN disk: label <name> [new_label] [--fst
 ```text
 Remount an OPEN disk to its label mountpoint: remount <name>
 
-        This fixes "mounted twice" and "data1/data2 suffix" issues by moving the mount
-        to the canonical path: /mnt/<label> when the device has an /etc/fstab entry;
-        otherwise /media/$USER/<label>.
+This fixes "mounted twice" and "data1/data2 suffix" issues by moving the mount
+to the canonical path: /mnt/<label> when the device has an /etc/fstab entry;
+otherwise /media/$USER/<label>.
 
-        SAFETY RULES:
-        - Refuses if the target mountpoint is already mounted by a different device.
-        - Refuses if the target directory exists, is not a mountpoint, and is non-empty.
-        - Refuses only when neither /etc/fstab entry nor filesystem LABEL is available.
+SAFETY RULES:
+- Refuses if the target mountpoint is already mounted by a different device.
+- Refuses if the target directory exists, is not a mountpoint, and is non-empty.
+- Refuses only when neither /etc/fstab entry nor filesystem LABEL is available.
 
-        UNDER THE HOOD:
-        1.  Resolve Device: Uses /dev/mapper/<name> if present, otherwise the mapped source path.
-            If the mapping is LUKS and not OPEN, it refuses.
-        2.  Target Mountpoint:
-            - If /etc/fstab entry exists, enforce /mnt/<label> (and update the fstab mountpoint if needed).
-            - Otherwise, fall back to /media/$USER/<label>.
-        3.  Preflight: Validates selected mountpoint is safe to use.
-        4.  Unmount: Unmounts all current mount targets for the device (if any).
-        5.  Cleanup: Removes empty old mountpoint directories under /media/$USER (best-effort rmdir).
-        6.  Mount: Uses fstab mount when present; otherwise direct mount to LABEL path.
-            For btrfs, compression is enforced (compress=zstd:3).
+UNDER THE HOOD:
+1.  Resolve Device: Uses /dev/mapper/<name> if present, otherwise the mapped source path.
+    If the mapping is LUKS and not OPEN, it refuses.
+2.  Target Mountpoint:
+    - If /etc/fstab entry exists, enforce /mnt/<label> (and update the fstab mountpoint if needed).
+    - Otherwise, fall back to /media/$USER/<label>.
+3.  Preflight: Validates selected mountpoint is safe to use.
+4.  Unmount: Unmounts all current mount targets for the device (if any).
+5.  Cleanup: Removes empty old mountpoint directories under /media/$USER (best-effort rmdir).
+6.  Mount: Uses fstab mount when present; otherwise direct mount to LABEL path.
+    For btrfs, default remount policy is HDD => compress-force=zstd:12; non-HDD => no compression option.
+    Override per command with --compress=<mode> or --compress-force=<mode>.
 ```
 
 ## Command Reference: `sync`
@@ -669,16 +665,16 @@ Remount an OPEN disk to its label mountpoint: remount <name>
 ```text
 Synchronize two filesystems: sync <primary> <secondary>
 
-        UNDER THE HOOD:
-        1.  Validation: Verifies both endpoints resolve to directories.
-            - Mapped names must already be mounted.
-            - Absolute paths must exist and be directories.
-        2.  Pre-scan: Runs rsync dry-run stats to compute planned transfer bytes.
-        3.  Confirmation: Requires solving two math problems (DESTRUCTIVE for secondary).
-        4.  Execution: Runs rsync and reports real progress as bytes_done / planned_bytes.
+UNDER THE HOOD:
+1.  Validation: Verifies both endpoints resolve to directories.
+    - Mapped names must already be mounted.
+    - Absolute paths must exist and be directories.
+2.  Pre-scan: Runs rsync dry-run stats to compute planned transfer bytes.
+3.  Confirmation: Requires typing resolved device and persistent path for the destructive secondary target.
+4.  Execution: Runs rsync and reports real progress as bytes_done / planned_bytes.
 
-        Note: The SECONDARY disk will be modified to match the PRIMARY disk.
-        All files on the secondary that do not exist on the primary will be DELETED.
+Note: The SECONDARY disk will be modified to match the PRIMARY disk.
+All files on the secondary that do not exist on the primary will be DELETED.
 ```
 
 ## Command Reference: `diff`
@@ -686,10 +682,10 @@ Synchronize two filesystems: sync <primary> <secondary>
 ```text
 Preview differences between two mounted filesystems: diff <primary_name> <secondary_name> [--depth N] [-d] [--fast] [--checksum]
 
-        Endpoints may be mapping names/IDs (must be mounted) or absolute directory paths.
-        Uses rsync dry-run itemized output (primary -> secondary) and prints:
-        1) Change counts and byte estimates (created/modified/deleted, net change).
-        2) Hierarchy summary by subtree up to --depth levels.
+Endpoints may be mapping names/IDs (must be mounted) or absolute directory paths.
+Uses rsync dry-run itemized output (primary -> secondary) and prints:
+1) Change counts and byte estimates (created/modified/deleted, net change).
+2) Hierarchy summary by subtree up to --depth levels.
 ```
 
 ## Command Reference: `defrag`
@@ -697,17 +693,17 @@ Preview differences between two mounted filesystems: diff <primary_name> <second
 ```text
 Defragment a mounted filesystem: defrag <name> [--compress]
 
-        UNDER THE HOOD:
-        1.  Validation: Verifies the disk is mapped and currently mounted.
-        2.  Confirmation: Requires solving two math problems.
-        3.  Execution:
-            - ext4:  runs 'sudo e4defrag <mountpoint>'
-            - btrfs: runs 'sudo btrfs filesystem defragment -r -v <mountpoint>'
-                     optional: add '--compress' to use '-czstd' recompression mode.
-                     with live progress counters (total files + current directory),
-                     then 'sudo btrfs balance start -dusage=50 <mountpoint>'
-        4.  Recording: Stores a timestamp on the mountpoint root via:
-              sudo setfattr -n user.last_defrag -v "<date>" <mountpoint>
+UNDER THE HOOD:
+1.  Validation: Verifies the disk is mapped and currently mounted.
+2.  Confirmation: Requires typing YES.
+3.  Execution:
+    - ext4:  runs 'sudo e4defrag <mountpoint>'
+    - btrfs: runs 'sudo btrfs filesystem defragment -r -v <mountpoint>'
+             optional: add '--compress' to use '-czstd' recompression mode.
+             with live progress counters (total files + current directory),
+             then 'sudo btrfs balance start -dusage=50 <mountpoint>'
+4.  Recording: Stores a timestamp on the mountpoint root via:
+      sudo setfattr -n user.last_defrag -v "<date>" <mountpoint>
 ```
 
 ## Command Reference: `fshealth`
@@ -715,20 +711,20 @@ Defragment a mounted filesystem: defrag <name> [--compress]
 ```text
 Filesystem health/diagnostics: fshealth <name>
 
-        Shows filesystem-specific diagnostic output and local "maintenance" timestamps.
+Shows filesystem-specific diagnostic output and local "maintenance" timestamps.
 
-        - ext4:  sudo tune2fs -l <device>
-                sudo e4defrag -c <mountpoint>   (fragmentation score + extents/files ratio)
-        - btrfs: sudo btrfs filesystem usage <mountpoint>
-                sudo btrfs filesystem show <mountpoint>
-                sudo btrfs filesystem df <mountpoint>
-                sudo btrfs device stats <mountpoint>
-                sudo btrfs scrub status <mountpoint>
-                sudo compsize <mountpoint>  (extents/files ratio)
-        - xfs:   xfs_info <mountpoint>
+- ext4:  sudo tune2fs -l <device>
+        sudo e4defrag -c <mountpoint>   (fragmentation score + extents/files ratio)
+- btrfs: sudo btrfs filesystem usage <mountpoint>
+        sudo btrfs filesystem show <mountpoint>
+        sudo btrfs filesystem df <mountpoint>
+        sudo btrfs device stats <mountpoint>
+        sudo btrfs scrub status <mountpoint>
+        sudo compsize <mountpoint>  (extents/files ratio)
+- xfs:   xfs_info <mountpoint>
 
-        Also reads xattrs from the mountpoint root:
-          user.last_defrag, user.last_scrub
+Also reads xattrs from the mountpoint root:
+  user.last_defrag, user.last_scrub
 ```
 
 ## Command Reference: `scrub`
@@ -736,20 +732,20 @@ Filesystem health/diagnostics: fshealth <name>
 ```text
 Scrub a mounted btrfs filesystem: scrub <name> [--no-watch]
 
-        UNDER THE HOOD:
-        1.  Validation: Verifies the disk is mapped and currently mounted.
-        2.  Confirmation: Requires solving two math problems.
-        3.  Execution: Runs 'sudo btrfs scrub start -B -R <mountpoint>'.
-        4.  Recording: Stores a timestamp on the mountpoint root via:
-              sudo setfattr -n user.last_scrub -v "<date>" <mountpoint>
+UNDER THE HOOD:
+1.  Validation: Verifies the disk is mapped and currently mounted.
+2.  Confirmation: Requires typing YES.
+3.  Execution: Runs 'sudo btrfs scrub start -B -R <mountpoint>'.
+4.  Recording: Stores a timestamp on the mountpoint root via:
+      sudo setfattr -n user.last_scrub -v "<date>" <mountpoint>
 
-        OPTIONAL:
-        - default (watch mode): tails kernel logs during the scrub and prints checksum errors as they happen.
-        - --no-watch: disable log tailing (quiet; you only get the scrub summary output).
-          Btrfs typically logs logical addresses (and sometimes inode numbers); diskmgr will attempt
-          to resolve those to paths via:
-            btrfs inspect-internal logical-resolve <logical> <mountpoint>
-            btrfs inspect-internal inode-resolve <ino> <mountpoint>
+OPTIONAL:
+- default (watch mode): tails kernel logs during the scrub and prints checksum errors as they happen.
+- --no-watch: disable log tailing (quiet; you only get the scrub summary output).
+  Btrfs typically logs logical addresses (and sometimes inode numbers); diskmgr will attempt
+  to resolve those to paths via:
+    btrfs inspect-internal logical-resolve <logical> <mountpoint>
+    btrfs inspect-internal inode-resolve <ino> <mountpoint>
 ```
 
 ## Command Reference: `version`
@@ -763,10 +759,10 @@ Print diskmgr version
 ```text
 Convert ext4 -> btrfs in place (no data copy): convert <name/id>
 
-        Uses btrfs-convert on an UNMOUNTED ext4 filesystem.
-        - Plain ext4 targets are supported directly.
-        - If target is crypto_LUKS, diskmgr tries to resolve the open payload device
-          (e.g. /dev/mapper/<name> or a crypt child) and convert that.
+Uses btrfs-convert on an UNMOUNTED ext4 filesystem.
+- Plain ext4 targets are supported directly.
+- If target is crypto_LUKS, diskmgr tries to resolve the open payload device
+  (e.g. /dev/mapper/<name> or a crypt child) and convert that.
 ```
 
 ## Configuration

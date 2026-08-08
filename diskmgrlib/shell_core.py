@@ -1,6 +1,35 @@
 """Interactive shell lifecycle and built-in command plumbing."""
 
-from .common import *
+import argparse
+import atexit
+import cmd
+import json
+import os
+import re
+from pathlib import Path
+
+try:
+    import readline
+except ImportError:
+    readline = None
+
+from .devices import _lsblk_type
+from .mappings import read_luks_map
+from .runtime import (
+    Colors,
+    DEFAULT_HISTORY_FILE,
+    HISTORY_FILE_ENV,
+    LUKS_HEADER_BACKUP_DIR,
+    LUKS_PBKDF_DEFAULT_MEMORY_LABEL,
+    LUKS_PBKDF_DEFAULT_THREADS,
+    LUKS_PBKDF_DEFAULT_TIME,
+    MAX_HISTORY_ENTRIES,
+    VERSION,
+    command_failed,
+    log,
+    reset_command_status,
+    run_command_hard_timeout,
+)
 
 
 class CmdArgumentParser(argparse.ArgumentParser):
@@ -24,6 +53,7 @@ class ShellCoreMixin:
         self.id_cache = {}
         self.missing_map_id_cache = {}
         self._ext4_tune2fs_cache = {}
+        self.last_command_status = 0
         self.history_file = Path(os.environ.get(HISTORY_FILE_ENV, str(DEFAULT_HISTORY_FILE))).expanduser()
         self.history_enabled = False
         self._init_history()
@@ -31,6 +61,31 @@ class ShellCoreMixin:
     def emptyline(self):
         """Do nothing on blank input (disable cmd.Cmd last-command repeat)."""
         return
+
+    def onecmd(self, line):
+        """Execute one command with status tracking and an exception boundary."""
+        reset_command_status()
+        self.last_command_status = 0
+        if '\n' in str(line) or '\r' in str(line):
+            log(
+                "Multiline input was not executed. Paste the command, review it, then press Enter.",
+                'ERROR',
+            )
+            self.last_command_status = 2
+            return False
+        try:
+            stop = super().onecmd(line)
+        except KeyboardInterrupt:
+            raise
+        except Exception as exc:
+            log(f"Command failed unexpectedly: {type(exc).__name__}: {exc}", 'ERROR')
+            stop = False
+        self.last_command_status = 1 if command_failed() else 0
+        return stop
+
+    def default(self, line):
+        command = str(line or '').split(None, 1)[0] if str(line or '').strip() else ''
+        log(f"Unknown command: {command or '<empty>'}. Type 'help' for available commands.", 'ERROR')
 
     def _init_history(self):
         if readline is None:
@@ -328,8 +383,8 @@ class ShellCoreMixin:
         print("      Use: erase <name> first if the whole disk is currently partitioned.")
         print(f"  {Colors.OKGREEN}erase <name/id>{Colors.ENDC}")
         print("      Fast metadata wipe for re-provisioning (wipefs + zap GPT/MBR metadata) on disk/part.")
-        print("      Whole-disk erase wipes partition signatures/metadata, GPT headers, protective MBR metadata,")
-        print("      and rewrites an empty MBR table in MBR mode.")
+        print("      Whole-disk erase wipes partition signatures/metadata, GPT headers, and protective MBR metadata;")
+        print("      it leaves the device without a newly-created partition table. Use 'create' afterward if needed.")
         print(f"  {Colors.OKGREEN}nuke <name/id>{Colors.ENDC}")
         print("      Secure erase (multi-step hardware-aware wipe) on disk/part.")
         print(f"  {Colors.OKGREEN}entropise <name/id>{Colors.ENDC}")

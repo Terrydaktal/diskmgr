@@ -1,6 +1,25 @@
 """MountingCommands command implementations."""
 
-from ..common import *
+import argparse
+import cmd
+import json
+import os
+from pathlib import Path
+import re
+import shlex
+import shutil
+import subprocess
+import time
+from ..runtime import LUKS_HEADER_BACKUP_DIR, PASSGEN_BIN, log, run_command, run_command_hard_timeout
+from ..devices import _lsblk_fstype, _lsblk_partitions, _lsblk_type, _sysfs_block_name, _sysfs_child_partition_devs, _sysfs_is_whole_disk, _sysfs_to_parent_disk_name
+from ..mounts import cleanup_mountpoint_dir, find_mount_targets
+from ..mappings import read_luks_map, update_luks_map, validate_mapping_name
+from ..safety import (
+    safe_mount_path,
+    validate_absolute_path,
+    validate_filesystem_label,
+    validate_storage_name,
+)
 from ..shell_core import CmdArgumentParser
 
 
@@ -11,7 +30,7 @@ class MountingCommands:
 
         UNDER THE HOOD:
         1.  Identity Resolution: Looks up the friendly name in diskmap.tsv.
-        2.  Hardware Wait: Polls for up to 10 seconds to allow for hardware spin-up/udev events.
+        2.  Hardware Wait: Polls for up to 60 seconds to allow for hardware spin-up/udev events.
         3.  Validation:
             - Runs 'cryptsetup isLuks' to check for encryption.
             - If NOT encrypted (Plain Disk):
@@ -88,7 +107,11 @@ class MountingCommands:
                 except Exception:
                     continue
         else:
-            mapping_name = target
+            try:
+                mapping_name = validate_mapping_name(target)
+            except ValueError as exc:
+                log(f"Invalid mapping name: {exc}", 'ERROR')
+                return
             if mapping_name not in self.mappings:
                 log(f"Unknown mapping: {mapping_name}. Use 'list' to find Discovery IDs and 'map' them first.", 'ERROR')
                 return
@@ -96,8 +119,16 @@ class MountingCommands:
 
         normalized_src = self._normalize_mapping_target(src)
         if normalized_src != src and mapping_name:
-            self.mappings[mapping_name] = normalized_src
-            save_luks_map(self.mappings)
+            def update_target(current):
+                if current.get(mapping_name) != src:
+                    raise ValueError(f"Mapping '{mapping_name}' changed concurrently; retry open.")
+                current[mapping_name] = normalized_src
+                return current
+            try:
+                self.mappings = update_luks_map(update_target)
+            except ValueError as exc:
+                log(str(exc), 'ERROR')
+                return
             log(f"Normalized mapping target: {src} -> {normalized_src}")
             src = normalized_src
 
@@ -173,7 +204,10 @@ class MountingCommands:
         if self._block_if_root_drive(mapped_devnode, f"open {op_ref}", allow_sibling_partitions=True):
             return
         devnode = mapped_devnode
-        detached_header = str(LUKS_HEADER_BACKUP_DIR / mapping_name) if mapping_name else None
+        detached_header = (
+            validate_absolute_path(str(LUKS_HEADER_BACKUP_DIR / mapping_name), 'detached header')
+            if mapping_name else None
+        )
         has_detached_header = bool(detached_header and os.path.isfile(detached_header))
         force_detached_open = False
 
@@ -287,11 +321,26 @@ class MountingCommands:
                         log(f"Unmounting stale target {mp}...")
                         res_um = run_command(['umount', mp], sudo=True, check=False)
                         if getattr(res_um, 'returncode', 1) != 0:
-                            # Detached/removed media can leave mountpoints that need a lazy detach.
-                            log(f"Normal unmount failed for {mp}; trying lazy unmount.", 'WARN')
-                            run_command(['umount', '-l', mp], sudo=True, check=False)
+                            detail = (getattr(res_um, 'stderr', '') or '').strip()
+                            log(
+                                f"Cannot recycle stale mapping because normal unmount failed for "
+                                f"{mp}: {detail or 'unknown error'}. Close holders and retry; "
+                                "diskmgr will not use lazy unmount.",
+                                'ERROR',
+                            )
+                            return
                         cleanup_mountpoint_dir(mp)
-                    run_command(['cryptsetup', 'close', mapping_name], sudo=True, check=False)
+                    close_result = run_command(
+                        ['cryptsetup', 'close', mapping_name], sudo=True, check=False
+                    )
+                    if getattr(close_result, 'returncode', 1) != 0:
+                        detail = (getattr(close_result, 'stderr', '') or '').strip()
+                        log(
+                            f"Failed to close stale mapping {mapping_name}: "
+                            f"{detail or 'cryptsetup failed'}",
+                            'ERROR',
+                        )
+                        return
                     for _ in range(20):
                         if not os.path.exists(mapper_path):
                             break
@@ -306,8 +355,10 @@ class MountingCommands:
             if needs_open:
                 log(f"Opening LUKS mapping {mapping_name}...")
                 # Get passphrase from passgen once and reuse for any fallback attempt.
-                pg_cmd = subprocess.Popen([PASSGEN_BIN], stdout=subprocess.PIPE, text=True)
-                passphrase = pg_cmd.communicate()[0]
+                passphrase = run_command([PASSGEN_BIN], capture_output=True).stdout
+                if not str(passphrase or '').strip():
+                    log("passgen returned an empty passphrase.", 'ERROR')
+                    return
 
                 if force_detached_open:
                     if not os.path.isfile(detached_header):
@@ -378,17 +429,26 @@ class MountingCommands:
             if res_b.stdout.strip():
                 fs_label = res_b.stdout.strip()
                 if not mapping_name:
-                    mount_name = fs_label
+                    try:
+                        mount_name = validate_storage_name(fs_label, 'filesystem label')
+                    except ValueError as exc:
+                        log(
+                            f"Filesystem label is unsafe for use as a mountpoint ({exc}); "
+                            f"using device name {os.path.basename(devnode)!r} instead.",
+                            'WARN',
+                        )
         except:
             pass
 
-        fallback_mountpoint = f"/media/{os.environ.get('USER', 'root')}/{mount_name}"
+        media_root = f"/media/{os.environ.get('USER', 'root')}"
+        fallback_mountpoint = safe_mount_path(media_root, mount_name)
         mountpoint, use_fstab_mount, fstab_entry = self._select_mountpoint_for_device(
             target_to_mount,
             fallback_mountpoint,
             preferred_label=(fs_label or mount_name)
         )
         if use_fstab_mount:
+            mountpoint = validate_absolute_path(mountpoint, 'fstab mountpoint')
             log(f"Using fstab mount for {target_to_mount}: {fstab_entry['spec']} -> {mountpoint}")
 
         # Safety Check: Is this mountpoint already in use by another device?
@@ -697,18 +757,46 @@ class MountingCommands:
                 uniq.append(pid)
             return uniq
 
+        def _pid_start_time(pid):
+            """Return Linux process start time so a reused PID cannot be killed."""
+            try:
+                fields = Path(f"/proc/{int(pid)}/stat").read_text(encoding='ascii').split()
+                return fields[21] if len(fields) > 21 else None
+            except (OSError, ValueError):
+                return None
+
         def _force_kill_mount_holders(mp):
             """Kill mount holders with SIGKILL in force mode."""
             pids = _collect_mount_holder_pids(mp)
             if not pids:
                 log(f"--force enabled, but no killable holder PIDs found for {mp}.", 'WARN')
                 return []
-            log(f"--force enabled: sending SIGKILL to holder PIDs: {', '.join(str(p) for p in pids)}", 'WARN')
+            guarded = {
+                pid: _pid_start_time(pid)
+                for pid in pids
+            }
+            guarded = {
+                pid: start
+                for pid, start in guarded.items()
+                if start is not None
+            }
+            if not guarded:
+                log(f"--force could not verify holder PID identities for {mp}; no processes killed.", 'WARN')
+                return []
+            log(
+                f"--force enabled: sending SIGKILL to verified holder PIDs: "
+                f"{', '.join(str(p) for p in guarded)}",
+                'WARN',
+            )
             chunk_size = 64
-            for i in range(0, len(pids), chunk_size):
-                chunk = pids[i:i+chunk_size]
+            verified = [
+                pid for pid, start in guarded.items()
+                if _pid_start_time(pid) == start
+            ]
+            for i in range(0, len(verified), chunk_size):
+                chunk = verified[i:i+chunk_size]
                 run_command(['kill', '-9'] + [str(p) for p in chunk], sudo=True, check=False)
-            return pids
+            return verified
 
         def _dm_mapper_name_from_kname(kname):
             k = str(kname or "").strip()
@@ -1462,6 +1550,12 @@ class MountingCommands:
 
         if not new_label:
             print(f"Label for {name} ({fstype}): {current_label if current_label else '<none>'}")
+            return
+
+        try:
+            new_label = validate_filesystem_label(new_label, fstype)
+        except ValueError as exc:
+            log(f"Invalid filesystem label: {exc}", 'ERROR')
             return
 
         label_changed = False

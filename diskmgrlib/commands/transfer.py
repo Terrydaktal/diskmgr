@@ -1,6 +1,15 @@
 """TransferCommands command implementations."""
 
-from ..common import *
+import argparse
+import cmd
+import os
+import re
+import shlex
+import subprocess
+import sys
+import threading
+import time
+from ..runtime import Colors, _fmt_hms, log, popen_command, run_command
 from ..shell_core import CmdArgumentParser
 
 
@@ -73,6 +82,11 @@ class TransferCommands:
         # Ensure trailing slashes so rsync copies directory CONTENTS.
         src_path = pri_mnt.rstrip('/') + '/'
         dst_path = sec_mnt.rstrip('/') + '/'
+        src_real = os.path.realpath(pri_mnt)
+        dst_real = os.path.realpath(sec_mnt)
+        if src_real == dst_real or dst_real.startswith(src_real.rstrip('/') + os.sep) or src_real.startswith(dst_real.rstrip('/') + os.sep):
+            log("OPERATION BLOCKED: sync source and destination overlap. Choose two separate directory trees.", 'ERROR')
+            return
         root_source_excludes = []
         root_source_flags = []
         if os.path.realpath(pri_mnt) == '/':
@@ -94,11 +108,9 @@ class TransferCommands:
         if root_source_excludes:
             print("Root source detected: auto-excluding /proc, /sys, /run, /dev, /tmp, /mnt, /media")
             print("Root source detected: using --one-file-system to avoid crossing mountpoints")
-        run_command(['sudo', '-v'])
-
         # Pre-scan before confirmation to compute planned bytes for stable progress.
         log("Running pre-scan (dry-run) to compute planned transfer...")
-        pre_cmd = ['rsync', '-anHS'] + root_source_flags + ['--delete', '--stats'] + root_source_excludes + [src_path, dst_path]
+        pre_cmd = ['rsync', '-anHS', '--protect-args', '--sparse'] + root_source_flags + ['--delete', '--stats'] + root_source_excludes + [src_path, dst_path]
         pre_res = run_command(pre_cmd, sudo=True, check=False)
         pre_rc = getattr(pre_res, 'returncode', 0)
         pre_out = (getattr(pre_res, 'stdout', '') or '') + "\n" + (getattr(pre_res, 'stderr', '') or '')
@@ -131,17 +143,19 @@ class TransferCommands:
         if not self.extensive_confirm(secondary):
             return
 
-        run_command(['sudo', '-v'])
         log(f"Starting rsync: {primary} -> {secondary}...")
         start_ts = time.time()
 
+        proc = None
+        progress_stop = threading.Event()
         try:
             cmd = [
-                'sudo', 'rsync', '-aH',
+                'rsync', '-aH', '--protect-args',
                 '--info=progress2,stats2,name0',
             ] + root_source_flags + ['--sparse', '--delete'] + root_source_excludes + [src_path, dst_path]
-            proc = subprocess.Popen(
+            proc = popen_command(
                 cmd,
+                sudo=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
@@ -149,7 +163,6 @@ class TransferCommands:
             )
 
             done_bytes = 0
-            progress_stop = threading.Event()
             progress_lock = threading.Lock()
 
             def _fmt_speed_bps(bps):
@@ -265,6 +278,16 @@ class TransferCommands:
         except Exception as e:
             log(f"Sync failed: {e}", 'ERROR')
         finally:
+            progress_stop.set()
+            if proc is not None and proc.poll() is None:
+                try:
+                    proc.terminate()
+                    proc.wait(timeout=2)
+                except Exception:
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
             print(f"Duration: {_fmt_hms(time.time() - start_ts)}")
 
     def do_diff(self, arg):
@@ -329,6 +352,11 @@ class TransferCommands:
 
         src_path = pri_mnt.rstrip('/') + '/'
         dst_path = sec_mnt.rstrip('/') + '/'
+        src_real = os.path.realpath(pri_mnt)
+        dst_real = os.path.realpath(sec_mnt)
+        if src_real == dst_real or dst_real.startswith(src_real.rstrip('/') + os.sep) or src_real.startswith(dst_real.rstrip('/') + os.sep):
+            log("OPERATION BLOCKED: diff source and destination overlap. Choose two separate directory trees.", 'ERROR')
+            return
         root_source_excludes = []
         root_source_flags = []
         if os.path.realpath(pri_mnt) == '/':
@@ -356,15 +384,13 @@ class TransferCommands:
         if checksum_mode:
             print("  Comparison mode: checksum/content-based (rsync -c).")
 
-        run_command(['sudo', '-v'])
-
         if fast_mode:
             if dirs_only:
                 log("--fast ignores -d/--dirs-only.", 'WARN')
             if depth != 2:
                 log("--fast ignores --depth.", 'WARN')
 
-            fast_cmd = ['rsync', '-anHS'] + root_source_flags
+            fast_cmd = ['rsync', '-anHS', '--protect-args', '--sparse'] + root_source_flags
             if checksum_mode:
                 fast_cmd.append('-c')
             fast_cmd.extend(['--delete', '--stats'])
@@ -404,6 +430,15 @@ class TransferCommands:
 
         def _norm_relpath(p):
             p = (p or '').strip()
+            # rsync escapes control bytes in names as backslash-octal tokens
+            # (for example ``\#011`` for a tab). Decode only that transport
+            # representation after splitting the tab-delimited record.
+            def _decode_escape(match):
+                try:
+                    return chr(int(match.group(1), 8))
+                except ValueError:
+                    return match.group(0)
+            p = re.sub(r"\\#([0-7]{3})", _decode_escape, p)
             while p.startswith('./'):
                 p = p[2:]
             return p
@@ -659,7 +694,7 @@ class TransferCommands:
         total_upd = 0
         total_del = 0
 
-        cmd = ['sudo', 'rsync', '-anHS'] + root_source_flags
+        cmd = ['rsync', '-anHS', '--protect-args', '--sparse'] + root_source_flags
         if checksum_mode:
             cmd.append('-c')
         cmd.extend([
@@ -669,6 +704,7 @@ class TransferCommands:
         cmd.extend(root_source_excludes)
         cmd.extend([src_path, dst_path])
         stderr_lines = []
+        parse_incomplete = False
 
         def _drain_stderr(stream, sink):
             try:
@@ -677,8 +713,9 @@ class TransferCommands:
             except Exception:
                 pass
 
-        proc = subprocess.Popen(
+        proc = popen_command(
             cmd,
+            sudo=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -724,6 +761,7 @@ class TransferCommands:
 
             parts = line.split('\t', 2)
             if len(parts) < 3:
+                parse_incomplete = True
                 continue
             item = parts[0].strip()
             lraw = parts[1].strip()
@@ -783,6 +821,12 @@ class TransferCommands:
 
         if rc not in (0, 24):
             log(f"rsync dry-run exited with status {rc}. Output may be incomplete.", 'WARN')
+            parse_incomplete = True
+        elif rc == 24:
+            parse_incomplete = True
+            log("rsync dry-run saw files vanish during the scan; reported totals are incomplete. Re-run diff on a quiescent tree.", 'WARN')
+        if parse_incomplete:
+            print("WARNING: diff could not guarantee a complete filename-safe scan; totals may be incomplete.", file=sys.stderr)
         err = "".join(stderr_lines)
         if err.strip():
             print(err.rstrip(), file=sys.stderr)

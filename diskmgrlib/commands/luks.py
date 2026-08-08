@@ -1,7 +1,17 @@
 """LuksCommands command implementations."""
 
-from ..common import *
+import argparse
+import cmd
+import os
+import re
+import shlex
+import tempfile
+from pathlib import Path
+from ..runtime import LUKS_HEADER_BACKUP_DIR, LUKS_PBKDF_DEFAULT_THREADS, LUKS_PBKDF_DEFAULT_TIME, PASSGEN_BIN, log, run_command
 from ..shell_core import CmdArgumentParser
+from ..mappings import validate_mapping_name
+from ..runtime import sanitize_terminal_text
+from ..safety import validate_absolute_path
 
 
 class LuksCommands:
@@ -103,6 +113,11 @@ class LuksCommands:
                 return
 
             name = parsed.name
+            try:
+                name = validate_mapping_name(name)
+            except ValueError as exc:
+                log(f"Invalid mapping name: {exc}", 'ERROR')
+                return
             src = self.resolve_target(name, allow_id=False)
             if not src:
                 log(f"Unknown mapping: '{name}'.", 'ERROR')
@@ -185,6 +200,11 @@ class LuksCommands:
                 return
 
             name = sub_args[0]
+            try:
+                name = validate_mapping_name(name)
+            except ValueError as exc:
+                log(f"Invalid mapping name: {exc}", 'ERROR')
+                return
             kv_tokens = sub_args[1:]
             opts = {
                 'time': str(LUKS_PBKDF_DEFAULT_TIME),
@@ -290,15 +310,29 @@ class LuksCommands:
                 log("Usage: luks backup <name> [filename]", 'ERROR')
                 return
             name = sub_args[0]
+            try:
+                name = validate_mapping_name(name)
+            except ValueError as exc:
+                log(f"Invalid mapping name: {exc}", 'ERROR')
+                return
             if len(sub_args) > 1:
-                filename = os.path.expanduser(sub_args[1])
+                filename = validate_absolute_path(
+                    os.path.abspath(os.path.expanduser(sub_args[1])), 'header backup path'
+                )
             else:
                 try:
                     LUKS_HEADER_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
                 except Exception as e:
                     log(f"Failed to create default backup directory {LUKS_HEADER_BACKUP_DIR}: {e}", 'ERROR')
                     return
-                filename = str(LUKS_HEADER_BACKUP_DIR / name)
+                filename = validate_absolute_path(
+                    str(LUKS_HEADER_BACKUP_DIR / name), 'header backup path'
+                )
+            try:
+                Path(filename).parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            except Exception as exc:
+                log(f"Could not prepare header backup directory: {exc}", 'ERROR')
+                return
             src = self.resolve_target(name)
             if not src:
                 log(f"Unknown target: '{name}'", 'ERROR')
@@ -322,8 +356,20 @@ class LuksCommands:
                 log("Usage: luks restore <name> <filename>", 'ERROR')
                 return
             name, filename = sub_args[0], sub_args[1]
-            if not os.path.exists(filename):
+            try:
+                name = validate_mapping_name(name)
+                filename = validate_absolute_path(
+                    os.path.abspath(os.path.expanduser(filename)), 'header backup path',
+                    allow_missing=False,
+                )
+            except ValueError as exc:
+                log(f"Invalid LUKS restore path: {exc}", 'ERROR')
+                return
+            if not os.path.isfile(filename):
                 log(f"Backup file not found: {filename}", 'ERROR')
+                return
+            if os.path.getsize(filename) <= 0 or os.path.getsize(filename) > 128 * 1024 * 1024:
+                log("Backup file size is outside the safe LUKS-header range.", 'ERROR')
                 return
             src = self.resolve_target(name)
             if not src:
@@ -332,20 +378,46 @@ class LuksCommands:
             devnode = os.path.realpath(src)
             if self._block_if_root_drive(devnode, f"luks restore {name}"):
                 return
+            preflight = self._destructive_safety_preflight(devnode)
+            if not preflight.get('ok'):
+                for error in preflight.get('errors') or ['unknown safety probe failure']:
+                    log(f"RESTORE BLOCKED: {error}", 'ERROR')
+                return
+            self._format_print_preflight(preflight)
+            if self._active_use_present(preflight.get('active')):
+                log("RESTORE BLOCKED: target or a child is active. Close/unmount it first.", 'ERROR')
+                self._format_release_device_lock(preflight.get('lock_fd'))
+                return
             log(f"RESTORE WARNING: About to overwrite LUKS header on {name} ({devnode}) using {filename}")
             if not self.extensive_confirm(name):
+                self._format_release_device_lock(preflight.get('lock_fd'))
                 return
-            run_command(['sudo', '-v'])
+            stable, postflight = self._destructive_revalidate(preflight, preflight.get('lock_fd'))
+            if not stable:
+                for error in postflight.get('errors') or ['target changed after confirmation']:
+                    log(f"RESTORE BLOCKED after confirmation: {error}", 'ERROR')
+                self._format_release_device_lock(preflight.get('lock_fd'))
+                return
             try:
                 run_command(['cryptsetup', 'luksHeaderRestore', devnode, '--header-backup-file', filename], sudo=True)
+                verify = run_command(['cryptsetup', 'isLuks', devnode], sudo=True, check=False)
+                if getattr(verify, 'returncode', 1) != 0:
+                    raise RuntimeError("restored header is not recognized as a LUKS device")
                 log("Header restore completed successfully.")
             except Exception as e:
                 log(f"Restore failed: {e}", 'ERROR')
+            finally:
+                self._format_release_device_lock(preflight.get('lock_fd'))
         elif subcmd == 'header':
             if not sub_args:
                 log("Usage: luks header <name>", 'ERROR')
                 return
             name = sub_args[0]
+            try:
+                name = validate_mapping_name(name)
+            except ValueError as exc:
+                log(f"Invalid mapping name: {exc}", 'ERROR')
+                return
             src = self.resolve_target(name)
             if not src:
                 log(f"Unknown target: '{name}'", 'ERROR')
@@ -360,7 +432,7 @@ class LuksCommands:
             log(f"Printing LUKS header for {name} ({devnode})...")
             try:
                 dump = run_command(['cryptsetup', 'luksDump', devnode], sudo=True, capture_output=True)
-                print(getattr(dump, 'stdout', '') or "")
+                print(sanitize_terminal_text(getattr(dump, 'stdout', '') or ""))
             except Exception as e:
                 log(f"Failed to print LUKS header: {e}", 'ERROR')
         elif subcmd == 'wipe':
@@ -368,6 +440,11 @@ class LuksCommands:
                 log("Usage: luks wipe <name>", 'ERROR')
                 return
             name = sub_args[0]
+            try:
+                name = validate_mapping_name(name)
+            except ValueError as exc:
+                log(f"Invalid mapping name: {exc}", 'ERROR')
+                return
             src = self.resolve_target(name)
             if not src:
                 log(f"Unknown target: '{name}'", 'ERROR')
@@ -381,51 +458,34 @@ class LuksCommands:
                 log(f"Device {devnode} is not a valid LUKS device.", 'ERROR')
                 return
 
-            # Safety: do not wipe while an active dm-crypt mapping holds this source device.
-            src_kname = os.path.basename(devnode)
-            holders_dir = f"/sys/class/block/{src_kname}/holders"
-            active_holders = []
-            try:
-                for h in sorted(os.listdir(holders_dir)) if os.path.isdir(holders_dir) else []:
-                    dm_name_file = f"/sys/class/block/{h}/dm/name"
-                    friendly = h
-                    try:
-                        if os.path.isfile(dm_name_file):
-                            with open(dm_name_file, 'r', encoding='utf-8', errors='replace') as f_dm:
-                                txt = f_dm.read().strip()
-                                if txt:
-                                    friendly = txt
-                    except Exception:
-                        pass
-                    active_holders.append(friendly)
-            except Exception:
-                pass
-
-            if active_holders:
-                log(
-                    f"Refusing to wipe LUKS header while device is in use by active mapper(s): {', '.join(active_holders)}. "
-                    f"Close it first (example: close {name}).",
-                    'ERROR'
-                )
+            preflight = self._destructive_safety_preflight(devnode)
+            if not preflight.get('ok'):
+                for error in preflight.get('errors') or ['unknown safety probe failure']:
+                    log(f"WIPE BLOCKED: {error}", 'ERROR')
+                return
+            self._format_print_preflight(preflight)
+            if self._active_use_present(preflight.get('active')):
+                log("WIPE BLOCKED: target or a child is active. Close/unmount it first.", 'ERROR')
+                self._format_release_device_lock(preflight.get('lock_fd'))
                 return
 
             # Determine how much of the start of the device to wipe:
             # use data-segment offset from luksDump when available; fallback to 16 MiB.
-            wipe_bytes = 16 * 1024 * 1024
             try:
                 dump = run_command(['cryptsetup', 'luksDump', devnode], sudo=True, capture_output=True, check=False)
-                if getattr(dump, 'returncode', 1) == 0:
-                    out = getattr(dump, 'stdout', '') or ''
-                    m = re.search(r'^\s*offset:\s*([0-9]+)\s+\[bytes\]', out, flags=re.MULTILINE)
-                    if m:
-                        wipe_bytes = int(m.group(1))
-                else:
-                    log("Could not parse luksDump offset; using fallback wipe span of 16 MiB.", 'WARN')
-            except Exception:
-                log("Could not inspect luksDump; using fallback wipe span of 16 MiB.", 'WARN')
-
-            if wipe_bytes <= 0:
-                wipe_bytes = 16 * 1024 * 1024
+                if getattr(dump, 'returncode', 1) != 0:
+                    raise RuntimeError("cryptsetup luksDump failed")
+                out = getattr(dump, 'stdout', '') or ''
+                offsets = [int(value) for value in re.findall(
+                    r'^\s*offset:\s*([0-9]+)\s+\[bytes\]', out, flags=re.MULTILINE
+                )]
+                if not offsets or offsets[0] <= 0 or offsets[0] > 128 * 1024 * 1024:
+                    raise RuntimeError("could not determine a bounded LUKS data offset")
+                wipe_bytes = offsets[0]
+            except Exception as exc:
+                log(f"WIPE BLOCKED: refusing to guess the LUKS header span: {exc}", 'ERROR')
+                self._format_release_device_lock(preflight.get('lock_fd'))
+                return
             bs = 4096
             blocks = max(1, (wipe_bytes + bs - 1) // bs)
             wipe_len = blocks * bs
@@ -437,20 +497,31 @@ class LuksCommands:
             )
             log("This is destructive and intended only for detached-header/restore testing.", 'WARN')
             if not self.extensive_confirm(f"luks wipe {name} ({devnode})"):
+                self._format_release_device_lock(preflight.get('lock_fd'))
                 return
 
-            run_command(['sudo', '-v'])
             try:
+                stable, postflight = self._destructive_revalidate(preflight, preflight.get('lock_fd'))
+                if not stable:
+                    for error in postflight.get('errors') or ['target changed after confirmation']:
+                        log(f"WIPE BLOCKED after confirmation: {error}", 'ERROR')
+                    return
                 run_command(
-                    ['dd', 'if=/dev/urandom', f'of={devnode}', f'bs={bs}', f'count={blocks}', 'conv=notrunc,fsync', 'status=progress'],
+                    ['dd', 'if=/dev/urandom', f'of={devnode}', f'bs={bs}', f'count={blocks}',
+                     'iflag=fullblock', 'conv=notrunc,fsync', 'status=progress'],
                     sudo=True,
                     capture_output=False
                 )
-                run_command(['sync'], sudo=True, check=False, capture_output=False)
+                run_command(['sync'], sudo=True, capture_output=False)
+                verify = run_command(['cryptsetup', 'isLuks', devnode], sudo=True, check=False)
+                if getattr(verify, 'returncode', 0) == 0:
+                    raise RuntimeError("LUKS signature is still recognized after header wipe")
                 log(f"LUKS header wipe completed: wrote {wipe_len:,} bytes of random data to {devnode}.")
                 log("Device should now fail on-disk-header unlock until restored or opened with detached header.", 'WARN')
             except Exception as e:
                 log(f"LUKS header wipe failed: {e}", 'ERROR')
+            finally:
+                self._format_release_device_lock(preflight.get('lock_fd'))
         else:
             log(f"Unknown LUKS subcommand: {subcmd}", 'ERROR')
             self.do_help('luks')

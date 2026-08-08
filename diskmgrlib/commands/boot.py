@@ -1,6 +1,16 @@
 """BootCommands command implementations."""
 
-from ..common import *
+from pathlib import Path
+import cmd
+import os
+import re
+import shutil
+import subprocess
+import tempfile
+import time
+from ..runtime import Colors, log, run_command, run_command_bytes
+from ..devices import _lsblk_pttype, _sysfs_block_name, _sysfs_to_parent_disk_name
+from ..mappings import get_map_file_path
 from ..shell_core import CmdArgumentParser
 
 
@@ -161,7 +171,6 @@ class BootCommands:
             if not disk_devs:
                 print(f"{Colors.WARNING}No local whole-disk block devices found for BIOS core scan.{Colors.ENDC}")
             else:
-                run_command(['sudo', '-v'])
                 ts = int(time.time())
 
                 def _read_bytes(path):
@@ -240,6 +249,8 @@ class BootCommands:
 
                 def _extract_embedded_core(input_img, out_core, use_lzma2=False):
                     marker = b"sector sizes of %d bytes aren't supported yet"
+                    max_output_bytes = 64 * 1024 * 1024
+                    max_probe_output_bytes = 8 * 1024 * 1024
                     if not os.path.exists(input_img):
                         return False, f"input image does not exist: {input_img}", None
                     if shutil.which('xz') is None:
@@ -263,9 +274,12 @@ class BootCommands:
                     def _spawn_xz(off):
                         dd_proc = None
                         try:
+                            timeout_bin = shutil.which('timeout')
+                            timeout_prefix = [timeout_bin, '--kill-after=1s', '3s'] if timeout_bin else []
+                            xz_command = timeout_prefix + ['xz', '--decompress', '--stdout', '--format=raw', lzma_arg]
                             if off == 0:
                                 xz_proc = subprocess.Popen(
-                                    ['xz', '--decompress', '--stdout', '--format=raw', lzma_arg, input_img],
+                                    xz_command + [input_img],
                                     stdout=subprocess.PIPE,
                                     stderr=subprocess.DEVNULL
                                 )
@@ -276,7 +290,7 @@ class BootCommands:
                                 dd_cmd = ['dd', f'if={input_img}', f'bs={off}', 'skip=1', 'status=none']
                             dd_proc = subprocess.Popen(dd_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
                             xz_proc = subprocess.Popen(
-                                ['xz', '--decompress', '--stdout', '--format=raw', lzma_arg],
+                                xz_command,
                                 stdin=dd_proc.stdout,
                                 stdout=subprocess.PIPE,
                                 stderr=subprocess.DEVNULL
@@ -327,10 +341,14 @@ class BootCommands:
                             return False, None
                         found = False
                         tail = b''
+                        output_bytes = 0
                         try:
                             while True:
                                 chunk = xz_proc.stdout.read(65536)
                                 if not chunk:
+                                    break
+                                output_bytes += len(chunk)
+                                if output_bytes > max_probe_output_bytes:
                                     break
                                 window = tail + chunk
                                 if marker in window:
@@ -363,10 +381,14 @@ class BootCommands:
                             return False, None
                         try:
                             with open(out_core, 'wb') as f_out:
+                                output_bytes = 0
                                 while True:
                                     chunk = xz_proc.stdout.read(65536)
                                     if not chunk:
                                         break
+                                    output_bytes += len(chunk)
+                                    if output_bytes > max_output_bytes:
+                                        return False, f"extracted core exceeded {max_output_bytes} bytes"
                                     f_out.write(chunk)
                         except Exception as e:
                             _cleanup_procs(dd_proc, xz_proc)
@@ -379,18 +401,15 @@ class BootCommands:
                             return False, None
                         return True, None
 
-                    offsets = [0]
-                    max_scan = 20000
                     # Prefer offsets commonly seen in BIOS MBR-gap embeddings.
                     # 3344 is the gap-relative form of the previously common 3856
                     # first-2048 offset (minus 512-byte MBR sector).
                     common = [3344, 3328, 3392, 3584, 3840, 3856, 4096]
+                    offsets = []
                     for c in common:
-                        if 2 <= c <= max_scan and c not in offsets:
-                            offsets.append(c)
-                    for off in range(2, max_scan + 1, 2):
-                        if off not in offsets:
-                            offsets.append(off)
+                        for off in range(max(0, c - 512), c + 513, 16):
+                            if off not in offsets:
+                                offsets.append(off)
 
                     for off in offsets:
                         found, probe_err = _probe_marker(off)
@@ -492,34 +511,43 @@ class BootCommands:
                             first_start = s
 
                     base = os.path.basename(disk_dev)
+                    dump_dir = tempfile.mkdtemp(prefix=f"diskmgr_coreimg_{os.getpid()}_{ts}_{base}_", dir='/tmp')
+                    os.chmod(dump_dir, 0o700)
                     stage1_state = None
                     stage15_state = None
                     raw_gap = None
 
                     # Method 0: MBR/sector0 signature (Stage 1).
-                    raw_mbr = f"/tmp/diskmgr_coreimg_{os.getpid()}_{ts}_{base}_mbr.bin"
-                    res_mbr = run_command(
-                        ['dd', f'if={disk_dev}', f'of={raw_mbr}', 'bs=512', 'count=1', 'status=none'],
+                    raw_mbr = os.path.join(dump_dir, f"{base}_mbr.bin")
+                    res_mbr = run_command_bytes(
+                        ['dd', f'if={disk_dev}', 'bs=512', 'count=1', 'status=none'],
                         sudo=True,
-                        check=False
+                        check=False,
                     )
-                    if getattr(res_mbr, 'returncode', 1) == 0:
+                    if getattr(res_mbr, 'returncode', 1) == 0 and getattr(res_mbr, 'stdout', b''):
+                        Path(raw_mbr).write_bytes(res_mbr.stdout)
                         stage1_state = _report_raw_scan(f"MBR sector 0 on {disk_dev}", raw_mbr, 'stage1')
                     else:
                         print(f"  {Colors.WARNING}Failed sector0/MBR dump on {disk_dev}.{Colors.ENDC}")
 
                     # Method 1: post-MBR gap (sector 1 .. first partition start-1).
                     if first_start is not None and first_start > 1:
-                        gap_count = max(1, first_start - 1)
-                        raw_gap = f"/tmp/diskmgr_coreimg_{os.getpid()}_{ts}_{base}_gap.bin"
-                        res_gap = run_command(
-                            ['dd', f'if={disk_dev}', f'of={raw_gap}', 'bs=512', 'skip=1', f'count={gap_count}', 'status=none'],
+                        # A malformed partition table must not turn this diagnostic
+                        # into an unbounded read of a whole disk. Normal BIOS gaps
+                        # are far below this limit.
+                        max_gap_sectors = 131072  # 64 MiB at 512-byte sectors
+                        gap_count = min(max(1, first_start - 1), max_gap_sectors)
+                        gap_end = gap_count
+                        raw_gap = os.path.join(dump_dir, f"{base}_gap.bin")
+                        res_gap = run_command_bytes(
+                            ['dd', f'if={disk_dev}', 'bs=512', 'skip=1', f'count={gap_count}', 'status=none'],
                             sudo=True,
-                            check=False
+                            check=False,
                         )
-                        if getattr(res_gap, 'returncode', 1) == 0:
+                        if getattr(res_gap, 'returncode', 1) == 0 and getattr(res_gap, 'stdout', b''):
+                            Path(raw_gap).write_bytes(res_gap.stdout)
                             stage15_state = _report_raw_scan(
-                                f"MBR/post-MBR gap on {disk_dev} (sectors 1..{first_start - 1})",
+                                f"MBR/post-MBR gap on {disk_dev} (sectors 1..{gap_end})",
                                 raw_gap,
                                 'stage15'
                             )
@@ -534,14 +562,14 @@ class BootCommands:
                     elif not raw_gap or not os.path.exists(raw_gap):
                         print(f"  {Colors.WARNING}Skipping embedded core extraction (no usable MBR gap dump).{Colors.ENDC}")
                     else:
-                        out_lzma1 = f"/tmp/diskmgr_coreimg_{os.getpid()}_{ts}_{base}_core_lzma1.bin"
+                        out_lzma1 = os.path.join(dump_dir, f"{base}_core_lzma1.bin")
                         ok1, msg1, off1 = _extract_embedded_core(raw_gap, out_lzma1, use_lzma2=False)
                         if ok1:
                             print("  Embedded core extraction (LZMA1): SUCCESS")
                             _report_core_hints(out_lzma1, msg1, off1)
                         else:
                             print(f"  Embedded core extraction (LZMA1): {Colors.WARNING}not found{Colors.ENDC}")
-                            out_lzma2 = f"/tmp/diskmgr_coreimg_{os.getpid()}_{ts}_{base}_core_lzma2.bin"
+                            out_lzma2 = os.path.join(dump_dir, f"{base}_core_lzma2.bin")
                             ok2, msg2, off2 = _extract_embedded_core(raw_gap, out_lzma2, use_lzma2=True)
                             if ok2:
                                 print("  Embedded core extraction (LZMA2): SUCCESS")
@@ -636,8 +664,8 @@ class BootCommands:
                 try:
                     if cfg_path.exists():
                         print(f"  {Colors.OKGREEN}Result: Found GRUB config at {display_path}{Colors.ENDC}")
-                        cmd = ['sudo', 'awk', '-F', "'", awk_script, str(cfg_path)]
-                        res = run_command(cmd, capture_output=True)
+                        cmd = ['awk', '-F', "'", awk_script, str(cfg_path)]
+                        res = run_command(cmd, sudo=True, capture_output=True)
 
                         if res.stdout.strip():
                             entries = {}

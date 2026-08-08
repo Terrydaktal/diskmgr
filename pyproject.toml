@@ -1,0 +1,12 @@
+[project]
+name = "diskmgr"
+version = "3.6.6"
+description = "Safety-focused disk, filesystem, and LUKS management shell"
+requires-python = ">=3.12"
+dependencies = []
+
+[project.scripts]
+diskmgr = "diskmgrlib.app:main"
+
+[tool.uv]
+package = false
